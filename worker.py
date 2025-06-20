@@ -1,7 +1,8 @@
 # worker.py - VÉGLEGES JAVÍTOTT VERZIÓ
 # Javítva: Streaming listener `AttributeError`, "sticky key" hiba, visszaváltási logika, egér-akadás.
 
-import socket, json, time, threading, logging, tkinter
+import socket, time, threading, logging, tkinter, queue, struct
+import msgpack
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
@@ -115,11 +116,13 @@ class KVMWorker(QObject):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
                 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 server_socket.bind(('', self.settings['port']))
                 server_socket.listen(1)
                 logging.info(f"TCP szerver elindítva a {self.settings['port']} porton.")
                 while self._running:
                     self.client_socket, addr = server_socket.accept()
+                    self.client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     logging.info(f"Kliens csatlakozva: {addr}.")
                     self.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
                     while self._running and self.client_socket:
@@ -201,12 +204,33 @@ class KVMWorker(QObject):
         last_pos = {'x': center_x, 'y': center_y}
         is_warping = False
 
+        send_queue = queue.Queue()
+
+        def sender():
+            while self.kvm_active and self._running:
+                try:
+                    payload = send_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if payload is None:
+                    break
+                try:
+                    self.client_socket.sendall(struct.pack('!I', len(payload)) + payload)
+                except Exception:
+                    self.deactivate_kvm()
+                    break
+
+        sender_thread = threading.Thread(target=sender, daemon=True)
+        sender_thread.start()
+
         def send(data):
-            if not self.kvm_active: return False
+            if not self.kvm_active:
+                return False
             try:
-                self.client_socket.sendall(json.dumps(data).encode('utf-8') + b'\n')
+                packed = msgpack.packb(data, use_bin_type=True)
+                send_queue.put(packed)
                 return True
-            except:
+            except Exception:
                 self.deactivate_kvm()
                 return False
 
@@ -291,7 +315,7 @@ class KVMWorker(QObject):
         k_listener.start()
         
         while self.kvm_active and self._running:
-            time.sleep(0.1)
+            time.sleep(0.01)
 
         for ktype, kval in list(pressed_keys):
             send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
@@ -299,6 +323,8 @@ class KVMWorker(QObject):
 
         m_listener.stop()
         k_listener.stop()
+        send_queue.put(None)
+        sender_thread.join()
         logging.info("Streaming listenerek leálltak.")
 
     def run_client(self):
@@ -331,38 +357,53 @@ class KVMWorker(QObject):
         button_map = {'left': mouse.Button.left, 'right': mouse.Button.right, 'middle': mouse.Button.middle}
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 s.connect((server_ip, self.settings['port']))
                 logging.info("TCP kapcsolat sikeres.")
                 self.status_update.emit(f"Csatlakozva. Irányítás átvéve.")
-                fileobj = s.makefile('r')
-                with fileobj:
-                    for line in fileobj:
-                        if not self._running: break
-                        try:
-                            data = json.loads(line.strip())
-                            event_type = data.get('type')
-                            if event_type == 'move_relative':
-                                mouse_controller.move(data['dx'], data['dy'])
-                            elif event_type == 'click':
-                                b=button_map.get(data['button'])
-                                if b:
-                                    (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
-                            elif event_type == 'scroll':
-                                mouse_controller.scroll(data['dx'], data['dy'])
-                            elif event_type == 'key':
-                                k_info=data['key']
-                                if data['key_type'] == 'char':
-                                    k_press = k_info
-                                elif data['key_type'] == 'special':
-                                    k_press = getattr(keyboard.Key, k_info, None)
-                                elif data['key_type'] == 'vk':
-                                    k_press = keyboard.KeyCode.from_vk(int(k_info))
-                                else:
-                                    k_press = None
-                                if k_press:
-                                    (keyboard_controller.press if data['pressed'] else keyboard_controller.release)(k_press)
-                        except (json.JSONDecodeError, AttributeError):
-                            logging.warning(f"Hibás adatcsomag: {line.strip()}")
+
+                def recv_all(sock, n):
+                    data = b''
+                    while len(data) < n:
+                        chunk = sock.recv(n - len(data))
+                        if not chunk:
+                            return None
+                        data += chunk
+                    return data
+
+                while self._running:
+                    raw_len = recv_all(s, 4)
+                    if not raw_len:
+                        break
+                    msg_len = struct.unpack('!I', raw_len)[0]
+                    payload = recv_all(s, msg_len)
+                    if payload is None:
+                        break
+                    try:
+                        data = msgpack.unpackb(payload, raw=False)
+                        event_type = data.get('type')
+                        if event_type == 'move_relative':
+                            mouse_controller.move(data['dx'], data['dy'])
+                        elif event_type == 'click':
+                            b = button_map.get(data['button'])
+                            if b:
+                                (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
+                        elif event_type == 'scroll':
+                            mouse_controller.scroll(data['dx'], data['dy'])
+                        elif event_type == 'key':
+                            k_info = data['key']
+                            if data['key_type'] == 'char':
+                                k_press = k_info
+                            elif data['key_type'] == 'special':
+                                k_press = getattr(keyboard.Key, k_info, None)
+                            elif data['key_type'] == 'vk':
+                                k_press = keyboard.KeyCode.from_vk(int(k_info))
+                            else:
+                                k_press = None
+                            if k_press:
+                                (keyboard_controller.press if data['pressed'] else keyboard_controller.release)(k_press)
+                    except Exception:
+                        logging.warning("Hibás adatcsomag")
         except Exception as e:
             logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
             self.status_update.emit(f"Kapcsolat sikertelen: {e}")
