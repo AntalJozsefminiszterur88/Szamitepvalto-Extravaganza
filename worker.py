@@ -354,6 +354,7 @@ class KVMWorker(QObject):
     def connect_to_server(self, server_ip):
         mouse_controller = mouse.Controller()
         keyboard_controller = keyboard.Controller()
+        pressed_keys = set()
         button_map = {'left': mouse.Button.left, 'right': mouse.Button.right, 'middle': mouse.Button.middle}
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -401,9 +402,21 @@ class KVMWorker(QObject):
                             else:
                                 k_press = None
                             if k_press:
-                                (keyboard_controller.press if data['pressed'] else keyboard_controller.release)(k_press)
+                                if data['pressed']:
+                                    keyboard_controller.press(k_press)
+                                    pressed_keys.add(k_press)
+                                else:
+                                    keyboard_controller.release(k_press)
+                                    pressed_keys.discard(k_press)
                     except Exception:
                         logging.warning("Hibás adatcsomag")
         except Exception as e:
             logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
             self.status_update.emit(f"Kapcsolat sikertelen: {e}")
+        finally:
+            for k in list(pressed_keys):
+                try:
+                    keyboard_controller.release(k)
+                except Exception:
+                    pass
+            self.release_hotkey_keys()
