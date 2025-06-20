@@ -7,7 +7,7 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal
-from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1
+from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1, VK_F12
 
 class KVMWorker(QObject):
     finished = Signal()
@@ -136,15 +136,35 @@ class KVMWorker(QObject):
                 logging.error(f"Hiba a kliens fogadásakor: {e}", exc_info=True)
 
     def monitor_client(self, sock, addr):
-        """Monitor a single client connection and remove it on disconnect."""
+        """Monitor a single client connection, handle commands and remove it on disconnect."""
+        sock.settimeout(1.0)
+        buffer = b''
         try:
             while self._running:
                 try:
-                    if sock.recv(1, socket.MSG_PEEK) == b'':
+                    chunk = sock.recv(4096)
+                    if not chunk:
                         break
+                    buffer += chunk
+                    while len(buffer) >= 4:
+                        msg_len = struct.unpack('!I', buffer[:4])[0]
+                        if len(buffer) < 4 + msg_len:
+                            break
+                        payload = buffer[4:4 + msg_len]
+                        buffer = buffer[4 + msg_len:]
+                        try:
+                            data = msgpack.unpackb(payload, raw=False)
+                            cmd = data.get('command')
+                            if cmd == 'switch_elitedesk':
+                                self.toggle_kvm_active(True)
+                            elif cmd == 'switch_laptop':
+                                self.toggle_kvm_active(False)
+                        except Exception:
+                            logging.warning("Hibas parancs a klienstol")
+                except socket.timeout:
+                    continue
                 except (socket.error, BrokenPipeError):
                     break
-                time.sleep(1)
         finally:
             logging.warning(f"Kliens lecsatlakozott: {addr}.")
             try:
@@ -387,12 +407,38 @@ class KVMWorker(QObject):
         keyboard_controller = keyboard.Controller()
         pressed_keys = set()
         button_map = {'left': mouse.Button.left, 'right': mouse.Button.right, 'middle': mouse.Button.middle}
+        hk_listener = None
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 s.connect((server_ip, self.settings['port']))
                 logging.info("TCP kapcsolat sikeres.")
                 self.status_update.emit(f"Csatlakozva. Irányítás átvéve.")
+
+                def send_command(cmd):
+                    try:
+                        packed = msgpack.packb({'command': cmd}, use_bin_type=True)
+                        s.sendall(struct.pack('!I', len(packed)) + packed)
+                    except Exception:
+                        logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
+
+                hotkey_cmd_l = {keyboard.Key.ctrl_l, keyboard.Key.shift_l, keyboard.KeyCode.from_vk(VK_F12)}
+                hotkey_cmd_r = {keyboard.Key.ctrl_r, keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
+                pressed_ids = set()
+
+                def get_id(key):
+                    return key.vk if hasattr(key, 'vk') and key.vk is not None else key
+
+                def hk_press(key):
+                    pressed_ids.add(get_id(key))
+                    if hotkey_cmd_l.issubset(pressed_ids) or hotkey_cmd_r.issubset(pressed_ids):
+                        send_command('switch_elitedesk')
+
+                def hk_release(key):
+                    pressed_ids.discard(get_id(key))
+
+                hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
+                hk_listener.start()
 
                 def recv_all(sock, n):
                     data = b''
@@ -448,6 +494,11 @@ class KVMWorker(QObject):
             for k in list(pressed_keys):
                 try:
                     keyboard_controller.release(k)
+                except Exception:
+                    pass
+            if hk_listener is not None:
+                try:
+                    hk_listener.stop()
                 except Exception:
                     pass
             self.release_hotkey_keys()
