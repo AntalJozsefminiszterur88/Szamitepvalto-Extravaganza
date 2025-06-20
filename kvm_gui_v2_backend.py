@@ -116,9 +116,15 @@ class KVMWorker(QObject):
                 self.status_update.emit(f"Monitor hiba: {e}"); logging.error(f"Monitor hiba: {e}")
     
     def start_kvm_streaming(self):
-        logging.info("Irányítás átadása megkezdve."); try:
-            with list(get_monitors())[0] as m: m.set_input_source(self.settings['monitor_codes']['client'])
-        except Exception as e: logging.error(f"Monitor hiba: {e}"); self.status_update.emit(f"Monitor hiba: {e}"); self.toggle_kvm_active(); return
+        logging.info("Irányítás átadása megkezdve.")
+        try:
+            with list(get_monitors())[0] as m:
+                m.set_input_source(self.settings['monitor_codes']['client'])
+        except Exception as e:
+            logging.error(f"Monitor hiba: {e}")
+            self.status_update.emit(f"Monitor hiba: {e}")
+            self.toggle_kvm_active()
+            return
         last_pos = {'x': 0, 'y': 0}
         def send(data):
             try: self.client_socket.sendall(json.dumps(data).encode('utf-8') + b'\n'); return True

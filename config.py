@@ -13,3 +13,4 @@ SERVICE_NAME_PREFIX = "KVM Switch Adó"
 # Gyorsbillentyű virtuális kódjai
 VK_CTRL = 162
 VK_NUMPAD0 = 96
+VK_NUMPAD1 = 97
