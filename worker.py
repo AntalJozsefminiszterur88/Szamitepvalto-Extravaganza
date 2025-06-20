@@ -18,8 +18,8 @@ class KVMWorker(QObject):
         self.settings = settings
         self._running = True
         self.kvm_active = False
-        self.client_socket = None  # outgoing connection to remote server
-        self.server_client_socket = None  # incoming connection from remote
+        # Active client connections (multiple receivers can connect)
+        self.client_sockets = []
         self.pynput_listeners = []
         self.zeroconf = Zeroconf()
         self.streaming_thread = None
@@ -51,10 +51,10 @@ class KVMWorker(QObject):
                 listener.stop()
             except:
                 pass
-        if self.client_socket:
+        for sock in list(getattr(self, 'client_sockets', [])):
             try:
-                self.client_socket.close()
-            except:
+                sock.close()
+            except Exception:
                 pass
 
     def run(self):
@@ -124,27 +124,41 @@ class KVMWorker(QObject):
                 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 server_socket.bind(('', self.settings['port']))
-                server_socket.listen(1)
+                server_socket.listen(5)
                 logging.info(f"TCP szerver elindítva a {self.settings['port']} porton.")
+
                 while self._running:
-                    self.server_client_socket, addr = server_socket.accept()
-                    self.server_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    client_sock, addr = server_socket.accept()
+                    client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self.client_sockets.append(client_sock)
                     logging.info(f"Kliens csatlakozva: {addr}.")
                     self.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
-                    while self._running and self.server_client_socket:
-                        try:
-                            if self.server_client_socket.recv(1, socket.MSG_PEEK) == b'':
-                                break
-                        except (socket.error, BrokenPipeError):
-                            break
-                        time.sleep(1)
-                    logging.warning("Kliens lecsatlakozott.")
-                    if self.kvm_active:
-                        self.deactivate_kvm()
-                    self.server_client_socket = None
+
+                    threading.Thread(target=self.monitor_client, args=(client_sock, addr), daemon=True).start()
         except Exception as e:
             if self._running:
                 logging.error(f"Hiba a kliens fogadásakor: {e}", exc_info=True)
+
+    def monitor_client(self, sock, addr):
+        """Monitor a single client connection and remove it on disconnect."""
+        try:
+            while self._running:
+                try:
+                    if sock.recv(1, socket.MSG_PEEK) == b'':
+                        break
+                except (socket.error, BrokenPipeError):
+                    break
+                time.sleep(1)
+        finally:
+            logging.warning(f"Kliens lecsatlakozott: {addr}.")
+            try:
+                sock.close()
+            except Exception:
+                pass
+            if sock in self.client_sockets:
+                self.client_sockets.remove(sock)
+            if self.kvm_active and not self.client_sockets:
+                self.deactivate_kvm()
 
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
@@ -155,7 +169,7 @@ class KVMWorker(QObject):
         self.release_hotkey_keys()
 
     def activate_kvm(self, switch_monitor=True):
-        if not self.client_socket:
+        if not self.client_sockets:
             self.status_update.emit("Hiba: Nincs csatlakozott kliens a váltáshoz!")
             logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
             return
@@ -220,9 +234,20 @@ class KVMWorker(QObject):
                     continue
                 if payload is None:
                     break
-                try:
-                    self.client_socket.sendall(struct.pack('!I', len(payload)) + payload)
-                except Exception:
+                to_remove = []
+                for sock in list(self.client_sockets):
+                    try:
+                        sock.sendall(struct.pack('!I', len(payload)) + payload)
+                    except Exception:
+                        to_remove.append(sock)
+                for s in to_remove:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                    if s in self.client_sockets:
+                        self.client_sockets.remove(s)
+                if to_remove and not self.client_sockets:
                     self.deactivate_kvm()
                     break
 
