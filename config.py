@@ -11,6 +11,7 @@ SERVICE_TYPE = "_kvmswitch._tcp.local."
 SERVICE_NAME_PREFIX = "KVM Switch Adó"
 
 # Gyorsbillentyű virtuális kódjai
-VK_CTRL = 162
+VK_CTRL = 162  # bal Ctrl
+VK_CTRL_R = 163  # jobb Ctrl
 VK_NUMPAD0 = 96
 VK_NUMPAD1 = 97
