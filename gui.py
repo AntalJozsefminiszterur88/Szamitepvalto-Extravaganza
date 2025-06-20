@@ -64,8 +64,10 @@ class MainWindow(QMainWindow):
         role_layout = QVBoxLayout()
         self.radio_ado = QRadioButton("Adó (ez a gép irányít)")
         self.radio_vevo = QRadioButton("Vevő (ezt a gépet irányítják)")
+        self.radio_both = QRadioButton("Mindkettő (bárhonnan)")
         role_layout.addWidget(self.radio_ado)
         role_layout.addWidget(self.radio_vevo)
+        role_layout.addWidget(self.radio_both)
         role_box.setLayout(role_layout)
         main_layout.addWidget(role_box)
 
@@ -114,8 +116,14 @@ class MainWindow(QMainWindow):
         self.init_tray_icon()
         self.load_settings()
     def get_settings(self):
+        if self.radio_ado.isChecked():
+            role = 'ado'
+        elif self.radio_vevo.isChecked():
+            role = 'vevo'
+        else:
+            role = 'both'
         return {
-            'role': 'ado' if self.radio_ado.isChecked() else 'vevo',
+            'role': role,
             'port': int(self.port.text()),
             'monitor_codes': {
                 'host': int(self.host_code.text()),
@@ -151,7 +159,13 @@ class MainWindow(QMainWindow):
         self.set_controls_enabled(True)
     def save_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
-        settings.setValue("role/is_ado", self.radio_ado.isChecked())
+        if self.radio_ado.isChecked():
+            role = 'ado'
+        elif self.radio_vevo.isChecked():
+            role = 'vevo'
+        else:
+            role = 'both'
+        settings.setValue("role/mode", role)
         settings.setValue("network/port", self.port.text())
         settings.setValue("monitor/host_code", self.host_code.text())
         settings.setValue("monitor/client_code", self.client_code.text())
@@ -164,9 +178,10 @@ class MainWindow(QMainWindow):
             logging.error(f"Nem sikerült az autostart beállítása: {e}")
     def load_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
-        is_ado = settings.value("role/is_ado", True, type=bool)
-        self.radio_ado.setChecked(is_ado)
-        self.radio_vevo.setChecked(not is_ado)
+        mode = settings.value("role/mode", "ado")
+        self.radio_ado.setChecked(mode == 'ado')
+        self.radio_vevo.setChecked(mode == 'vevo')
+        self.radio_both.setChecked(mode == 'both')
         self.port.setText(settings.value("network/port", str(DEFAULT_PORT)))
         self.host_code.setText(settings.value("monitor/host_code", "17"))
         self.client_code.setText(settings.value("monitor/client_code", "18"))
@@ -174,6 +189,8 @@ class MainWindow(QMainWindow):
             settings.value("other/autostart", False, type=bool)
         )
         self.radio_ado.toggled.connect(self.save_settings)
+        self.radio_vevo.toggled.connect(self.save_settings)
+        self.radio_both.toggled.connect(self.save_settings)
         self.port.textChanged.connect(self.save_settings)
         self.host_code.textChanged.connect(self.save_settings)
         self.client_code.textChanged.connect(self.save_settings)
@@ -181,6 +198,7 @@ class MainWindow(QMainWindow):
     def set_controls_enabled(self, enabled):
         self.radio_ado.setEnabled(enabled)
         self.radio_vevo.setEnabled(enabled)
+        self.radio_both.setEnabled(enabled)
         self.port.setEnabled(enabled)
         self.host_code.setEnabled(enabled)
         self.client_code.setEnabled(enabled)
