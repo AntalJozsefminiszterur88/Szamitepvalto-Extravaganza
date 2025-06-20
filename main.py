@@ -4,7 +4,9 @@
 import sys
 import logging
 from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
 from gui import MainWindow
+from config import ICON_PATH
 
 # A naplózást itt, a legfelső szinten állítjuk be.
 logging.basicConfig(
@@ -19,6 +21,7 @@ logging.basicConfig(
 if __name__ == "__main__":
     logging.info("Alkalmazás indítása...")
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(ICON_PATH))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
