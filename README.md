@@ -62,3 +62,6 @@ application logs activity to `kvm_switch.log` and stores settings via
 `QSettings`. Use the interface to configure host and client codes, select the
 operating mode (host or client) and start or stop the KVM service.
 
+The host server now accepts multiple client connections simultaneously. All
+connected receivers will get the forwarded input events.
+
