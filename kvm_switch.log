@@ -1,0 +1,25 @@
+2025-06-20 20:01:41,568 - INFO - MainThread - Alkalmazás indítása...
+2025-06-20 20:01:43,118 - INFO - Dummy-2 - Worker elindítva ado módban.
+2025-06-20 20:01:43,134 - INFO - AcceptThread - TCP szerver elindítva a 65432 porton.
+2025-06-20 20:01:43,987 - INFO - Dummy-2 - Zeroconf szolgáltatás regisztrálva.
+2025-06-20 20:01:43,988 - INFO - MainThread - GUI Status Update: Adó szolgáltatás regisztrálva. Gyorsbillentyû: Ctrl + Numpad 0
+2025-06-20 20:01:44,085 - INFO - Dummy-2 - Gyorsbillentyû figyelõ elindítva.
+2025-06-20 20:01:49,615 - INFO - AcceptThread - Kliens csatlakozva: ('192.168.0.12', 49452).
+2025-06-20 20:01:49,627 - INFO - MainThread - GUI Status Update: Kliens csatlakozva: ('192.168.0.12', 49452). Várakozás gyorsbillentyûre.
+2025-06-20 20:01:51,076 - INFO - Thread-3 - !!! Gyorsbillentyû-kombináció ÉSZLELVE! Váltás... !!!
+2025-06-20 20:01:51,145 - INFO - Thread-3 - KVM aktiválva.
+2025-06-20 20:01:51,146 - INFO - MainThread - GUI Status Update: Állapot: Aktív...
+2025-06-20 20:01:51,155 - INFO - StreamingThread - Irányítás átadása megkezdve.
+2025-06-20 20:01:55,564 - ERROR - Thread-5 - Hiba az on_key függvényben: 'KeyCode' object has no attribute 'name'
+Traceback (most recent call last):
+  File "C:\Users\vatib\Projects\Számótépváltó-Extravaganza\worker.py", line 215, in on_key
+    key_val = k.name
+              ^^^^^^
+AttributeError: 'KeyCode' object has no attribute 'name'
+2025-06-20 20:02:14,946 - INFO - MainThread - stop() metódus meghívva.
+2025-06-20 20:02:15,000 - INFO - MainThread - GUI Status Update: Állapot: Inaktív...
+2025-06-20 20:02:15,011 - INFO - MainThread - KVM deaktiválva.
+2025-06-20 20:02:15,023 - INFO - StreamingThread - Streaming listenerek leálltak.
+2025-06-20 20:02:15,115 - INFO - Dummy-2 - Adó szolgáltatás leállt.
+2025-06-20 20:02:15,297 - WARNING - AcceptThread - Kliens lecsatlakozott.
+2025-06-20 20:02:15,306 - INFO - MainThread - GUI Status Update: Állapot: Inaktív
