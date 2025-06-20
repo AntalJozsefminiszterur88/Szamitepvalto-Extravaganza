@@ -28,6 +28,18 @@ python build_exe.py
 The script ensures PyInstaller is installed and bundles `main.py` into a single
 `exe` without showing a console window on startup.
 
+## Building a Linux executable
+
+On Windows systems with the Windows Subsystem for Linux (WSL) installed you can
+create a Linux binary using the `build_linux.bat` script:
+
+```cmd
+build_linux.bat
+```
+
+The batch file runs PyInstaller inside WSL and places the resulting executable
+in the `dist` directory.
+
 ## Installation
 
 Install the required Python packages using `pip`:
