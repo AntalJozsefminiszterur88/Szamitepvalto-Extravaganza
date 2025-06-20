@@ -6,7 +6,7 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal
-from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_NUMPAD0
+from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_NUMPAD0, VK_NUMPAD1
 
 class KVMWorker(QObject):
     finished = Signal()
@@ -21,6 +21,7 @@ class KVMWorker(QObject):
         self.pynput_listeners = []
         self.zeroconf = Zeroconf()
         self.streaming_thread = None
+        self.switch_monitor = True
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -61,11 +62,13 @@ class KVMWorker(QObject):
             port=self.settings['port']
         )
         self.zeroconf.register_service(info)
-        self.status_update.emit(f"Adó szolgáltatás regisztrálva. Gyorsbillentyű: Ctrl + Numpad 0")
+        self.status_update.emit(f"Adó szolgáltatás regisztrálva. Gyorsbillentyű: Laptop - Ctrl + Numpad 0, ElitDesk - Ctrl + Numpad 1")
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        hotkey_ids = {keyboard.Key.ctrl_l, 96}
-        hotkey_ids_r = {keyboard.Key.ctrl_r, 96}
+        hotkey_laptop = {keyboard.Key.ctrl_l, VK_NUMPAD0}
+        hotkey_laptop_r = {keyboard.Key.ctrl_r, VK_NUMPAD0}
+        hotkey_elitdesk = {keyboard.Key.ctrl_l, VK_NUMPAD1}
+        hotkey_elitdesk_r = {keyboard.Key.ctrl_r, VK_NUMPAD1}
         current_pressed_ids = set()
 
         def get_id(key):
@@ -74,9 +77,12 @@ class KVMWorker(QObject):
         def on_press(key):
             key_id = get_id(key)
             current_pressed_ids.add(key_id)
-            if hotkey_ids.issubset(current_pressed_ids) or hotkey_ids_r.issubset(current_pressed_ids):
-                logging.info("!!! Gyorsbillentyű-kombináció ÉSZLELVE! Váltás... !!!")
-                self.toggle_kvm_active()
+            if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
+                logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
+                self.toggle_kvm_active(False)
+            elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
+                logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
+                self.toggle_kvm_active(True)
 
         def on_release(key):
             key_id = get_id(key)
@@ -118,31 +124,34 @@ class KVMWorker(QObject):
             if self._running:
                 logging.error(f"Hiba a kliens fogadásakor: {e}", exc_info=True)
 
-    def toggle_kvm_active(self):
+    def toggle_kvm_active(self, switch_monitor=True):
+        """Toggle KVM state with optional monitor switching."""
         if not self.kvm_active:
-            self.activate_kvm()
+            self.activate_kvm(switch_monitor=switch_monitor)
         else:
-            self.deactivate_kvm()
+            self.deactivate_kvm(switch_monitor=switch_monitor)
 
-    def activate_kvm(self):
+    def activate_kvm(self, switch_monitor=True):
         if not self.client_socket:
             self.status_update.emit("Hiba: Nincs csatlakozott kliens a váltáshoz!")
             logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
             return
-        
+
+        self.switch_monitor = switch_monitor
         self.kvm_active = True
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
         self.streaming_thread = threading.Thread(target=self.start_kvm_streaming, daemon=True, name="StreamingThread")
         self.streaming_thread.start()
 
-    def deactivate_kvm(self, switch_monitor=True):
+    def deactivate_kvm(self, switch_monitor=None):
         self.kvm_active = False
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
-        
+
         # A monitor visszaváltást a toggle metódus végzi, miután a streaming szál leállt
-        if switch_monitor:
+        switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
+        if switch:
             # Itt egy kis időt adunk a streaming szálnak a leállásra, mielőtt váltunk
             time.sleep(0.2)
             try:
@@ -155,14 +164,15 @@ class KVMWorker(QObject):
     
     def start_kvm_streaming(self):
         logging.info("Irányítás átadása megkezdve.")
-        try:
-            with list(get_monitors())[0] as monitor:
-                monitor.set_input_source(self.settings['monitor_codes']['client'])
-        except Exception as e:
-            logging.error(f"Monitor hiba: {e}", exc_info=True)
-            self.status_update.emit(f"Monitor hiba: {e}")
-            self.deactivate_kvm()
-            return
+        if getattr(self, 'switch_monitor', True):
+            try:
+                with list(get_monitors())[0] as monitor:
+                    monitor.set_input_source(self.settings['monitor_codes']['client'])
+            except Exception as e:
+                logging.error(f"Monitor hiba: {e}", exc_info=True)
+                self.status_update.emit(f"Monitor hiba: {e}")
+                self.deactivate_kvm()
+                return
         
         host_mouse_controller = mouse.Controller()
         try:
