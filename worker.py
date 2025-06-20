@@ -206,15 +206,22 @@ class KVMWorker(QObject):
             send({'type':'scroll','dx':dx,'dy':dy})
         
         def on_key(k, p):
+            """Forward keyboard events to the client without raising errors."""
             try:
-                if hasattr(k, 'char') and k.char is not None:
-                    key_type = 'char'
+                if hasattr(k, "char") and k.char is not None:
+                    key_type = "char"
                     key_val = k.char
-                else:
-                    key_type = 'special'
+                elif hasattr(k, "name"):
+                    key_type = "special"
                     key_val = k.name
-                
-                if not send({'type': 'key', 'key_type': key_type, 'key': key_val, 'pressed': p}):
+                elif hasattr(k, "vk"):
+                    key_type = "vk"
+                    key_val = k.vk
+                else:
+                    logging.warning(f"Ismeretlen billentyű: {k}")
+                    return False
+
+                if not send({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
                     return False
             except Exception as e:
                 logging.error(f"Hiba az on_key függvényben: {e}", exc_info=True)
@@ -283,7 +290,14 @@ class KVMWorker(QObject):
                                 mouse_controller.scroll(data['dx'], data['dy'])
                             elif event_type == 'key':
                                 k_info=data['key']
-                                k_press = k_info if data['key_type']=='char' else getattr(keyboard.Key, k_info, None)
+                                if data['key_type'] == 'char':
+                                    k_press = k_info
+                                elif data['key_type'] == 'special':
+                                    k_press = getattr(keyboard.Key, k_info, None)
+                                elif data['key_type'] == 'vk':
+                                    k_press = keyboard.KeyCode.from_vk(int(k_info))
+                                else:
+                                    k_press = None
                                 if k_press:
                                     (keyboard_controller.press if data['pressed'] else keyboard_controller.release)(k_press)
                         except (json.JSONDecodeError, AttributeError):
