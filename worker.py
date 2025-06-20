@@ -205,6 +205,8 @@ class KVMWorker(QObject):
         def on_scroll(x,y,dx,dy):
             send({'type':'scroll','dx':dx,'dy':dy})
         
+        pressed_keys = set()
+
         def on_key(k, p):
             """Forward keyboard events to the client without raising errors."""
             try:
@@ -221,6 +223,12 @@ class KVMWorker(QObject):
                     logging.warning(f"Ismeretlen billentyű: {k}")
                     return False
 
+                key_id = (key_type, key_val)
+                if p:
+                    pressed_keys.add(key_id)
+                else:
+                    pressed_keys.discard(key_id)
+
                 if not send({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
                     return False
             except Exception as e:
@@ -235,7 +243,11 @@ class KVMWorker(QObject):
         
         while self.kvm_active and self._running:
             time.sleep(0.1)
-        
+
+        for ktype, kval in list(pressed_keys):
+            send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
+        pressed_keys.clear()
+
         m_listener.stop()
         k_listener.stop()
         logging.info("Streaming listenerek leálltak.")
