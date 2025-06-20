@@ -23,6 +23,17 @@ class KVMWorker(QObject):
         self.streaming_thread = None
         self.switch_monitor = True
 
+    def release_hotkey_keys(self):
+        """Release potential stuck hotkey keys."""
+        kc = keyboard.Controller()
+        for k in [keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
+                  keyboard.KeyCode.from_vk(VK_NUMPAD0),
+                  keyboard.KeyCode.from_vk(VK_NUMPAD1)]:
+            try:
+                kc.release(k)
+            except Exception:
+                pass
+
     def stop(self):
         logging.info("stop() metódus meghívva.")
         self._running = False
@@ -80,9 +91,11 @@ class KVMWorker(QObject):
             if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 self.toggle_kvm_active(False)
+                self.release_hotkey_keys()
             elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
                 self.toggle_kvm_active(True)
+                self.release_hotkey_keys()
 
         def on_release(key):
             key_id = get_id(key)
@@ -130,6 +143,7 @@ class KVMWorker(QObject):
             self.activate_kvm(switch_monitor=switch_monitor)
         else:
             self.deactivate_kvm(switch_monitor=switch_monitor)
+        self.release_hotkey_keys()
 
     def activate_kvm(self, switch_monitor=True):
         if not self.client_socket:
@@ -225,15 +239,6 @@ class KVMWorker(QObject):
                 return key.value.vk
             return None
 
-        def release_hotkey_keys():
-            kc = keyboard.Controller()
-            for k in [keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
-                      keyboard.KeyCode.from_vk(VK_NUMPAD0),
-                      keyboard.KeyCode.from_vk(VK_NUMPAD1)]:
-                try:
-                    kc.release(k)
-                except Exception:
-                    pass
 
         def on_key(k, p):
             """Forward keyboard events to the client and kezelje a gyorsbillentyűt."""
@@ -246,11 +251,11 @@ class KVMWorker(QObject):
                         current_vks.discard(vk)
 
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD0 in current_vks):
-                    release_hotkey_keys()
+                    self.release_hotkey_keys()
                     self.toggle_kvm_active(False)
                     return
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD1 in current_vks):
-                    release_hotkey_keys()
+                    self.release_hotkey_keys()
                     self.toggle_kvm_active(True)
                     return
 
