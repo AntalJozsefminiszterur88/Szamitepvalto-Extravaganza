@@ -65,3 +65,9 @@ operating mode (host or client) and start or stop the KVM service.
 The host server now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
+### Remote switching
+
+When controlling the laptop, press **Ctrl + Shift + F12** to immediately switch
+control to the EliteDesk. The laptop client sends a command back to the host,
+which activates the EliteDesk as the new target.
+

@@ -15,6 +15,7 @@ VK_CTRL = 162  # bal Ctrl
 VK_CTRL_R = 163  # jobb Ctrl
 VK_NUMPAD0 = 96
 VK_NUMPAD1 = 97
+VK_F12 = 123
 
 # Program icon path
 ICON_PATH = "keyboard_mouse_switch_icon.ico"
