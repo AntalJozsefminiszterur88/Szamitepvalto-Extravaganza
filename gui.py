@@ -64,10 +64,8 @@ class MainWindow(QMainWindow):
         role_layout = QVBoxLayout()
         self.radio_ado = QRadioButton("Adó (ez a gép irányít)")
         self.radio_vevo = QRadioButton("Vevő (ezt a gépet irányítják)")
-        self.radio_both = QRadioButton("Mindkettő (bárhonnan)")
         role_layout.addWidget(self.radio_ado)
         role_layout.addWidget(self.radio_vevo)
-        role_layout.addWidget(self.radio_both)
         role_box.setLayout(role_layout)
         main_layout.addWidget(role_box)
 
@@ -118,10 +116,8 @@ class MainWindow(QMainWindow):
     def get_settings(self):
         if self.radio_ado.isChecked():
             role = 'ado'
-        elif self.radio_vevo.isChecked():
-            role = 'vevo'
         else:
-            role = 'both'
+            role = 'vevo'
         return {
             'role': role,
             'port': int(self.port.text()),
@@ -161,10 +157,8 @@ class MainWindow(QMainWindow):
         settings = QSettings(ORG_NAME, APP_NAME)
         if self.radio_ado.isChecked():
             role = 'ado'
-        elif self.radio_vevo.isChecked():
-            role = 'vevo'
         else:
-            role = 'both'
+            role = 'vevo'
         settings.setValue("role/mode", role)
         settings.setValue("network/port", self.port.text())
         settings.setValue("monitor/host_code", self.host_code.text())
@@ -181,7 +175,6 @@ class MainWindow(QMainWindow):
         mode = settings.value("role/mode", "ado")
         self.radio_ado.setChecked(mode == 'ado')
         self.radio_vevo.setChecked(mode == 'vevo')
-        self.radio_both.setChecked(mode == 'both')
         self.port.setText(settings.value("network/port", str(DEFAULT_PORT)))
         self.host_code.setText(settings.value("monitor/host_code", "17"))
         self.client_code.setText(settings.value("monitor/client_code", "18"))
@@ -190,7 +183,6 @@ class MainWindow(QMainWindow):
         )
         self.radio_ado.toggled.connect(self.save_settings)
         self.radio_vevo.toggled.connect(self.save_settings)
-        self.radio_both.toggled.connect(self.save_settings)
         self.port.textChanged.connect(self.save_settings)
         self.host_code.textChanged.connect(self.save_settings)
         self.client_code.textChanged.connect(self.save_settings)
@@ -198,7 +190,6 @@ class MainWindow(QMainWindow):
     def set_controls_enabled(self, enabled):
         self.radio_ado.setEnabled(enabled)
         self.radio_vevo.setEnabled(enabled)
-        self.radio_both.setEnabled(enabled)
         self.port.setEnabled(enabled)
         self.host_code.setEnabled(enabled)
         self.client_code.setEnabled(enabled)

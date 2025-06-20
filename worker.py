@@ -61,11 +61,7 @@ class KVMWorker(QObject):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
         if self.settings['role'] == 'ado':
             self.run_server()
-        elif self.settings['role'] == 'vevo':
-            self.run_client()
-        else:  # both roles
-            server_thread = threading.Thread(target=self.run_server, daemon=True, name="ServerThread")
-            server_thread.start()
+        else:
             self.run_client()
         self.finished.emit()
 
