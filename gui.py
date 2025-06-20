@@ -185,7 +185,6 @@ class MainWindow(QMainWindow):
         self.host_code.setEnabled(enabled)
         self.client_code.setEnabled(enabled)
         self.autostart_check.setEnabled(enabled)
-        self.start_button.setEnabled(enabled)
     def on_status_update(self, message):
         self.status_label.setText(message)
         logging.info(f"GUI Status Update: {message}")
