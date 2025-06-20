@@ -6,7 +6,7 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal
-from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_NUMPAD0, VK_NUMPAD1
+from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1
 
 class KVMWorker(QObject):
     finished = Signal()
@@ -216,10 +216,44 @@ class KVMWorker(QObject):
             send({'type':'scroll','dx':dx,'dy':dy})
         
         pressed_keys = set()
+        current_vks = set()
+
+        def get_vk(key):
+            if hasattr(key, "vk") and key.vk is not None:
+                return key.vk
+            if hasattr(key, "value") and hasattr(key.value, "vk"):
+                return key.value.vk
+            return None
+
+        def release_hotkey_keys():
+            kc = keyboard.Controller()
+            for k in [keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
+                      keyboard.KeyCode.from_vk(VK_NUMPAD0),
+                      keyboard.KeyCode.from_vk(VK_NUMPAD1)]:
+                try:
+                    kc.release(k)
+                except Exception:
+                    pass
 
         def on_key(k, p):
-            """Forward keyboard events to the client without raising errors."""
+            """Forward keyboard events to the client and kezelje a gyorsbillentyűt."""
             try:
+                vk = get_vk(k)
+                if vk is not None:
+                    if p:
+                        current_vks.add(vk)
+                    else:
+                        current_vks.discard(vk)
+
+                if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD0 in current_vks):
+                    release_hotkey_keys()
+                    self.toggle_kvm_active(False)
+                    return
+                if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD1 in current_vks):
+                    release_hotkey_keys()
+                    self.toggle_kvm_active(True)
+                    return
+
                 if hasattr(k, "char") and k.char is not None:
                     key_type = "char"
                     key_val = k.char
