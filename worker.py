@@ -18,11 +18,13 @@ class KVMWorker(QObject):
         self.settings = settings
         self._running = True
         self.kvm_active = False
-        self.client_socket = None
+        self.client_socket = None  # outgoing connection to remote server
+        self.server_client_socket = None  # incoming connection from remote
         self.pynput_listeners = []
         self.zeroconf = Zeroconf()
         self.streaming_thread = None
         self.switch_monitor = True
+        self.local_ip = socket.gethostbyname(socket.gethostname())
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys."""
@@ -59,7 +61,11 @@ class KVMWorker(QObject):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
         if self.settings['role'] == 'ado':
             self.run_server()
-        else:
+        elif self.settings['role'] == 'vevo':
+            self.run_client()
+        else:  # both roles
+            server_thread = threading.Thread(target=self.run_server, daemon=True, name="ServerThread")
+            server_thread.start()
             self.run_client()
         self.finished.emit()
 
@@ -121,13 +127,13 @@ class KVMWorker(QObject):
                 server_socket.listen(1)
                 logging.info(f"TCP szerver elindítva a {self.settings['port']} porton.")
                 while self._running:
-                    self.client_socket, addr = server_socket.accept()
-                    self.client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self.server_client_socket, addr = server_socket.accept()
+                    self.server_client_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     logging.info(f"Kliens csatlakozva: {addr}.")
                     self.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
-                    while self._running and self.client_socket:
+                    while self._running and self.server_client_socket:
                         try:
-                            if self.client_socket.recv(1, socket.MSG_PEEK) == b'':
+                            if self.server_client_socket.recv(1, socket.MSG_PEEK) == b'':
                                 break
                         except (socket.error, BrokenPipeError):
                             break
@@ -135,7 +141,7 @@ class KVMWorker(QObject):
                     logging.warning("Kliens lecsatlakozott.")
                     if self.kvm_active:
                         self.deactivate_kvm()
-                    self.client_socket = None
+                    self.server_client_socket = None
         except Exception as e:
             if self._running:
                 logging.error(f"Hiba a kliens fogadásakor: {e}", exc_info=True)
@@ -334,11 +340,15 @@ class KVMWorker(QObject):
                 self.server_ip = None
             def add_service(self, zc, type, name):
                 info = zc.get_service_info(type, name)
-                if info and self.server_ip is None:
-                    self.server_ip=socket.inet_ntoa(info.addresses[0])
-                    logging.info(f"Adó szolgáltatás megtalálva a {self.server_ip} címen.")
-                    self.worker.status_update.emit(f"Adó megtalálva: {self.server_ip}. Csatlakozás...")
-                    threading.Thread(target=self.worker.connect_to_server, args=(self.server_ip,), daemon=True, name="ConnectThread").start()
+                if info:
+                    ip = socket.inet_ntoa(info.addresses[0])
+                    if ip == self.worker.local_ip:
+                        return  # ignore our own service
+                    if self.server_ip is None:
+                        self.server_ip = ip
+                        logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
+                        self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
+                        threading.Thread(target=self.worker.connect_to_server, args=(ip,), daemon=True, name="ConnectThread").start()
             def update_service(self, zc, type, name):
                 pass
             def remove_service(self, zc, type, name):
