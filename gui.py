@@ -14,6 +14,9 @@ from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
 
 def set_autostart(enabled):
     """Be- vagy kikapcsolja az automatikus indulást a Windows Registry-ben."""
+    if not sys.platform.startswith("win"):
+        logging.info("Autostart beállítás kihagyva: nem Windows platform.")
+        return
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
     app_name = "KVM_Switch"
     try:
