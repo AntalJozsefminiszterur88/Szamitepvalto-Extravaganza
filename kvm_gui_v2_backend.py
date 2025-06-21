@@ -7,6 +7,7 @@ import time
 import socket
 import json
 import threading
+import os
 import logging
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
@@ -18,11 +19,14 @@ from PySide6.QtCore import QSize, QSettings, QThread, QObject, Signal
 from config import ICON_PATH
 
 # --- NAPLÓZÁS BEÁLLÍTÁSA ---
+log_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+log_file = os.path.join(log_dir, "kvm_switch.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
     handlers=[
-        logging.FileHandler("kvm_switch.log"), # Naplózás fájlba
+        logging.FileHandler(log_file),  # Naplózás fájlba
         logging.StreamHandler(sys.stdout)     # Naplózás a konzolra is
     ]
 )
