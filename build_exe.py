@@ -27,6 +27,8 @@ def build():
         "Szamitepvalto-Extravaganza",
         "--icon",
         "keyboard_mouse_switch_icon.ico",
+        "--add-data",
+        "keyboard_mouse_switch_icon.ico;.",
         "main.py",
     ]
     subprocess.check_call(cmd)

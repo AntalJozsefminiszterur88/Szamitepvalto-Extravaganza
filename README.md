@@ -26,8 +26,9 @@ python build_exe.py
 ```
 
 The script ensures PyInstaller is installed and bundles `main.py` into a single
-`exe` named `Szamitepvalto-Extravaganza.exe` with the icon from
-`keyboard_mouse_switch_icon.ico`. The console window is hidden on startup.
+`exe` named `Szamitepvalto-Extravaganza.exe`. The icon from
+`keyboard_mouse_switch_icon.ico` is included using the `--add-data` option so it
+is available at runtime. The console window is hidden on startup.
 
 ## Building a Linux executable
 
