@@ -275,8 +275,16 @@ class KVMWorker(QObject):
         self.kvm_active = True
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
-        self.streaming_thread = threading.Thread(target=self.start_kvm_streaming, daemon=True, name="StreamingThread")
+        self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
         self.streaming_thread.start()
+
+    def _streaming_loop(self):
+        """Keep streaming active and restart if it stops unexpectedly."""
+        while self.kvm_active and self._running:
+            self.start_kvm_streaming()
+            if self.kvm_active and self._running:
+                logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
+                time.sleep(1)
 
     def deactivate_kvm(self, switch_monitor=None):
         self.kvm_active = False
