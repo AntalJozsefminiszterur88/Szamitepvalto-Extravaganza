@@ -3,3 +3,4 @@ pynput
 zeroconf
 monitorcontrol
 msgpack
+pyperclip
