@@ -4,6 +4,7 @@
 import sys
 import time
 import logging
+import os
 
 # Windows specific module only available on that platform
 if sys.platform.startswith("win"):
@@ -41,7 +42,8 @@ def set_autostart(enabled: bool) -> None:
         try:
             reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
             if enabled:
-                app_path = f'"{sys.executable}" "{__file__}"'
+                script = os.path.join(os.path.dirname(__file__), "main.py")
+                app_path = f'"{sys.executable}" "{script}" --tray'
                 winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, app_path)
                 logging.info("Automatikus indulás bekapcsolva. Útvonal: %s", app_path)
             else:
@@ -53,14 +55,14 @@ def set_autostart(enabled: bool) -> None:
         except Exception as e:  # pragma: no cover - platform specific
             logging.error("Hiba az automatikus indulás beállításakor: %s", e)
     elif sys.platform.startswith("linux"):
-        import os
 
         autostart_dir = os.path.join(os.path.expanduser("~"), ".config", "autostart")
         os.makedirs(autostart_dir, exist_ok=True)
         desktop_file = os.path.join(autostart_dir, "KVM_Switch.desktop")
 
         if enabled:
-            exec_cmd = f"{sys.executable} {os.path.abspath(__file__)}"
+            script = os.path.join(os.path.dirname(__file__), "main.py")
+            exec_cmd = f"{sys.executable} {script} --tray"
             desktop_contents = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
