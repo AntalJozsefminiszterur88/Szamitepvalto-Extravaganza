@@ -476,25 +476,22 @@ class KVMWorker(QObject):
                         current_vks.discard(vk)
 
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD0 in current_vks):
-                    self.toggle_kvm_active(False)
-                    # ensure hotkey keys are released on the client
-                    for vk_code in [VK_CTRL, VK_CTRL_R]:
+                    # send key releases before disabling streaming so the client doesn't
+                    # get stuck with modifiers held down
+                    for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD0]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
-                    send({"type": "key", "key_type": "vk", "key": VK_NUMPAD0, "pressed": False})
-                    pressed_keys.discard(("vk", VK_NUMPAD0))
                     current_vks.clear()
+                    self.toggle_kvm_active(False)
                     return
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD1 in current_vks):
-                    self.toggle_kvm_active(True)
-                    for vk_code in [VK_CTRL, VK_CTRL_R]:
+                    for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD1]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
-                    send({"type": "key", "key_type": "vk", "key": VK_NUMPAD1, "pressed": False})
-                    pressed_keys.discard(("vk", VK_NUMPAD1))
                     current_vks.clear()
+                    self.toggle_kvm_active(True)
                     return
 
                 if hasattr(k, "char") and k.char is not None:
