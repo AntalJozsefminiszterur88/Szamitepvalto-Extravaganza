@@ -46,10 +46,15 @@ class KVMWorker(QObject):
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys."""
         kc = keyboard.Controller()
-        for k in [keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
-                  keyboard.KeyCode.from_vk(VK_NUMPAD0),
-                  keyboard.KeyCode.from_vk(VK_NUMPAD1)]:
+        keys = [
+            keyboard.Key.ctrl_l,
+            keyboard.Key.ctrl_r,
+            keyboard.KeyCode.from_vk(VK_NUMPAD0),
+            keyboard.KeyCode.from_vk(VK_NUMPAD1),
+        ]
+        for k in keys:
             try:
+                kc.press(k)
                 kc.release(k)
             except Exception:
                 pass
@@ -99,6 +104,8 @@ class KVMWorker(QObject):
         self.active_client = None
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
+        # Extra safety to avoid stuck modifier keys on exit
+        self.release_hotkey_keys()
 
     def run(self):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
@@ -288,6 +295,8 @@ class KVMWorker(QObject):
             except Exception as e:
                 self.status_update.emit(f"Monitor hiba: {e}")
                 logging.error(f"Monitor hiba: {e}", exc_info=True)
+        # Ensure hotkey keys are released when deactivating
+        self.release_hotkey_keys()
     
     def start_kvm_streaming(self):
         logging.info("Irányítás átadása megkezdve.")
