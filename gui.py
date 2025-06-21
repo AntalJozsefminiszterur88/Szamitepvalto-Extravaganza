@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QSystemTrayIcon,
     QMenu,
+    QMessageBox,
 )
 from PySide6.QtGui import QIcon, QAction, QPixmap
 from PySide6.QtCore import QSize, QSettings, QThread, Qt
@@ -274,8 +275,26 @@ class MainWindow(QMainWindow):
             else None
         )
     def closeEvent(self, event):
-        event.ignore()
-        self.hide()
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Bezárás")
+        dialog.setText("Mit szeretne tenni?")
+        minimize_btn = dialog.addButton(
+            "Tálcára helyezés", QMessageBox.AcceptRole
+        )
+        quit_btn = dialog.addButton("Kilépés", QMessageBox.DestructiveRole)
+        cancel_btn = dialog.addButton("Mégse", QMessageBox.RejectRole)
+        dialog.setDefaultButton(minimize_btn)
+        dialog.exec()
+
+        clicked = dialog.clickedButton()
+        if clicked == minimize_btn:
+            event.ignore()
+            self.hide()
+        elif clicked == quit_btn:
+            event.accept()
+            self.quit_application()
+        else:
+            event.ignore()
     def quit_application(self):
         logging.info("Kilépés menüpont kiválasztva. Program leállítása.")
         self.stop_kvm_service()
