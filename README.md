@@ -71,3 +71,9 @@ When controlling the laptop, press **Ctrl + Shift + F12** to immediately switch
 control to the EliteDesk. The laptop client sends a command back to the host,
 which activates the EliteDesk as the new target.
 
+### Autostart
+
+On Windows the application configures autostart via the registry. On Linux a
+``.desktop`` entry is created under ``~/.config/autostart``. Disable the option
+in the GUI to remove the entry.
+
