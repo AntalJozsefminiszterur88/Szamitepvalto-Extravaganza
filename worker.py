@@ -342,6 +342,7 @@ class KVMWorker(QObject):
                 except queue.Empty:
                     continue
                 if payload is None:
+                    logging.debug("Sender thread exiting")
                     break
                 to_remove = []
                 targets = [self.active_client] if self.active_client else list(self.client_sockets)
@@ -350,7 +351,14 @@ class KVMWorker(QObject):
                         continue
                     try:
                         sock.sendall(struct.pack('!I', len(payload)) + payload)
-                    except Exception:
+                        logging.debug(
+                            f"Sent {len(payload)} bytes to {self.client_infos.get(sock, sock.getpeername())}"
+                        )
+                    except Exception as e:
+                        logging.error(
+                            f"Failed sending to {self.client_infos.get(sock, sock.getpeername())}: {e}",
+                            exc_info=True,
+                        )
                         to_remove.append(sock)
                 for s in to_remove:
                     try:
@@ -372,12 +380,15 @@ class KVMWorker(QObject):
 
         def send(data):
             if not self.kvm_active:
+                logging.debug("Send called while KVM inactive")
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
                 send_queue.put(packed)
+                logging.debug(f"Queued event: {data}")
                 return True
-            except Exception:
+            except Exception as e:
+                logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
                 self.deactivate_kvm()
                 return False
 
@@ -522,13 +533,15 @@ class KVMWorker(QObject):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    logging.info(f"Connecting to {ip}:{self.settings['port']}")
                     s.connect((ip, self.settings['port']))
 
                     try:
                         hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
                         s.sendall(struct.pack('!I', len(hello)) + hello)
-                    except Exception:
-                        pass
+                        logging.debug("Handshake sent to server")
+                    except Exception as e:
+                        logging.error(f"Failed to send handshake: {e}")
 
                     logging.info("TCP kapcsolat sikeres.")
                     self.status_update.emit("Csatlakozva. Irányítás átvéve.")
@@ -577,6 +590,7 @@ class KVMWorker(QObject):
                             break
                         try:
                             data = msgpack.unpackb(payload, raw=False)
+                            logging.debug(f"Received event: {data}")
                             event_type = data.get('type')
                             if event_type == 'move_relative':
                                 mouse_controller.move(data['dx'], data['dy'])
@@ -612,6 +626,7 @@ class KVMWorker(QObject):
                     self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás...")
 
             finally:
+                logging.info("Connection to server closed")
                 for k in list(pressed_keys):
                     try:
                         keyboard_controller.release(k)
