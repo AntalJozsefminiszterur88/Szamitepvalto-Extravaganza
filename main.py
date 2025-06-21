@@ -37,6 +37,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     start_hidden = "--tray" in sys.argv or "--minimized" in sys.argv
+    auto_connect = "--tray" in sys.argv
     app = QApplication(sys.argv)
     # Prevent the application from quitting when the last window is closed.
     app.setQuitOnLastWindowClosed(False)
@@ -44,6 +45,8 @@ if __name__ == "__main__":
     window = MainWindow()
     if start_hidden:
         window.hide()
+        if auto_connect:
+            window.start_kvm_service()
     else:
         window.show()
     sys.exit(app.exec())
