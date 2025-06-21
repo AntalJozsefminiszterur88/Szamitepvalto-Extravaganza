@@ -61,6 +61,7 @@ class KVMWorker(QObject):
 
     def set_active_client_by_name(self, name):
         """Select a connected client by name as the active target."""
+        logging.debug(f"set_active_client_by_name called with name={name}")
         for sock, cname in self.client_infos.items():
             if cname.lower().startswith(name.lower()):
                 self.active_client = sock
@@ -73,11 +74,12 @@ class KVMWorker(QObject):
         """Activate or deactivate control for a specific client."""
         current = self.client_infos.get(self.active_client, "").lower()
         target = name.lower()
-        logging.debug(
-            "toggle_client_control called with target=%s, current=%s, kvm_active=%s",
+        logging.info(
+            "toggle_client_control start: target=%s current=%s kvm_active=%s switch_monitor=%s",
             target,
             current,
             self.kvm_active,
+            switch_monitor,
         )
         if self.kvm_active and current.startswith(target):
             logging.debug("Deactivating KVM because active client matches target")
@@ -89,6 +91,7 @@ class KVMWorker(QObject):
         if self.set_active_client_by_name(name):
             logging.debug("Activating KVM for client %s", name)
             self.activate_kvm(switch_monitor=switch_monitor)
+        logging.info("toggle_client_control end")
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -150,6 +153,7 @@ class KVMWorker(QObject):
         def on_press(key):
             key_id = get_id(key)
             current_pressed_ids.add(key_id)
+            logging.debug(f"Key pressed: {key} (id={key_id}). Currently pressed: {current_pressed_ids}")
             if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 self.toggle_client_control('laptop', switch_monitor=False)
@@ -162,6 +166,7 @@ class KVMWorker(QObject):
         def on_release(key):
             key_id = get_id(key)
             current_pressed_ids.discard(key_id)
+            logging.debug(f"Key released: {key} (id={key_id}). Remaining pressed: {current_pressed_ids}")
         
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
@@ -268,6 +273,11 @@ class KVMWorker(QObject):
 
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
+        logging.info(
+            "toggle_kvm_active called. current_state=%s switch_monitor=%s",
+            self.kvm_active,
+            switch_monitor,
+        )
         if not self.kvm_active:
             self.activate_kvm(switch_monitor=switch_monitor)
         else:
@@ -275,22 +285,23 @@ class KVMWorker(QObject):
         self.release_hotkey_keys()
 
     def activate_kvm(self, switch_monitor=True):
+        logging.info(
+            "activate_kvm called. switch_monitor=%s active_client=%s",
+            switch_monitor,
+            self.client_infos.get(self.active_client, "unknown"),
+        )
         if not self.client_sockets:
             self.status_update.emit("Hiba: Nincs csatlakozott kliens a váltáshoz!")
             logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
             return
 
-        logging.debug(
-            "Activating KVM. switch_monitor=%s active_client=%s", 
-            switch_monitor, 
-            self.client_infos.get(self.active_client, "unknown"),
-        )
         self.switch_monitor = switch_monitor
         self.kvm_active = True
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
         self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
         self.streaming_thread.start()
+        logging.debug("Streaming thread started")
 
     def _streaming_loop(self):
         """Keep streaming active and restart if it stops unexpectedly."""
@@ -301,8 +312,8 @@ class KVMWorker(QObject):
                 time.sleep(1)
 
     def deactivate_kvm(self, switch_monitor=None):
-        logging.debug(
-            "Deactivating KVM. switch_monitor=%s", 
+        logging.info(
+            "deactivate_kvm called. switch_monitor=%s",
             switch_monitor,
         )
         self.kvm_active = False
@@ -325,7 +336,7 @@ class KVMWorker(QObject):
         self.release_hotkey_keys()
     
     def start_kvm_streaming(self):
-        logging.info("Irányítás átadása megkezdve.")
+        logging.info("start_kvm_streaming: initiating control transfer")
         if getattr(self, 'switch_monitor', True):
             try:
                 with list(get_monitors())[0] as monitor:
@@ -574,6 +585,7 @@ class KVMWorker(QObject):
                         try:
                             packed = msgpack.packb({'command': cmd}, use_bin_type=True)
                             s.sendall(struct.pack('!I', len(packed)) + packed)
+                            logging.info(f"Command sent to server: {cmd}")
                         except Exception:
                             logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
 
@@ -585,12 +597,17 @@ class KVMWorker(QObject):
                         return key.vk if hasattr(key, 'vk') and key.vk is not None else key
 
                     def hk_press(key):
-                        pressed_ids.add(get_id(key))
+                        kid = get_id(key)
+                        pressed_ids.add(kid)
+                        logging.debug(f"Client hotkey key pressed: {key} (id={kid}). Pressed: {pressed_ids}")
                         if hotkey_cmd_l.issubset(pressed_ids) or hotkey_cmd_r.issubset(pressed_ids):
+                            logging.info("Client hotkey detected, requesting switch_elitedesk")
                             send_command('switch_elitedesk')
 
                     def hk_release(key):
-                        pressed_ids.discard(get_id(key))
+                        kid = get_id(key)
+                        pressed_ids.discard(kid)
+                        logging.debug(f"Client hotkey key released: {key} (id={kid}). Remaining: {pressed_ids}")
 
                     hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
                     hk_listener.start()
