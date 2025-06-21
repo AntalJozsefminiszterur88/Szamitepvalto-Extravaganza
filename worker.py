@@ -70,7 +70,7 @@ class KVMWorker(QObject):
         logging.warning(f"No client matching '{name}' found")
         return False
 
-    def toggle_client_control(self, name: str, *, switch_monitor: bool = True) -> None:
+    def toggle_client_control(self, name: str, *, switch_monitor: bool = True, release_keys: bool = True) -> None:
         """Activate or deactivate control for a specific client."""
         current = self.client_infos.get(self.active_client, "").lower()
         target = name.lower()
@@ -83,11 +83,11 @@ class KVMWorker(QObject):
         )
         if self.kvm_active and current.startswith(target):
             logging.debug("Deactivating KVM because active client matches target")
-            self.deactivate_kvm()
+            self.deactivate_kvm(release_keys=release_keys)
             return
         if self.kvm_active:
             logging.debug("Deactivating current KVM session before switching client")
-            self.deactivate_kvm()
+            self.deactivate_kvm(release_keys=release_keys)
         if self.set_active_client_by_name(name):
             logging.debug("Activating KVM for client %s", name)
             self.activate_kvm(switch_monitor=switch_monitor)
@@ -146,27 +146,36 @@ class KVMWorker(QObject):
         hotkey_elitdesk = {keyboard.Key.ctrl_l, VK_NUMPAD1}
         hotkey_elitdesk_r = {keyboard.Key.ctrl_r, VK_NUMPAD1}
         current_pressed_ids = set()
+        pending_client = None
 
         def get_id(key):
             return key.vk if hasattr(key, 'vk') and key.vk is not None else key
 
         def on_press(key):
+            nonlocal pending_client
             key_id = get_id(key)
             current_pressed_ids.add(key_id)
             logging.debug(f"Key pressed: {key} (id={key_id}). Currently pressed: {current_pressed_ids}")
             if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
-                self.toggle_client_control('laptop', switch_monitor=False)
-                current_pressed_ids.clear()
+                pending_client = 'laptop'
             elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
-                self.toggle_client_control('elitedesk', switch_monitor=True)
-                current_pressed_ids.clear()
+                pending_client = 'elitedesk'
 
         def on_release(key):
+            nonlocal pending_client
             key_id = get_id(key)
             current_pressed_ids.discard(key_id)
             logging.debug(f"Key released: {key} (id={key_id}). Remaining pressed: {current_pressed_ids}")
+            if pending_client and not current_pressed_ids:
+                self.toggle_client_control(
+                    pending_client,
+                    switch_monitor=(pending_client == 'elitedesk'),
+                    release_keys=False,
+                )
+                pending_client = None
+                current_pressed_ids.clear()
         
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
@@ -311,7 +320,7 @@ class KVMWorker(QObject):
                 logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
                 time.sleep(1)
 
-    def deactivate_kvm(self, switch_monitor=None):
+    def deactivate_kvm(self, switch_monitor=None, *, release_keys: bool = True):
         logging.info(
             "deactivate_kvm called. switch_monitor=%s kvm_active=%s",
             switch_monitor,
@@ -333,8 +342,9 @@ class KVMWorker(QObject):
             except Exception as e:
                 self.status_update.emit(f"Monitor hiba: {e}")
                 logging.error(f"Monitor hiba: {e}", exc_info=True)
-        # Ensure hotkey keys are released when deactivating
-        self.release_hotkey_keys()
+        # Ensure hotkey keys are released when deactivating if requested
+        if release_keys:
+            self.release_hotkey_keys()
     
     def start_kvm_streaming(self):
         logging.info("start_kvm_streaming: initiating control transfer")
