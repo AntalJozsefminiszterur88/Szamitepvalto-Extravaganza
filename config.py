@@ -1,6 +1,9 @@
 # config.py
 # Központi konfigurációs értékek és konstansok
 
+import os
+import sys
+
 # Alkalmazás adatai a QSettings-hez
 APP_NAME = "KVMApp"
 ORG_NAME = "MyKVM"
@@ -17,5 +20,12 @@ VK_NUMPAD0 = 96
 VK_NUMPAD1 = 97
 VK_F12 = 123
 
+
+def resource_path(relative_path: str) -> str:
+    """Return absolute path to resource, compatible with PyInstaller."""
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
 # Program icon path
-ICON_PATH = "keyboard_mouse_switch_icon.ico"
+ICON_PATH = resource_path("keyboard_mouse_switch_icon.ico")
