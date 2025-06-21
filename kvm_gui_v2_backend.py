@@ -64,7 +64,9 @@ class KVMWorker(QObject):
         # Ezután regisztráljuk a szolgáltatást
         info = ServiceInfo("_kvmswitch._tcp.local.", f"KVM Adó._kvmswitch._tcp.local.", addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))], port=self.settings['port'])
         self.zeroconf.register_service(info)
-        self.status_update.emit(f"Adó szolgáltatás regisztrálva. Gyorsbillentyű: Ctrl + Numpad 0")
+        self.status_update.emit(
+            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: Asztal - Ctrl + Numpad 0, Laptop - Ctrl + Numpad 1, ElitDesk - Ctrl + Numpad 2"
+        )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
         # Gyorsbillentyű figyelése
