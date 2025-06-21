@@ -36,10 +36,14 @@ if __name__ == "__main__":
         logging.error("A program már fut. Csak egy példány indítható.")
         sys.exit(1)
 
+    start_hidden = "--tray" in sys.argv or "--minimized" in sys.argv
     app = QApplication(sys.argv)
     # Prevent the application from quitting when the last window is closed.
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(ICON_PATH))
     window = MainWindow()
-    window.show()
+    if start_hidden:
+        window.hide()
+    else:
+        window.show()
     sys.exit(app.exec())

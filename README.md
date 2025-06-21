@@ -84,6 +84,7 @@ which activates the EliteDesk as the new target.
 ### Autostart
 
 On Windows the application configures autostart via the registry. On Linux a
-``.desktop`` entry is created under ``~/.config/autostart``. Disable the option
-in the GUI to remove the entry.
+``.desktop`` entry is created under ``~/.config/autostart``. When started this
+way the program is launched with the ``--tray`` argument so it remains hidden in
+the system tray. Disable the option in the GUI to remove the entry.
 
