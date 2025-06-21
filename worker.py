@@ -73,12 +73,21 @@ class KVMWorker(QObject):
         """Activate or deactivate control for a specific client."""
         current = self.client_infos.get(self.active_client, "").lower()
         target = name.lower()
+        logging.debug(
+            "toggle_client_control called with target=%s, current=%s, kvm_active=%s",
+            target,
+            current,
+            self.kvm_active,
+        )
         if self.kvm_active and current.startswith(target):
+            logging.debug("Deactivating KVM because active client matches target")
             self.deactivate_kvm()
             return
         if self.kvm_active:
+            logging.debug("Deactivating current KVM session before switching client")
             self.deactivate_kvm()
         if self.set_active_client_by_name(name):
+            logging.debug("Activating KVM for client %s", name)
             self.activate_kvm(switch_monitor=switch_monitor)
 
     def stop(self):
@@ -273,6 +282,11 @@ class KVMWorker(QObject):
             logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
             return
 
+        logging.debug(
+            "Activating KVM. switch_monitor=%s active_client=%s", 
+            switch_monitor, 
+            self.client_infos.get(self.active_client, "unknown"),
+        )
         self.switch_monitor = switch_monitor
         self.kvm_active = True
         self.status_update.emit("Állapot: Aktív...")
@@ -289,6 +303,10 @@ class KVMWorker(QObject):
                 time.sleep(1)
 
     def deactivate_kvm(self, switch_monitor=None):
+        logging.debug(
+            "Deactivating KVM. switch_monitor=%s", 
+            switch_monitor,
+        )
         self.kvm_active = False
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
