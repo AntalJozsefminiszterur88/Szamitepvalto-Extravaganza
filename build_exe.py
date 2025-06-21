@@ -23,6 +23,10 @@ def build():
         "PyInstaller",
         "--onefile",
         "--windowed",  # hide console window
+        "--name",
+        "Szamitepvalto-Extravaganza",
+        "--icon",
+        "keyboard_mouse_switch_icon.ico",
         "main.py",
     ]
     subprocess.check_call(cmd)
