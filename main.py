@@ -21,6 +21,8 @@ logging.basicConfig(
 if __name__ == "__main__":
     logging.info("Alkalmazás indítása...")
     app = QApplication(sys.argv)
+    # Prevent the application from quitting when the last window is closed.
+    app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(ICON_PATH))
     window = MainWindow()
     window.show()
