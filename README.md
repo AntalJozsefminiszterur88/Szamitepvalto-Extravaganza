@@ -60,10 +60,11 @@ The main dependencies are:
 
 After installing the dependencies, run `python main.py` to launch the GUI. The
 application logs activity to `kvm_switch.log` and stores settings via
-`QSettings`. Use the interface to configure host and client codes, select the
-operating mode (host or client) and start or stop the KVM service.
+`QSettings`. Use the interface to configure host and client codes, select which
+computer this instance represents (Desktop, Laptop or EliteDesk) and start or
+stop the KVM service. The correct operating mode is selected automatically.
 
-The host server now accepts multiple client connections simultaneously. All
+The desktop acting as the host now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
 ### Remote switching

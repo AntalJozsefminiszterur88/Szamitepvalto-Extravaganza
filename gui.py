@@ -93,12 +93,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        role_box = QGroupBox("Szerepkör")
+        role_box = QGroupBox("Eszköz kiválasztása")
         role_layout = QVBoxLayout()
-        self.radio_ado = QRadioButton("Adó (ez a gép irányít)")
-        self.radio_vevo = QRadioButton("Vevő (ezt a gépet irányítják)")
-        role_layout.addWidget(self.radio_ado)
-        role_layout.addWidget(self.radio_vevo)
+        self.radio_desktop = QRadioButton("Asztali gép (irányít)")
+        self.radio_laptop = QRadioButton("Laptop")
+        self.radio_elitedesk = QRadioButton("ElitDesk")
+        role_layout.addWidget(self.radio_desktop)
+        role_layout.addWidget(self.radio_laptop)
+        role_layout.addWidget(self.radio_elitedesk)
         role_box.setLayout(role_layout)
         main_layout.addWidget(role_box)
 
@@ -150,12 +152,18 @@ class MainWindow(QMainWindow):
         self.init_tray_icon()
         self.load_settings()
     def get_settings(self):
-        if self.radio_ado.isChecked():
-            role = 'ado'
+        if self.radio_desktop.isChecked():
+            mode = 'ado'
+            device = 'desktop'
+        elif self.radio_laptop.isChecked():
+            mode = 'vevo'
+            device = 'laptop'
         else:
-            role = 'vevo'
+            mode = 'vevo'
+            device = 'elitedesk'
         return {
-            'role': role,
+            'role': mode,
+            'device_name': device,
             'port': int(self.port.text()),
             'monitor_codes': {
                 'host': int(self.host_code.text()),
@@ -191,11 +199,15 @@ class MainWindow(QMainWindow):
         self.set_controls_enabled(True)
     def save_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
-        if self.radio_ado.isChecked():
-            role = 'ado'
+        if self.radio_desktop.isChecked():
+            device = 'desktop'
+        elif self.radio_laptop.isChecked():
+            device = 'laptop'
         else:
-            role = 'vevo'
-        settings.setValue("role/mode", role)
+            device = 'elitedesk'
+        settings.setValue("device/name", device)
+        mode = 'ado' if device == 'desktop' else 'vevo'
+        settings.setValue("role/mode", mode)
         settings.setValue("network/port", self.port.text())
         settings.setValue("monitor/host_code", self.host_code.text())
         settings.setValue("monitor/client_code", self.client_code.text())
@@ -208,24 +220,27 @@ class MainWindow(QMainWindow):
             logging.error(f"Nem sikerült az autostart beállítása: {e}")
     def load_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
-        mode = settings.value("role/mode", "ado")
-        self.radio_ado.setChecked(mode == 'ado')
-        self.radio_vevo.setChecked(mode == 'vevo')
+        device = settings.value("device/name", "desktop")
+        self.radio_desktop.setChecked(device == 'desktop')
+        self.radio_laptop.setChecked(device == 'laptop')
+        self.radio_elitedesk.setChecked(device == 'elitedesk')
         self.port.setText(settings.value("network/port", str(DEFAULT_PORT)))
         self.host_code.setText(settings.value("monitor/host_code", "17"))
         self.client_code.setText(settings.value("monitor/client_code", "18"))
         self.autostart_check.setChecked(
             settings.value("other/autostart", False, type=bool)
         )
-        self.radio_ado.toggled.connect(self.save_settings)
-        self.radio_vevo.toggled.connect(self.save_settings)
+        self.radio_desktop.toggled.connect(self.save_settings)
+        self.radio_laptop.toggled.connect(self.save_settings)
+        self.radio_elitedesk.toggled.connect(self.save_settings)
         self.port.textChanged.connect(self.save_settings)
         self.host_code.textChanged.connect(self.save_settings)
         self.client_code.textChanged.connect(self.save_settings)
         self.autostart_check.toggled.connect(self.save_settings)
     def set_controls_enabled(self, enabled):
-        self.radio_ado.setEnabled(enabled)
-        self.radio_vevo.setEnabled(enabled)
+        self.radio_desktop.setEnabled(enabled)
+        self.radio_laptop.setEnabled(enabled)
+        self.radio_elitedesk.setEnabled(enabled)
         self.port.setEnabled(enabled)
         self.host_code.setEnabled(enabled)
         self.client_code.setEnabled(enabled)
