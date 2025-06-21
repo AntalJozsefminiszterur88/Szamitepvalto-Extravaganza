@@ -43,7 +43,7 @@ def set_autostart(enabled: bool) -> None:
             reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
             if enabled:
                 script = os.path.join(os.path.dirname(__file__), "main.py")
-                app_path = f'"{sys.executable}" "{script}" --tray'
+                app_path = f'"{sys.executable}" "{script}" --tray --auto'
                 winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, app_path)
                 logging.info("Automatikus indulás bekapcsolva. Útvonal: %s", app_path)
             else:
@@ -62,7 +62,7 @@ def set_autostart(enabled: bool) -> None:
 
         if enabled:
             script = os.path.join(os.path.dirname(__file__), "main.py")
-            exec_cmd = f"{sys.executable} {script} --tray"
+            exec_cmd = f"{sys.executable} {script} --tray --auto"
             desktop_contents = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
@@ -86,8 +86,9 @@ def set_autostart(enabled: bool) -> None:
 
 class MainWindow(QMainWindow):
     # A MainWindow többi része változatlan...
-    def __init__(self):
+    def __init__(self, *, auto_start=False):
         super().__init__()
+        self._auto_start = auto_start
         self.setWindowTitle("KVM Switch Vezérlőpult v7")
         self.setWindowIcon(QIcon(ICON_PATH))
         # Prevent resizing during runtime
@@ -157,6 +158,8 @@ class MainWindow(QMainWindow):
         self.kvm_worker = None
         self.init_tray_icon()
         self.load_settings()
+        if self._auto_start:
+            self.start_kvm_service()
     def get_settings(self):
         if self.radio_desktop.isChecked():
             mode = 'ado'

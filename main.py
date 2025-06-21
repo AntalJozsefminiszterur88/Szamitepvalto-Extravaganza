@@ -37,11 +37,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     start_hidden = "--tray" in sys.argv or "--minimized" in sys.argv
+    auto_start_service = "--auto" in sys.argv
+
     app = QApplication(sys.argv)
     # Prevent the application from quitting when the last window is closed.
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(ICON_PATH))
-    window = MainWindow()
+    window = MainWindow(auto_start=auto_start_service)
     if start_hidden:
         window.hide()
     else:

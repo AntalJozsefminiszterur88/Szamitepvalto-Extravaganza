@@ -85,6 +85,7 @@ which activates the EliteDesk as the new target.
 
 On Windows the application configures autostart via the registry. On Linux a
 ``.desktop`` entry is created under ``~/.config/autostart``. When started this
-way the program is launched with the ``--tray`` argument so it remains hidden in
-the system tray. Disable the option in the GUI to remove the entry.
+way the program is launched with the ``--tray --auto`` arguments so it remains
+hidden in the system tray and immediately activates the KVM service using the
+saved settings. Disable the option in the GUI to remove the entry.
 
