@@ -4,7 +4,12 @@
 import sys
 import time
 import logging
-import winreg  # A Registry kezeléséhez (csak Windows-on működik)
+
+# Windows specific module only available on that platform
+if sys.platform.startswith("win"):
+    import winreg  # type: ignore
+else:  # pragma: no cover - platform specific
+    winreg = None
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -26,28 +31,54 @@ from PySide6.QtCore import QSize, QSettings, QThread
 from worker import KVMWorker
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
 
-def set_autostart(enabled):
-    """Be- vagy kikapcsolja az automatikus indulást a Windows Registry-ben."""
-    if not sys.platform.startswith("win"):
-        logging.info("Autostart beállítás kihagyva: nem Windows platform.")
-        return
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    app_name = "KVM_Switch"
-    try:
-        reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
+def set_autostart(enabled: bool) -> None:
+    """Enable or disable autostart depending on the current platform."""
+    if sys.platform.startswith("win") and winreg is not None:
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        app_name = "KVM_Switch"
+        try:
+            reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
+            if enabled:
+                app_path = f'"{sys.executable}" "{__file__}"'
+                winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, app_path)
+                logging.info("Automatikus indulás bekapcsolva. Útvonal: %s", app_path)
+            else:
+                winreg.DeleteValue(reg_key, app_name)
+                logging.info("Automatikus indulás kikapcsolva.")
+            winreg.CloseKey(reg_key)
+        except FileNotFoundError:
+            logging.warning("Automatikus indulás kikapcsolva (kulcs nem létezett).")
+        except Exception as e:  # pragma: no cover - platform specific
+            logging.error("Hiba az automatikus indulás beállításakor: %s", e)
+    elif sys.platform.startswith("linux"):
+        import os
+
+        autostart_dir = os.path.join(os.path.expanduser("~"), ".config", "autostart")
+        os.makedirs(autostart_dir, exist_ok=True)
+        desktop_file = os.path.join(autostart_dir, "KVM_Switch.desktop")
+
         if enabled:
-            # sys.executable a python.exe útvonala, `__file__` a szkript útvonala
-            app_path = f'"{sys.executable}" "{__file__}"'
-            winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, app_path)
-            logging.info(f"Automatikus indulás bekapcsolva. Útvonal: {app_path}")
+            exec_cmd = f"{sys.executable} {os.path.abspath(__file__)}"
+            desktop_contents = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                f"Exec={exec_cmd}\n"
+                "Hidden=false\n"
+                "NoDisplay=false\n"
+                "X-GNOME-Autostart-enabled=true\n"
+                "Name=KVM Switch\n"
+            )
+            with open(desktop_file, "w", encoding="utf-8") as f:
+                f.write(desktop_contents)
+            logging.info("Autostart engedélyezve Linuxon: %s", desktop_file)
         else:
-            winreg.DeleteValue(reg_key, app_name)
-            logging.info("Automatikus indulás kikapcsolva.")
-        winreg.CloseKey(reg_key)
-    except FileNotFoundError:
-        logging.warning("Automatikus indulás kikapcsolva (kulcs nem létezett).")
-    except Exception as e:
-        logging.error(f"Hiba az automatikus indulás beállításakor: {e}")
+            try:
+                os.remove(desktop_file)
+                logging.info("Automatikus indulás kikapcsolva Linuxon.")
+            except FileNotFoundError:
+                logging.info("Autostart kikapcsolása: a fájl nem létezett.")
+    else:
+        logging.info("Autostart beállítás kihagyva: nem támogatott platform.")
 
 class MainWindow(QMainWindow):
     # A MainWindow többi része változatlan...
@@ -96,7 +127,7 @@ class MainWindow(QMainWindow):
         )
         other_layout.addWidget(self.hotkey_label, 0, 1)
         self.autostart_check = QCheckBox(
-            "Automatikus indulás a Windows-szal"
+            "Automatikus indulás a rendszerrel"
         )
         other_layout.addWidget(self.autostart_check, 1, 0, 1, 2)
         other_box.setLayout(other_layout)
