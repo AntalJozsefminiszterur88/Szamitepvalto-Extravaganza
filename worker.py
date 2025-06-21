@@ -29,6 +29,8 @@ class KVMWorker(QObject):
         self.streaming_thread = None
         self.switch_monitor = True
         self.local_ip = socket.gethostbyname(socket.gethostname())
+        self.server_ip = None
+        self.connection_thread = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys."""
@@ -72,6 +74,8 @@ class KVMWorker(QObject):
                 pass
         self.client_infos.clear()
         self.active_client = None
+        if self.connection_thread and self.connection_thread.is_alive():
+            self.connection_thread.join(timeout=1)
 
     def run(self):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
@@ -434,22 +438,22 @@ class KVMWorker(QObject):
         class ServiceListener:
             def __init__(self, worker):
                 self.worker = worker
-                self.server_ip = None
             def add_service(self, zc, type, name):
                 info = zc.get_service_info(type, name)
                 if info:
                     ip = socket.inet_ntoa(info.addresses[0])
                     if ip == self.worker.local_ip:
                         return  # ignore our own service
-                    if self.server_ip is None:
-                        self.server_ip = ip
-                        logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
-                        self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
-                        threading.Thread(target=self.worker.connect_to_server, args=(ip,), daemon=True, name="ConnectThread").start()
+                    self.worker.server_ip = ip
+                    logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
+                    self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
+                    if not (self.worker.connection_thread and self.worker.connection_thread.is_alive()):
+                        self.worker.connection_thread = threading.Thread(target=self.worker.connect_to_server, daemon=True, name="ConnectThread")
+                        self.worker.connection_thread.start()
             def update_service(self, zc, type, name):
                 pass
             def remove_service(self, zc, type, name):
-                self.server_ip=None
+                self.worker.server_ip = None
                 self.worker.status_update.emit("Az Adó szolgáltatás eltűnt, újra keresem...")
                 logging.warning("Adó szolgáltatás eltűnt.")
 
@@ -458,109 +462,125 @@ class KVMWorker(QObject):
         while self._running:
             time.sleep(0.5)
 
-    def connect_to_server(self, server_ip):
+    def connect_to_server(self):
         mouse_controller = mouse.Controller()
         keyboard_controller = keyboard.Controller()
         pressed_keys = set()
-        button_map = {'left': mouse.Button.left, 'right': mouse.Button.right, 'middle': mouse.Button.middle}
+        button_map = {
+            'left': mouse.Button.left,
+            'right': mouse.Button.right,
+            'middle': mouse.Button.middle,
+        }
         hk_listener = None
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.connect((server_ip, self.settings['port']))
-                # identify ourselves to the server
-                try:
-                    hello = msgpack.packb({'device_name': socket.gethostname()}, use_bin_type=True)
-                    s.sendall(struct.pack('!I', len(hello)) + hello)
-                except Exception:
-                    pass
-                logging.info("TCP kapcsolat sikeres.")
-                self.status_update.emit(f"Csatlakozva. Irányítás átvéve.")
 
-                def send_command(cmd):
+        while self._running:
+            ip = self.server_ip
+            if not ip:
+                time.sleep(0.5)
+                continue
+
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    s.connect((ip, self.settings['port']))
+
                     try:
-                        packed = msgpack.packb({'command': cmd}, use_bin_type=True)
-                        s.sendall(struct.pack('!I', len(packed)) + packed)
+                        hello = msgpack.packb({'device_name': socket.gethostname()}, use_bin_type=True)
+                        s.sendall(struct.pack('!I', len(hello)) + hello)
                     except Exception:
-                        logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
+                        pass
 
-                hotkey_cmd_l = {keyboard.Key.ctrl_l, keyboard.Key.shift_l, keyboard.KeyCode.from_vk(VK_F12)}
-                hotkey_cmd_r = {keyboard.Key.ctrl_r, keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
-                pressed_ids = set()
+                    logging.info("TCP kapcsolat sikeres.")
+                    self.status_update.emit("Csatlakozva. Irányítás átvéve.")
 
-                def get_id(key):
-                    return key.vk if hasattr(key, 'vk') and key.vk is not None else key
+                    def send_command(cmd):
+                        try:
+                            packed = msgpack.packb({'command': cmd}, use_bin_type=True)
+                            s.sendall(struct.pack('!I', len(packed)) + packed)
+                        except Exception:
+                            logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
 
-                def hk_press(key):
-                    pressed_ids.add(get_id(key))
-                    if hotkey_cmd_l.issubset(pressed_ids) or hotkey_cmd_r.issubset(pressed_ids):
-                        send_command('switch_elitedesk')
+                    hotkey_cmd_l = {keyboard.Key.ctrl_l, keyboard.Key.shift_l, keyboard.KeyCode.from_vk(VK_F12)}
+                    hotkey_cmd_r = {keyboard.Key.ctrl_r, keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
+                    pressed_ids = set()
 
-                def hk_release(key):
-                    pressed_ids.discard(get_id(key))
+                    def get_id(key):
+                        return key.vk if hasattr(key, 'vk') and key.vk is not None else key
 
-                hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
-                hk_listener.start()
+                    def hk_press(key):
+                        pressed_ids.add(get_id(key))
+                        if hotkey_cmd_l.issubset(pressed_ids) or hotkey_cmd_r.issubset(pressed_ids):
+                            send_command('switch_elitedesk')
 
-                def recv_all(sock, n):
-                    data = b''
-                    while len(data) < n:
-                        chunk = sock.recv(n - len(data))
-                        if not chunk:
-                            return None
-                        data += chunk
-                    return data
+                    def hk_release(key):
+                        pressed_ids.discard(get_id(key))
 
-                while self._running:
-                    raw_len = recv_all(s, 4)
-                    if not raw_len:
-                        break
-                    msg_len = struct.unpack('!I', raw_len)[0]
-                    payload = recv_all(s, msg_len)
-                    if payload is None:
-                        break
-                    try:
-                        data = msgpack.unpackb(payload, raw=False)
-                        event_type = data.get('type')
-                        if event_type == 'move_relative':
-                            mouse_controller.move(data['dx'], data['dy'])
-                        elif event_type == 'click':
-                            b = button_map.get(data['button'])
-                            if b:
-                                (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
-                        elif event_type == 'scroll':
-                            mouse_controller.scroll(data['dx'], data['dy'])
-                        elif event_type == 'key':
-                            k_info = data['key']
-                            if data['key_type'] == 'char':
-                                k_press = k_info
-                            elif data['key_type'] == 'special':
-                                k_press = getattr(keyboard.Key, k_info, None)
-                            elif data['key_type'] == 'vk':
-                                k_press = keyboard.KeyCode.from_vk(int(k_info))
-                            else:
-                                k_press = None
-                            if k_press:
-                                if data['pressed']:
-                                    keyboard_controller.press(k_press)
-                                    pressed_keys.add(k_press)
+                    hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
+                    hk_listener.start()
+
+                    def recv_all(sock, n):
+                        data = b''
+                        while len(data) < n:
+                            chunk = sock.recv(n - len(data))
+                            if not chunk:
+                                return None
+                            data += chunk
+                        return data
+
+                    while self._running and self.server_ip == ip:
+                        raw_len = recv_all(s, 4)
+                        if not raw_len:
+                            break
+                        msg_len = struct.unpack('!I', raw_len)[0]
+                        payload = recv_all(s, msg_len)
+                        if payload is None:
+                            break
+                        try:
+                            data = msgpack.unpackb(payload, raw=False)
+                            event_type = data.get('type')
+                            if event_type == 'move_relative':
+                                mouse_controller.move(data['dx'], data['dy'])
+                            elif event_type == 'click':
+                                b = button_map.get(data['button'])
+                                if b:
+                                    (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
+                            elif event_type == 'scroll':
+                                mouse_controller.scroll(data['dx'], data['dy'])
+                            elif event_type == 'key':
+                                k_info = data['key']
+                                if data['key_type'] == 'char':
+                                    k_press = k_info
+                                elif data['key_type'] == 'special':
+                                    k_press = getattr(keyboard.Key, k_info, None)
+                                elif data['key_type'] == 'vk':
+                                    k_press = keyboard.KeyCode.from_vk(int(k_info))
                                 else:
-                                    keyboard_controller.release(k_press)
-                                    pressed_keys.discard(k_press)
+                                    k_press = None
+                                if k_press:
+                                    if data['pressed']:
+                                        keyboard_controller.press(k_press)
+                                        pressed_keys.add(k_press)
+                                    else:
+                                        keyboard_controller.release(k_press)
+                                        pressed_keys.discard(k_press)
+                        except Exception:
+                            logging.warning("Hibás adatcsomag")
+
+            except Exception as e:
+                if self._running:
+                    logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
+                    self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás...")
+
+            finally:
+                for k in list(pressed_keys):
+                    try:
+                        keyboard_controller.release(k)
                     except Exception:
-                        logging.warning("Hibás adatcsomag")
-        except Exception as e:
-            logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-            self.status_update.emit(f"Kapcsolat sikertelen: {e}")
-        finally:
-            for k in list(pressed_keys):
-                try:
-                    keyboard_controller.release(k)
-                except Exception:
-                    pass
-            if hk_listener is not None:
-                try:
-                    hk_listener.stop()
-                except Exception:
-                    pass
-            self.release_hotkey_keys()
+                        pass
+                if hk_listener is not None:
+                    try:
+                        hk_listener.stop()
+                    except Exception:
+                        pass
+                self.release_hotkey_keys()
+                time.sleep(1)
