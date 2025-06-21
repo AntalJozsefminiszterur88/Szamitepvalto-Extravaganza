@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 from PySide6.QtGui import QIcon, QAction, QPixmap
-from PySide6.QtCore import QSize, QSettings, QThread
+from PySide6.QtCore import QSize, QSettings, QThread, Qt
 
 from worker import KVMWorker
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
@@ -86,6 +86,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("KVM Switch Vezérlőpult v7")
         self.setWindowIcon(QIcon(ICON_PATH))
+        # Prevent resizing during runtime
+        self.setFixedSize(QSize(450, 400))
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -138,6 +140,9 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.start_button)
 
         self.status_label = QLabel("Állapot: Inaktív")
+        self.status_label.setWordWrap(True)
+        self.status_label.setAlignment(Qt.AlignTop)
+        self.status_label.setFixedHeight(70)
         main_layout.addWidget(self.status_label)
 
         self.kvm_thread = None
