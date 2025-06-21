@@ -86,5 +86,7 @@ which activates the EliteDesk as the new target.
 On Windows the application configures autostart via the registry. On Linux a
 ``.desktop`` entry is created under ``~/.config/autostart``. When started this
 way the program is launched with the ``--tray`` argument so it remains hidden in
-the system tray. Disable the option in the GUI to remove the entry.
+the system tray. If a packaged executable is used the stored path now points
+directly to the ``.exe`` with the same ``--tray`` flag. Disable the option in
+the GUI to remove the entry.
 

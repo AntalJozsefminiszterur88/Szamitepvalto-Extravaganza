@@ -42,8 +42,11 @@ def set_autostart(enabled: bool) -> None:
         try:
             reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
             if enabled:
-                script = os.path.join(os.path.dirname(__file__), "main.py")
-                app_path = f'"{sys.executable}" "{script}" --tray'
+                if getattr(sys, "frozen", False):
+                    app_path = f'"{sys.executable}" --tray'
+                else:
+                    script = os.path.join(os.path.dirname(__file__), "main.py")
+                    app_path = f'"{sys.executable}" "{script}" --tray'
                 winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, app_path)
                 logging.info("Automatikus indulás bekapcsolva. Útvonal: %s", app_path)
             else:
@@ -61,8 +64,11 @@ def set_autostart(enabled: bool) -> None:
         desktop_file = os.path.join(autostart_dir, "KVM_Switch.desktop")
 
         if enabled:
-            script = os.path.join(os.path.dirname(__file__), "main.py")
-            exec_cmd = f"{sys.executable} {script} --tray"
+            if getattr(sys, "frozen", False):
+                exec_cmd = f"{sys.executable} --tray"
+            else:
+                script = os.path.join(os.path.dirname(__file__), "main.py")
+                exec_cmd = f"{sys.executable} {script} --tray"
             desktop_contents = (
                 "[Desktop Entry]\n"
                 "Type=Application\n"
