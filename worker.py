@@ -144,10 +144,12 @@ class KVMWorker(QObject):
             if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 self.toggle_client_control('laptop', switch_monitor=False)
+                current_pressed_ids.clear()
                 self.release_hotkey_keys()
             elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
                 self.toggle_client_control('elitedesk', switch_monitor=True)
+                current_pressed_ids.clear()
                 self.release_hotkey_keys()
 
         def on_release(key):
