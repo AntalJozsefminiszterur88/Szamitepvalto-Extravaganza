@@ -7,7 +7,7 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal
-from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1, VK_F12
+from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_F12
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
@@ -51,6 +51,7 @@ class KVMWorker(QObject):
             keyboard.Key.ctrl_r,
             keyboard.KeyCode.from_vk(VK_NUMPAD0),
             keyboard.KeyCode.from_vk(VK_NUMPAD1),
+            keyboard.KeyCode.from_vk(VK_NUMPAD2),
         ]
         for k in keys:
             try:
@@ -138,13 +139,17 @@ class KVMWorker(QObject):
             port=self.settings['port']
         )
         self.zeroconf.register_service(info)
-        self.status_update.emit(f"Adó szolgáltatás regisztrálva. Gyorsbillentyű: Laptop - Ctrl + Numpad 0, ElitDesk - Ctrl + Numpad 1")
+        self.status_update.emit(
+            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: Asztal - Ctrl + Numpad 0, Laptop - Ctrl + Numpad 1, ElitDesk - Ctrl + Numpad 2"
+        )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        hotkey_laptop = {keyboard.Key.ctrl_l, VK_NUMPAD0}
-        hotkey_laptop_r = {keyboard.Key.ctrl_r, VK_NUMPAD0}
-        hotkey_elitdesk = {keyboard.Key.ctrl_l, VK_NUMPAD1}
-        hotkey_elitdesk_r = {keyboard.Key.ctrl_r, VK_NUMPAD1}
+        hotkey_desktop = {keyboard.Key.ctrl_l, VK_NUMPAD0}
+        hotkey_desktop_r = {keyboard.Key.ctrl_r, VK_NUMPAD0}
+        hotkey_laptop = {keyboard.Key.ctrl_l, VK_NUMPAD1}
+        hotkey_laptop_r = {keyboard.Key.ctrl_r, VK_NUMPAD1}
+        hotkey_elitdesk = {keyboard.Key.ctrl_l, VK_NUMPAD2}
+        hotkey_elitdesk_r = {keyboard.Key.ctrl_r, VK_NUMPAD2}
         current_pressed_ids = set()
         pending_client = None
 
@@ -156,7 +161,10 @@ class KVMWorker(QObject):
             key_id = get_id(key)
             current_pressed_ids.add(key_id)
             logging.debug(f"Key pressed: {key} (id={key_id}). Currently pressed: {current_pressed_ids}")
-            if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
+            if hotkey_desktop.issubset(current_pressed_ids) or hotkey_desktop_r.issubset(current_pressed_ids):
+                logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
+                pending_client = 'desktop'
+            elif hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'laptop'
             elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
@@ -169,11 +177,14 @@ class KVMWorker(QObject):
             current_pressed_ids.discard(key_id)
             logging.debug(f"Key released: {key} (id={key_id}). Remaining pressed: {current_pressed_ids}")
             if pending_client and not current_pressed_ids:
-                self.toggle_client_control(
-                    pending_client,
-                    switch_monitor=(pending_client == 'elitedesk'),
-                    release_keys=False,
-                )
+                if pending_client == 'desktop':
+                    self.deactivate_kvm(switch_monitor=True)
+                else:
+                    self.toggle_client_control(
+                        pending_client,
+                        switch_monitor=(pending_client == 'elitedesk'),
+                        release_keys=False,
+                    )
                 pending_client = None
                 current_pressed_ids.clear()
         
@@ -493,7 +504,7 @@ class KVMWorker(QObject):
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
                     current_vks.clear()
-                    self.toggle_kvm_active(False)
+                    self.toggle_kvm_active(self.switch_monitor)
                     return
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD1 in current_vks):
                     for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD1]:
@@ -501,7 +512,15 @@ class KVMWorker(QObject):
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
                     current_vks.clear()
-                    self.toggle_kvm_active(True)
+                    self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+                    return
+                if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD2 in current_vks):
+                    for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD2]:
+                        if vk_code in current_vks:
+                            send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                            pressed_keys.discard(("vk", vk_code))
+                    current_vks.clear()
+                    self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
                     return
 
                 if hasattr(k, "char") and k.char is not None:
