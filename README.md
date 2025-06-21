@@ -88,5 +88,6 @@ On Windows the application configures autostart via the registry. On Linux a
 way the program is launched with the ``--tray`` argument so it remains hidden in
 the system tray. If a packaged executable is used the stored path now points
 directly to the ``.exe`` with the same ``--tray`` flag. Disable the option in
-the GUI to remove the entry.
+the GUI to remove the entry. When launched from autostart the application now
+automatically activates the previously selected connection.
 
