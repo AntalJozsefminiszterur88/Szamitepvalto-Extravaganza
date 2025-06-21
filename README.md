@@ -68,6 +68,11 @@ stop the KVM service. The correct operating mode is selected automatically.
 The desktop acting as the host now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
+### System tray
+
+Closing the main window with the **X** button only hides it. The application
+continues running in the system tray. Use the tray icon menu to restore or quit.
+
 ### Remote switching
 
 When controlling the laptop, press **Ctrl + Shift + F12** to immediately switch
