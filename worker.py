@@ -355,8 +355,12 @@ class KVMWorker(QObject):
                             f"Sent {len(payload)} bytes to {self.client_infos.get(sock, sock.getpeername())}"
                         )
                     except Exception as e:
+                        try:
+                            event = msgpack.unpackb(payload, raw=False)
+                        except Exception:
+                            event = '<unpack failed>'
                         logging.error(
-                            f"Failed sending to {self.client_infos.get(sock, sock.getpeername())}: {e}",
+                            f"Failed sending event {event} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
                             exc_info=True,
                         )
                         to_remove.append(sock)
@@ -379,13 +383,19 @@ class KVMWorker(QObject):
         sender_thread.start()
 
         def send(data):
+            """Queue an event for sending and log the details."""
             if not self.kvm_active:
-                logging.debug("Send called while KVM inactive")
+                logging.warning("Send called while KVM inactive")
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
                 send_queue.put(packed)
-                logging.debug(f"Queued event: {data}")
+                if data.get('type') == 'move_relative':
+                    logging.info(
+                        f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
+                    )
+                else:
+                    logging.debug(f"Queued event: {data}")
                 return True
             except Exception as e:
                 logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
