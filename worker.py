@@ -129,10 +129,10 @@ class KVMWorker(QObject):
         self.status_update.emit(f"Adó szolgáltatás regisztrálva. Gyorsbillentyű: Laptop - Ctrl + Numpad 0, ElitDesk - Ctrl + Numpad 1")
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        hotkey_laptop = {keyboard.Key.ctrl_l, VK_NUMPAD0}
-        hotkey_laptop_r = {keyboard.Key.ctrl_r, VK_NUMPAD0}
-        hotkey_elitdesk = {keyboard.Key.ctrl_l, VK_NUMPAD1}
-        hotkey_elitdesk_r = {keyboard.Key.ctrl_r, VK_NUMPAD1}
+        hotkey_laptop = {VK_CTRL, VK_NUMPAD0}
+        hotkey_laptop_r = {VK_CTRL_R, VK_NUMPAD0}
+        hotkey_elitdesk = {VK_CTRL, VK_NUMPAD1}
+        hotkey_elitdesk_r = {VK_CTRL_R, VK_NUMPAD1}
         current_pressed_ids = set()
 
         def get_id(key):
