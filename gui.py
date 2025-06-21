@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
     QGroupBox,
     QRadioButton,
     QLabel,
@@ -94,7 +95,9 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         role_box = QGroupBox("Eszköz kiválasztása")
-        role_layout = QVBoxLayout()
+        role_layout = QHBoxLayout()
+        role_layout.setSpacing(15)
+        role_layout.setContentsMargins(10, 10, 10, 10)
         self.radio_desktop = QRadioButton("Asztali gép (irányít)")
         self.radio_laptop = QRadioButton("Laptop")
         self.radio_elitedesk = QRadioButton("ElitDesk")
