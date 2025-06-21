@@ -313,8 +313,9 @@ class KVMWorker(QObject):
 
     def deactivate_kvm(self, switch_monitor=None):
         logging.info(
-            "deactivate_kvm called. switch_monitor=%s",
+            "deactivate_kvm called. switch_monitor=%s kvm_active=%s",
             switch_monitor,
+            self.kvm_active,
         )
         self.kvm_active = False
         self.status_update.emit("Állapot: Inaktív...")
@@ -412,7 +413,12 @@ class KVMWorker(QObject):
         def send(data):
             """Queue an event for sending and log the details."""
             if not self.kvm_active:
-                logging.warning("Send called while KVM inactive")
+                logging.warning(
+                    "Send called while KVM inactive. Event=%s active_client=%s connected_clients=%d",
+                    data,
+                    self.client_infos.get(self.active_client),
+                    len(self.client_sockets),
+                )
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
