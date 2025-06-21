@@ -31,6 +31,7 @@ class KVMWorker(QObject):
         self.local_ip = socket.gethostbyname(socket.gethostname())
         self.server_ip = None
         self.connection_thread = None
+        self.device_name = settings.get('device_name', socket.gethostname())
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys."""
@@ -495,7 +496,7 @@ class KVMWorker(QObject):
                     s.connect((ip, self.settings['port']))
 
                     try:
-                        hello = msgpack.packb({'device_name': socket.gethostname()}, use_bin_type=True)
+                        hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
                         s.sendall(struct.pack('!I', len(hello)) + hello)
                     except Exception:
                         pass
