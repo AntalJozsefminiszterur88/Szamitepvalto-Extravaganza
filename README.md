@@ -93,3 +93,21 @@ this autostart setting is also honoured when the ``.exe`` is started manually,
 causing the window to stay in the tray and the previous connection to activate
 immediately.
 
+
+## Clipboard synchronization
+
+A simple script `clipboard_sync.py` is provided to share the system clipboard between computers.
+One machine runs the server:
+
+```bash
+python clipboard_sync.py server --port 8765
+```
+
+Other machines connect as clients:
+
+```bash
+python clipboard_sync.py client <server-ip> --port 8765
+```
+
+Whenever the clipboard changes on any connected computer the new contents are sent to all others.
+The script relies on the `pyperclip` library for cross-platform clipboard access.
