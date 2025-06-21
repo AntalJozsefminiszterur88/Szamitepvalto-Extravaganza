@@ -70,10 +70,9 @@ connected receivers will get the forwarded input events.
 
 ### System tray
 
-When closing the main window with the **X** button you will now be asked
-whether to minimize the application to the tray, quit it entirely or cancel
-the action. Choosing the tray option hides the window while the application
-continues running. Use the tray icon menu to restore or quit.
+When closing the main window with the **X** button the window is automatically
+hidden and the application keeps running in the system tray. Use the tray icon
+menu to restore or quit.
 
 ### Remote switching
 
