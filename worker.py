@@ -20,6 +20,10 @@ class KVMWorker(QObject):
         self.kvm_active = False
         # Active client connections (multiple receivers can connect)
         self.client_sockets = []
+        # Mapping from socket to human readable client name
+        self.client_infos = {}
+        # Currently selected client to forward events to
+        self.active_client = None
         self.pynput_listeners = []
         self.zeroconf = Zeroconf()
         self.streaming_thread = None
@@ -36,6 +40,16 @@ class KVMWorker(QObject):
                 kc.release(k)
             except Exception:
                 pass
+
+    def set_active_client_by_name(self, name):
+        """Select a connected client by name as the active target."""
+        for sock, cname in self.client_infos.items():
+            if cname.lower().startswith(name.lower()):
+                self.active_client = sock
+                logging.info(f"Active client set to {cname}")
+                return True
+        logging.warning(f"No client matching '{name}' found")
+        return False
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -56,6 +70,8 @@ class KVMWorker(QObject):
                 sock.close()
             except Exception:
                 pass
+        self.client_infos.clear()
+        self.active_client = None
 
     def run(self):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
@@ -97,6 +113,7 @@ class KVMWorker(QObject):
                 self.release_hotkey_keys()
             elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
+                self.set_active_client_by_name('elitedesk')
                 self.toggle_kvm_active(True)
                 self.release_hotkey_keys()
 
@@ -127,6 +144,8 @@ class KVMWorker(QObject):
                     client_sock, addr = server_socket.accept()
                     client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     self.client_sockets.append(client_sock)
+                    if self.active_client is None:
+                        self.active_client = client_sock
                     logging.info(f"Kliens csatlakozva: {addr}.")
                     self.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
 
@@ -139,6 +158,31 @@ class KVMWorker(QObject):
         """Monitor a single client connection, handle commands and remove it on disconnect."""
         sock.settimeout(1.0)
         buffer = b''
+
+        def recv_all(s, n):
+            data = b''
+            while len(data) < n:
+                chunk = s.recv(n - len(data))
+                if not chunk:
+                    return None
+                data += chunk
+            return data
+
+        # Expect an initial handshake with the client name
+        client_name = str(addr)
+        try:
+            raw_len = recv_all(sock, 4)
+            if raw_len:
+                msg_len = struct.unpack('!I', raw_len)[0]
+                payload = recv_all(sock, msg_len)
+                if payload:
+                    hello = msgpack.unpackb(payload, raw=False)
+                    client_name = hello.get('device_name', client_name)
+        except Exception:
+            pass
+        self.client_infos[sock] = client_name
+        logging.info(f"Client connected: {client_name} ({addr})")
+
         try:
             while self._running:
                 try:
@@ -156,6 +200,7 @@ class KVMWorker(QObject):
                             data = msgpack.unpackb(payload, raw=False)
                             cmd = data.get('command')
                             if cmd == 'switch_elitedesk':
+                                self.set_active_client_by_name('elitedesk')
                                 self.toggle_kvm_active(True)
                             elif cmd == 'switch_laptop':
                                 self.toggle_kvm_active(False)
@@ -173,6 +218,10 @@ class KVMWorker(QObject):
                 pass
             if sock in self.client_sockets:
                 self.client_sockets.remove(sock)
+            if sock in self.client_infos:
+                del self.client_infos[sock]
+            if sock == self.active_client:
+                self.active_client = None
             if self.kvm_active and not self.client_sockets:
                 self.deactivate_kvm()
 
@@ -251,7 +300,10 @@ class KVMWorker(QObject):
                 if payload is None:
                     break
                 to_remove = []
-                for sock in list(self.client_sockets):
+                targets = [self.active_client] if self.active_client else list(self.client_sockets)
+                for sock in list(targets):
+                    if sock not in self.client_sockets:
+                        continue
                     try:
                         sock.sendall(struct.pack('!I', len(payload)) + payload)
                     except Exception:
@@ -263,6 +315,10 @@ class KVMWorker(QObject):
                         pass
                     if s in self.client_sockets:
                         self.client_sockets.remove(s)
+                    if s in self.client_infos:
+                        del self.client_infos[s]
+                    if s == self.active_client:
+                        self.active_client = None
                 if to_remove and not self.client_sockets:
                     self.deactivate_kvm()
                     break
@@ -412,6 +468,12 @@ class KVMWorker(QObject):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 s.connect((server_ip, self.settings['port']))
+                # identify ourselves to the server
+                try:
+                    hello = msgpack.packb({'device_name': socket.gethostname()}, use_bin_type=True)
+                    s.sendall(struct.pack('!I', len(hello)) + hello)
+                except Exception:
+                    pass
                 logging.info("TCP kapcsolat sikeres.")
                 self.status_update.emit(f"Csatlakozva. Irányítás átvéve.")
 
