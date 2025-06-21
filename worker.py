@@ -53,6 +53,18 @@ class KVMWorker(QObject):
         logging.warning(f"No client matching '{name}' found")
         return False
 
+    def toggle_client_control(self, name: str, *, switch_monitor: bool = True) -> None:
+        """Activate or deactivate control for a specific client."""
+        current = self.client_infos.get(self.active_client, "").lower()
+        target = name.lower()
+        if self.kvm_active and current.startswith(target):
+            self.deactivate_kvm()
+            return
+        if self.kvm_active:
+            self.deactivate_kvm()
+        if self.set_active_client_by_name(name):
+            self.activate_kvm(switch_monitor=switch_monitor)
+
     def stop(self):
         logging.info("stop() metódus meghívva.")
         self._running = False
@@ -113,12 +125,11 @@ class KVMWorker(QObject):
             current_pressed_ids.add(key_id)
             if hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
-                self.toggle_kvm_active(False)
+                self.toggle_client_control('laptop', switch_monitor=False)
                 self.release_hotkey_keys()
             elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
-                self.set_active_client_by_name('elitedesk')
-                self.toggle_kvm_active(True)
+                self.toggle_client_control('elitedesk', switch_monitor=True)
                 self.release_hotkey_keys()
 
         def on_release(key):
@@ -204,10 +215,9 @@ class KVMWorker(QObject):
                             data = msgpack.unpackb(payload, raw=False)
                             cmd = data.get('command')
                             if cmd == 'switch_elitedesk':
-                                self.set_active_client_by_name('elitedesk')
-                                self.toggle_kvm_active(True)
+                                self.toggle_client_control('elitedesk', switch_monitor=True)
                             elif cmd == 'switch_laptop':
-                                self.toggle_kvm_active(False)
+                                self.toggle_client_control('laptop', switch_monitor=False)
                         except Exception:
                             logging.warning("Hibas parancs a klienstol")
                 except socket.timeout:
