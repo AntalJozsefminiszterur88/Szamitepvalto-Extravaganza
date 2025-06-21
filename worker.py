@@ -13,6 +13,13 @@ from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUM
 STREAM_LOOP_DELAY = 0.05
 
 class KVMWorker(QObject):
+    __slots__ = (
+        'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
+        'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
+        'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
+        'device_name'
+    )
+
     finished = Signal()
     status_update = Signal(str)
 

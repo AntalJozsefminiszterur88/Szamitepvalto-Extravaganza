@@ -91,6 +91,13 @@ def set_autostart(enabled: bool) -> None:
         logging.info("Autostart beállítás kihagyva: nem támogatott platform.")
 
 class MainWindow(QMainWindow):
+    __slots__ = (
+        'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
+        'host_code', 'client_code', 'hotkey_label', 'autostart_check',
+        'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
+        'tray_icon'
+    )
+
     # A MainWindow többi része változatlan...
     def __init__(self):
         super().__init__()
