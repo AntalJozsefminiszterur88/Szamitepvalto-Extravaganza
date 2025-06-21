@@ -9,6 +9,9 @@ from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal
 from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1, VK_F12
 
+# Delay between iterations in the streaming loop to lower CPU usage
+STREAM_LOOP_DELAY = 0.05
+
 class KVMWorker(QObject):
     finished = Signal()
     status_update = Signal(str)
@@ -433,7 +436,7 @@ class KVMWorker(QObject):
         k_listener.start()
         
         while self.kvm_active and self._running:
-            time.sleep(0.01)
+            time.sleep(STREAM_LOOP_DELAY)
 
         for ktype, kval in list(pressed_keys):
             send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
