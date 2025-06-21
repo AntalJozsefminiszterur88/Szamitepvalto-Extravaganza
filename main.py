@@ -4,12 +4,11 @@
 import sys
 import os
 import logging
-import os
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import QLockFile, QStandardPaths
+from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from gui import MainWindow
-from config import ICON_PATH
+from config import ICON_PATH, APP_NAME, ORG_NAME
 
 # A naplózást itt, a legfelső szinten állítjuk be.
 log_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -36,8 +35,15 @@ if __name__ == "__main__":
         logging.error("A program már fut. Csak egy példány indítható.")
         sys.exit(1)
 
-    start_hidden = "--tray" in sys.argv or "--minimized" in sys.argv
-    auto_connect = "--tray" in sys.argv
+    args = sys.argv[1:]
+    start_hidden = "--tray" in args or "--minimized" in args
+    auto_connect = "--tray" in args
+
+    if getattr(sys, "frozen", False) and not start_hidden:
+        settings = QSettings(ORG_NAME, APP_NAME)
+        if settings.value("other/autostart", False, type=bool):
+            start_hidden = True
+            auto_connect = True
     app = QApplication(sys.argv)
     # Prevent the application from quitting when the last window is closed.
     app.setQuitOnLastWindowClosed(False)
