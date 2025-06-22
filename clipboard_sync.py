@@ -3,27 +3,79 @@ import socket
 import threading
 import time
 import pyperclip
+import tkinter
 import logging
+import os
 
 BUFFER_SIZE = 4096
 CHECK_INTERVAL = 0.5
 
+# Fallback clipboard storage when system clipboard is unavailable
+_last_clipboard = ""
+# Track which clipboard methods failed to avoid log spam
+_logged_failures = set()
+
+
+def _pyperclip_copy(text: str) -> None:
+    pyperclip.copy(text)
+
+
+def _tk_copy(text: str) -> None:
+    if not os.environ.get("DISPLAY") and os.name != "nt":
+        raise RuntimeError("No GUI environment")
+    root = tkinter.Tk()
+    root.withdraw()
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+    finally:
+        root.destroy()
+
 
 def safe_copy(text: str) -> None:
     """Attempt to copy text to the clipboard without raising errors."""
+    for func in (_pyperclip_copy, _tk_copy):
+        try:
+            func(text)
+            global _last_clipboard
+            _last_clipboard = text
+            return
+        except Exception as e:
+            if func.__name__ not in _logged_failures:
+                logging.error("Failed to set clipboard using %s: %s", func.__name__, e)
+                _logged_failures.add(func.__name__)
+    _last_clipboard = text
+
+
+def _pyperclip_paste() -> str:
+    return pyperclip.paste()
+
+
+def _tk_paste() -> str:
+    if not os.environ.get("DISPLAY") and os.name != "nt":
+        raise RuntimeError("No GUI environment")
+    root = tkinter.Tk()
+    root.withdraw()
     try:
-        pyperclip.copy(text)
-    except Exception as e:
-        logging.error("Failed to set clipboard: %s", e)
+        text = root.clipboard_get()
+    except Exception:
+        text = ""
+    finally:
+        root.destroy()
+    return text
 
 
 def safe_paste() -> str:
     """Attempt to read the clipboard without raising errors."""
-    try:
-        return pyperclip.paste()
-    except Exception as e:
-        logging.error("Failed to read clipboard: %s", e)
-        return ""
+    for func in (_pyperclip_paste, _tk_paste):
+        try:
+            return func()
+        except Exception as e:
+            if func.__name__ not in _logged_failures:
+                logging.error("Failed to read clipboard using %s: %s", func.__name__, e)
+                _logged_failures.add(func.__name__)
+    return _last_clipboard
 
 
 def send_clip(conn, text):
