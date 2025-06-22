@@ -30,17 +30,6 @@ The script ensures PyInstaller is installed and bundles `main.py` into a single
 `keyboard_mouse_switch_icon.ico` is included using the `--add-data` option so it
 is available at runtime. The console window is hidden on startup.
 
-## Building a Linux executable
-
-On Windows systems with the Windows Subsystem for Linux (WSL) installed you can
-create a Linux binary using the `build_linux.bat` script:
-
-```cmd
-build_linux.bat
-```
-
-The batch file runs PyInstaller inside WSL and places the resulting executable
-in the `dist` directory.
 
 ## Installation
 
@@ -94,16 +83,15 @@ which activates the EliteDesk as the new target.
 
 ### Autostart
 
-On Windows the application configures autostart via the registry. On Linux a
-``.desktop`` entry is created under ``~/.config/autostart``. When started this
-way the program is launched with the ``--tray`` argument so it remains hidden in
-the system tray. If a packaged executable is used the stored path now points
-directly to the ``.exe`` with the same ``--tray`` flag. Disable the option in
-the GUI to remove the entry. When launched from autostart the application
-automatically activates the previously selected connection. In a packaged build
-this autostart setting is also honoured when the ``.exe`` is started manually,
-causing the window to stay in the tray and the previous connection to activate
-immediately.
+On Windows the application configures autostart via the registry. When started
+this way the program is launched with the ``--tray`` argument so it remains
+hidden in the system tray. If a packaged executable is used the stored path now
+points directly to the ``.exe`` with the same ``--tray`` flag. Disable the
+option in the GUI to remove the entry. When launched from autostart the
+application automatically activates the previously selected connection. In a
+packaged build this autostart setting is also honoured when the ``.exe`` is
+started manually, causing the window to stay in the tray and the previous
+connection to activate immediately.
 
 
 ## Clipboard synchronization
@@ -123,7 +111,6 @@ python clipboard_sync.py client <server-ip> --port 8765
 
 Whenever the clipboard changes on any connected computer the new contents are sent to all others.
 The script relies on the `pyperclip` library for cross-platform clipboard access.
-On Linux systems `pyperclip` needs either `xclip` or `xsel` installed for clipboard operations to work.
 
 ## Formatting
 
