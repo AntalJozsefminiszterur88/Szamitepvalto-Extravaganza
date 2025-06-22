@@ -2,10 +2,31 @@ import argparse
 import socket
 import threading
 import time
+import logging
 import pyperclip
 
 BUFFER_SIZE = 4096
 CHECK_INTERVAL = 0.5
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def safe_paste():
+    """Return clipboard contents or an empty string if unavailable."""
+    try:
+        return pyperclip.paste()
+    except Exception as e:
+        logging.error("Clipboard paste failed: %s", e)
+        return ""
+
+
+def safe_copy(text: str) -> None:
+    """Copy text to the clipboard, logging errors."""
+    try:
+        pyperclip.copy(text)
+    except Exception as e:
+        logging.error("Clipboard copy failed: %s", e)
 
 def send_clip(conn, text):
     data = text.encode('utf-8')
@@ -30,7 +51,7 @@ class ClipboardServer:
         self.host = host
         self.port = port
         self.clients = []
-        self.last_clip = pyperclip.paste()
+        self.last_clip = safe_paste()
         self.lock = threading.Lock()
 
     def broadcast(self, text, exclude=None):
@@ -51,7 +72,7 @@ class ClipboardServer:
                 with self.lock:
                     if clip != self.last_clip:
                         self.last_clip = clip
-                        pyperclip.copy(clip)
+                        safe_copy(clip)
                         self.broadcast(clip, exclude=conn)
 
     def run(self):
@@ -68,7 +89,7 @@ class ClipboardServer:
 
     def monitor_clipboard(self):
         while True:
-            clip = pyperclip.paste()
+            clip = safe_paste()
             with self.lock:
                 if clip != self.last_clip:
                     self.last_clip = clip
@@ -79,7 +100,7 @@ class ClipboardClient:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.last_clip = pyperclip.paste()
+        self.last_clip = safe_paste()
         self.sock = None
 
     def connect(self):
@@ -98,13 +119,13 @@ class ClipboardClient:
                 break
             if clip != self.last_clip:
                 self.last_clip = clip
-                pyperclip.copy(clip)
+                safe_copy(clip)
         conn.close()
 
     def monitor_clipboard(self):
         conn = self.sock
         while True:
-            clip = pyperclip.paste()
+            clip = safe_paste()
             if clip != self.last_clip:
                 self.last_clip = clip
                 try:
