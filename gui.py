@@ -30,8 +30,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QSize, QSettings, QThread, Qt
 
+
 from worker import KVMWorker
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
+
 
 def set_autostart(enabled: bool) -> None:
     """Enable or disable autostart depending on the current platform."""
@@ -88,6 +90,7 @@ def set_autostart(enabled: bool) -> None:
                 logging.info("Autostart kikapcsolása: a fájl nem létezett.")
     else:
         logging.info("Autostart beállítás kihagyva: nem támogatott platform.")
+
 
 class MainWindow(QMainWindow):
     __slots__ = (
@@ -169,6 +172,7 @@ class MainWindow(QMainWindow):
         self.kvm_worker = None
         self.init_tray_icon()
         self.load_settings()
+
     def get_settings(self):
         if self.radio_desktop.isChecked():
             mode = 'ado'
@@ -188,11 +192,13 @@ class MainWindow(QMainWindow):
                 'client': int(self.client_code.text()),
             },
         }
+
     def toggle_kvm_service(self):
         if self.kvm_thread and self.kvm_thread.isRunning():
             self.stop_kvm_service()
         else:
             self.start_kvm_service()
+
     def start_kvm_service(self):
         self.kvm_thread = QThread()
         self.kvm_worker = KVMWorker(self.get_settings())
@@ -203,9 +209,11 @@ class MainWindow(QMainWindow):
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         self.set_controls_enabled(False)
+
     def stop_kvm_service(self):
         if self.kvm_worker:
             self.kvm_worker.stop()
+
     def on_service_stopped(self):
         if self.kvm_thread:
             self.kvm_thread.quit()
@@ -215,6 +223,7 @@ class MainWindow(QMainWindow):
         self.start_button.setText("KVM Szolgáltatás Indítása")
         self.on_status_update("Állapot: Inaktív")
         self.set_controls_enabled(True)
+
     def save_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
         if self.radio_desktop.isChecked():
@@ -236,6 +245,7 @@ class MainWindow(QMainWindow):
             set_autostart(autostart_enabled)
         except Exception as e:
             logging.error(f"Nem sikerült az autostart beállítása: {e}")
+
     def load_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
         device = settings.value("device/name", "desktop")
@@ -255,6 +265,7 @@ class MainWindow(QMainWindow):
         self.host_code.textChanged.connect(self.save_settings)
         self.client_code.textChanged.connect(self.save_settings)
         self.autostart_check.toggled.connect(self.save_settings)
+
     def set_controls_enabled(self, enabled):
         self.radio_desktop.setEnabled(enabled)
         self.radio_laptop.setEnabled(enabled)
@@ -263,12 +274,15 @@ class MainWindow(QMainWindow):
         self.host_code.setEnabled(enabled)
         self.client_code.setEnabled(enabled)
         self.autostart_check.setEnabled(enabled)
+
     def on_status_update(self, message):
         self.status_label.setText(message)
         logging.info(f"GUI Status Update: {message}")
+
     def get_temp_icon(self):
         """Return the application icon."""
         return QIcon(ICON_PATH)
+
     def init_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self.get_temp_icon(), self)
         self.tray_icon.setToolTip("KVM Switch")
@@ -288,10 +302,12 @@ class MainWindow(QMainWindow):
             if reason == QSystemTrayIcon.ActivationReason.Trigger
             else None
         )
+
     def closeEvent(self, event):
         """Minimize the window to the tray on close."""
         event.ignore()
         self.hide()
+
     def quit_application(self):
         logging.info("Kilépés menüpont kiválasztva. Program leállítása.")
         self.stop_kvm_service()

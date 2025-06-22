@@ -7,10 +7,12 @@ import pyperclip
 BUFFER_SIZE = 4096
 CHECK_INTERVAL = 0.5
 
+
 def send_clip(conn, text):
     data = text.encode('utf-8')
     size = len(data).to_bytes(4, 'big')
     conn.sendall(size + data)
+
 
 def recv_clip(conn):
     size_data = conn.recv(4)
@@ -24,6 +26,7 @@ def recv_clip(conn):
             return None
         data += chunk
     return data.decode('utf-8')
+
 
 class ClipboardServer:
     def __init__(self, host, port):
@@ -75,6 +78,7 @@ class ClipboardServer:
                     self.broadcast(clip)
             time.sleep(CHECK_INTERVAL)
 
+
 class ClipboardClient:
     def __init__(self, host, port):
         self.host = host
@@ -112,6 +116,7 @@ class ClipboardClient:
                 except Exception:
                     break
             time.sleep(CHECK_INTERVAL)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Simple clipboard sync tool")

@@ -123,3 +123,14 @@ python clipboard_sync.py client <server-ip> --port 8765
 
 Whenever the clipboard changes on any connected computer the new contents are sent to all others.
 The script relies on the `pyperclip` library for cross-platform clipboard access.
+
+## Formatting
+
+Code style checks can be performed with `pycodestyle`:
+
+```bash
+pycodestyle --max-line-length=120 gui.py clipboard_sync.py
+```
+
+You can also use the provided configuration in `setup.cfg` to keep
+lines under 120 characters.
