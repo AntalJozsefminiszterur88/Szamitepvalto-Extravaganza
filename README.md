@@ -68,6 +68,11 @@ stop the KVM service. The correct operating mode is selected automatically.
 The desktop acting as the host now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
+Slow clients that cannot keep up with the stream are disconnected after a short
+send timeout so they no longer cause lag for others. Input events are queued up
+to a limited size and older ones are discarded if necessary. The application
+also attempts to run with high process priority for smoother forwarding.
+
 ### System tray
 
 When closing the main window with the **X** button the window is automatically

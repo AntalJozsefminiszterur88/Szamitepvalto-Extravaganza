@@ -4,6 +4,7 @@
 import sys
 import os
 import logging
+import ctypes
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
@@ -23,8 +24,23 @@ logging.basicConfig(
     ]
 )
 
+
+def set_high_priority():
+    """Attempt to run the process with high priority."""
+    try:
+        if os.name == "nt":
+            HIGH_PRIORITY_CLASS = 0x0080
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(), HIGH_PRIORITY_CLASS
+            )
+        else:
+            os.nice(-10)
+    except Exception as e:
+        logging.warning("Failed to set high process priority: %s", e)
+
 if __name__ == "__main__":
     logging.info("Alkalmazás indítása...")
+    set_high_priority()
 
     # Allow only a single running instance using a lock file
     data_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)

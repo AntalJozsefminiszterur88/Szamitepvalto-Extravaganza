@@ -12,6 +12,8 @@ from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUM
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
+# Maximum number of events queued for sending before old ones are dropped
+SEND_QUEUE_MAXSIZE = 200
 
 class KVMWorker(QObject):
     __slots__ = (
@@ -401,7 +403,7 @@ class KVMWorker(QObject):
         last_pos = {'x': center_x, 'y': center_y}
         is_warping = False
 
-        send_queue = queue.Queue()
+        send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
         unsent_events = []
 
         def sender():
@@ -423,7 +425,9 @@ class KVMWorker(QObject):
                     if sock not in self.client_sockets:
                         continue
                     try:
+                        sock.settimeout(0.1)
                         sock.sendall(struct.pack('!I', len(packed)) + packed)
+                        sock.settimeout(1.0)
                         if event and event.get('type') == 'move_relative':
                             logging.info(
                                 "Mouse move sent to %s: dx=%s dy=%s",
@@ -437,6 +441,12 @@ class KVMWorker(QObject):
                                 len(packed),
                                 self.client_infos.get(sock, sock.getpeername()),
                             )
+                    except (socket.timeout, BlockingIOError):
+                        logging.warning(
+                            "Client not reading, disconnecting %s",
+                            self.client_infos.get(sock, sock.getpeername()),
+                        )
+                        to_remove.append(sock)
                     except Exception as e:
                         try:
                             event = msgpack.unpackb(packed, raw=False)
@@ -480,7 +490,13 @@ class KVMWorker(QObject):
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
-                send_queue.put((packed, data))
+                if send_queue.full():
+                    try:
+                        send_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    logging.debug("Send queue full, dropping oldest event")
+                send_queue.put_nowait((packed, data))
                 if data.get('type') == 'move_relative':
                     logging.info(
                         f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
