@@ -47,7 +47,7 @@ class KVMWorker(QObject):
         self.device_name = settings.get('device_name', socket.gethostname())
 
     def release_hotkey_keys(self):
-        """Release potential stuck hotkey keys."""
+        """Release potential stuck hotkey keys without generating input."""
         kc = keyboard.Controller()
         keys = [
             keyboard.Key.ctrl_l,
@@ -58,7 +58,6 @@ class KVMWorker(QObject):
         ]
         for k in keys:
             try:
-                kc.press(k)
                 kc.release(k)
             except Exception:
                 pass
