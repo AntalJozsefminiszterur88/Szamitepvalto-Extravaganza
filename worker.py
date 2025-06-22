@@ -2,6 +2,7 @@
 # Javítva: Streaming listener `AttributeError`, "sticky key" hiba, visszaváltási logika, egér-akadás.
 
 import socket, time, threading, logging, tkinter, queue, struct
+from typing import Optional
 import msgpack
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
@@ -84,11 +85,11 @@ class KVMWorker(QObject):
         )
         if self.kvm_active and current.startswith(target):
             logging.debug("Deactivating KVM because active client matches target")
-            self.deactivate_kvm(release_keys=release_keys)
+            self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control same client")
             return
         if self.kvm_active:
             logging.debug("Deactivating current KVM session before switching client")
-            self.deactivate_kvm(release_keys=release_keys)
+            self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control switch")
         if self.set_active_client_by_name(name):
             logging.debug("Activating KVM for client %s", name)
             self.activate_kvm(switch_monitor=switch_monitor)
@@ -98,7 +99,7 @@ class KVMWorker(QObject):
         logging.info("stop() metódus meghívva.")
         self._running = False
         if self.kvm_active:
-            self.deactivate_kvm(switch_monitor=False) # Leállításkor ne váltson monitort
+            self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
         try:
             self.zeroconf.close()
         except:
@@ -179,7 +180,7 @@ class KVMWorker(QObject):
             if pending_client and not current_pressed_ids:
                 logging.info(f"Hotkey action executed: {pending_client}")
                 if pending_client == 'desktop':
-                    self.deactivate_kvm(switch_monitor=True)
+                    self.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
                 else:
                     self.toggle_client_control(
                         pending_client,
@@ -290,7 +291,7 @@ class KVMWorker(QObject):
             if sock == self.active_client:
                 self.active_client = None
             if self.kvm_active and not self.client_sockets:
-                self.deactivate_kvm()
+                self.deactivate_kvm(reason="all clients disconnected")
 
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
@@ -303,7 +304,7 @@ class KVMWorker(QObject):
         if not self.kvm_active:
             self.activate_kvm(switch_monitor=switch_monitor)
         else:
-            self.deactivate_kvm(switch_monitor=switch_monitor)
+            self.deactivate_kvm(switch_monitor=switch_monitor, reason="toggle_kvm_active")
         self.release_hotkey_keys()
 
     def activate_kvm(self, switch_monitor=True):
@@ -333,13 +334,28 @@ class KVMWorker(QObject):
                 logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
                 time.sleep(1)
 
-    def deactivate_kvm(self, switch_monitor=None, *, release_keys: bool = True):
-        logging.info(
-            "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
-            switch_monitor,
-            self.kvm_active,
-            self.client_infos.get(self.active_client),
-        )
+    def deactivate_kvm(
+        self,
+        switch_monitor=None,
+        *,
+        release_keys: bool = True,
+        reason: Optional[str] = None,
+    ):
+        if reason:
+            logging.info(
+                "deactivate_kvm called. reason=%s switch_monitor=%s kvm_active=%s active_client=%s",
+                reason,
+                switch_monitor,
+                self.kvm_active,
+                self.client_infos.get(self.active_client),
+            )
+        else:
+            logging.info(
+                "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
+                switch_monitor,
+                self.kvm_active,
+                self.client_infos.get(self.active_client),
+            )
         self.kvm_active = False
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
@@ -369,7 +385,7 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.error(f"Monitor hiba: {e}", exc_info=True)
                 self.status_update.emit(f"Monitor hiba: {e}")
-                self.deactivate_kvm()
+                self.deactivate_kvm(reason="monitor switch failed")
                 return
         
         host_mouse_controller = mouse.Controller()
@@ -445,7 +461,7 @@ class KVMWorker(QObject):
                     if s == self.active_client:
                         self.active_client = None
                 if to_remove and not self.client_sockets:
-                    self.deactivate_kvm()
+                    self.deactivate_kvm(reason="all clients disconnected")
                     break
 
         sender_thread = threading.Thread(target=sender, daemon=True)
@@ -475,7 +491,7 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
                 unsent_events.append(data)
-                self.deactivate_kvm()
+                self.deactivate_kvm(reason="queue error")
                 return False
 
         def on_move(x, y):
