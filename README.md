@@ -73,6 +73,13 @@ send timeout so they no longer cause lag for others. Input events are queued up
 to a limited size and older ones are discarded if necessary. The application
 also attempts to run with high process priority for smoother forwarding.
 
+### Debug logging
+
+For troubleshooting, enable verbose debug logging by editing `main.py` and
+setting `logging.basicConfig(level=logging.DEBUG)`. The log file
+`kvm_switch.log` will then contain detailed information about hotkey detection,
+network activity and event forwarding.
+
 ### System tray
 
 When closing the main window with the **X** button the window is automatically
