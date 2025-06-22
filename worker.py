@@ -709,6 +709,22 @@ class KVMWorker(QObject):
                     hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
                     hk_listener.start()
 
+                    last_event_time = time.time()
+                    last_warning = 0
+                    hb_thread = None
+
+                    def heartbeat():
+                        nonlocal last_warning
+                        while self._running and self.server_ip == ip:
+                            if time.time() - last_event_time > 2:
+                                if time.time() - last_warning > 2:
+                                    logging.warning("No input events received for over 2 seconds")
+                                    last_warning = time.time()
+                            time.sleep(1)
+
+                    hb_thread = threading.Thread(target=heartbeat, daemon=True, name="HeartbeatThread")
+                    hb_thread.start()
+
                     def recv_all(sock, n):
                         data = b''
                         while len(data) < n:
@@ -729,6 +745,7 @@ class KVMWorker(QObject):
                         try:
                             data = msgpack.unpackb(payload, raw=False)
                             logging.debug(f"Received event: {data}")
+                            last_event_time = time.time()
                             event_type = data.get('type')
                             if event_type == 'move_relative':
                                 mouse_controller.move(data['dx'], data['dy'])
@@ -765,6 +782,11 @@ class KVMWorker(QObject):
 
             finally:
                 logging.info("Connection to server closed")
+                if hb_thread is not None:
+                    try:
+                        hb_thread.join(timeout=0.1)
+                    except Exception:
+                        pass
                 for k in list(pressed_keys):
                     try:
                         keyboard_controller.release(k)
