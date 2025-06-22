@@ -177,6 +177,7 @@ class KVMWorker(QObject):
             current_pressed_ids.discard(key_id)
             logging.debug(f"Key released: {key} (id={key_id}). Remaining pressed: {current_pressed_ids}")
             if pending_client and not current_pressed_ids:
+                logging.info(f"Hotkey action executed: {pending_client}")
                 if pending_client == 'desktop':
                     self.deactivate_kvm(switch_monitor=True)
                 else:
@@ -294,9 +295,10 @@ class KVMWorker(QObject):
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
         logging.info(
-            "toggle_kvm_active called. current_state=%s switch_monitor=%s",
+            "toggle_kvm_active called. current_state=%s switch_monitor=%s active_client=%s",
             self.kvm_active,
             switch_monitor,
+            self.client_infos.get(self.active_client),
         )
         if not self.kvm_active:
             self.activate_kvm(switch_monitor=switch_monitor)
@@ -333,9 +335,10 @@ class KVMWorker(QObject):
 
     def deactivate_kvm(self, switch_monitor=None, *, release_keys: bool = True):
         logging.info(
-            "deactivate_kvm called. switch_monitor=%s kvm_active=%s",
+            "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
             switch_monitor,
             self.kvm_active,
+            self.client_infos.get(self.active_client),
         )
         self.kvm_active = False
         self.status_update.emit("Állapot: Inaktív...")
@@ -393,19 +396,33 @@ class KVMWorker(QObject):
                 if payload is None:
                     logging.debug("Sender thread exiting")
                     break
+                if isinstance(payload, tuple):
+                    packed, event = payload
+                else:
+                    packed, event = payload, None
                 to_remove = []
                 targets = [self.active_client] if self.active_client else list(self.client_sockets)
                 for sock in list(targets):
                     if sock not in self.client_sockets:
                         continue
                     try:
-                        sock.sendall(struct.pack('!I', len(payload)) + payload)
-                        logging.debug(
-                            f"Sent {len(payload)} bytes to {self.client_infos.get(sock, sock.getpeername())}"
-                        )
+                        sock.sendall(struct.pack('!I', len(packed)) + packed)
+                        if event and event.get('type') == 'move_relative':
+                            logging.info(
+                                "Mouse move sent to %s: dx=%s dy=%s",
+                                self.client_infos.get(sock, sock.getpeername()),
+                                event.get('dx'),
+                                event.get('dy'),
+                            )
+                        else:
+                            logging.debug(
+                                "Sent %d bytes to %s",
+                                len(packed),
+                                self.client_infos.get(sock, sock.getpeername()),
+                            )
                     except Exception as e:
                         try:
-                            event = msgpack.unpackb(payload, raw=False)
+                            event = msgpack.unpackb(packed, raw=False)
                         except Exception:
                             event = '<unpack failed>'
                         logging.error(
@@ -443,7 +460,7 @@ class KVMWorker(QObject):
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
-                send_queue.put(packed)
+                send_queue.put((packed, data))
                 if data.get('type') == 'move_relative':
                     logging.info(
                         f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
