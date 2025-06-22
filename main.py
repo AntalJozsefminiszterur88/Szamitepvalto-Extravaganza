@@ -33,8 +33,6 @@ def set_high_priority():
             ctypes.windll.kernel32.SetPriorityClass(
                 ctypes.windll.kernel32.GetCurrentProcess(), HIGH_PRIORITY_CLASS
             )
-        else:
-            os.nice(-10)
     except Exception as e:
         logging.warning("Failed to set high process priority: %s", e)
 

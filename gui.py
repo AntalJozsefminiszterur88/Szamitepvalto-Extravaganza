@@ -7,10 +7,7 @@ import logging
 import os
 
 # Windows specific module only available on that platform
-if sys.platform.startswith("win"):
-    import winreg  # type: ignore
-else:  # pragma: no cover - platform specific
-    winreg = None
+import winreg  # type: ignore
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -58,36 +55,6 @@ def set_autostart(enabled: bool) -> None:
             logging.warning("Automatikus indulás kikapcsolva (kulcs nem létezett).")
         except Exception as e:  # pragma: no cover - platform specific
             logging.error("Hiba az automatikus indulás beállításakor: %s", e)
-    elif sys.platform.startswith("linux"):
-
-        autostart_dir = os.path.join(os.path.expanduser("~"), ".config", "autostart")
-        os.makedirs(autostart_dir, exist_ok=True)
-        desktop_file = os.path.join(autostart_dir, "KVM_Switch.desktop")
-
-        if enabled:
-            if getattr(sys, "frozen", False):
-                exec_cmd = f"{sys.executable} --tray"
-            else:
-                script = os.path.join(os.path.dirname(__file__), "main.py")
-                exec_cmd = f"{sys.executable} {script} --tray"
-            desktop_contents = (
-                "[Desktop Entry]\n"
-                "Type=Application\n"
-                f"Exec={exec_cmd}\n"
-                "Hidden=false\n"
-                "NoDisplay=false\n"
-                "X-GNOME-Autostart-enabled=true\n"
-                "Name=KVM Switch\n"
-            )
-            with open(desktop_file, "w", encoding="utf-8") as f:
-                f.write(desktop_contents)
-            logging.info("Autostart engedélyezve Linuxon: %s", desktop_file)
-        else:
-            try:
-                os.remove(desktop_file)
-                logging.info("Automatikus indulás kikapcsolva Linuxon.")
-            except FileNotFoundError:
-                logging.info("Autostart kikapcsolása: a fájl nem létezett.")
     else:
         logging.info("Autostart beállítás kihagyva: nem támogatott platform.")
 
