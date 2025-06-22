@@ -134,3 +134,13 @@ pycodestyle --max-line-length=120 gui.py clipboard_sync.py
 
 You can also use the provided configuration in `setup.cfg` to keep
 lines under 120 characters.
+
+## Cleaning up
+
+Before committing, remove Python bytecode caches to keep the repository small:
+
+```bash
+find . -name '__pycache__' -type d -exec rm -r {} +
+```
+
+These directories are already ignored via `.gitignore` and won't be tracked by Git.
