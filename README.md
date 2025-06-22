@@ -49,7 +49,7 @@ The main dependencies are:
 ## Usage
 
 After installing the dependencies, run `python main.py` to launch the GUI. The
-application logs activity to `kvm_switch.log` and stores settings via
+application logs activity to the console and stores settings via
 `QSettings`. Use the interface to configure host and client codes, select which
 computer this instance represents (Desktop, Laptop or EliteDesk) and start or
 stop the KVM service. The correct operating mode is selected automatically.
@@ -65,9 +65,9 @@ also attempts to run with high process priority for smoother forwarding.
 ### Debug logging
 
 For troubleshooting, enable verbose debug logging by editing `main.py` and
-setting `logging.basicConfig(level=logging.DEBUG)`. The log file
-`kvm_switch.log` will then contain detailed information about hotkey detection,
-network activity and event forwarding.
+setting `logging.basicConfig(level=logging.DEBUG)`. Detailed information will
+then appear in the console about hotkey detection, network activity and event
+forwarding.
 
 ### System tray
 

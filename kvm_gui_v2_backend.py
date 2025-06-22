@@ -19,16 +19,10 @@ from PySide6.QtCore import QSize, QSettings, QThread, QObject, Signal
 from config import ICON_PATH
 
 # --- NAPLÓZÁS BEÁLLÍTÁSA ---
-log_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-log_file = os.path.join(log_dir, "kvm_switch.log")
-
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file),  # Naplózás fájlba
-        logging.StreamHandler(sys.stdout)     # Naplózás a konzolra is
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 
 class KVMWorker(QObject):
