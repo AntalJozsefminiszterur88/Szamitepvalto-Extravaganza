@@ -303,6 +303,8 @@ class KVMWorker(QObject):
             switch_monitor,
             self.client_infos.get(self.active_client),
         )
+        if self.active_client is None:
+            logging.warning("toggle_kvm_active invoked with no active_client")
         if not self.kvm_active:
             self.activate_kvm(switch_monitor=switch_monitor)
         else:
@@ -377,6 +379,17 @@ class KVMWorker(QObject):
         # Ensure hotkey keys are released when deactivating if requested
         if release_keys:
             self.release_hotkey_keys()
+
+        if self.active_client not in self.client_sockets:
+            if self.active_client is not None:
+                logging.warning("Active client disconnected during deactivation")
+            else:
+                logging.debug("No active client set after deactivation")
+            if self.client_sockets:
+                self.active_client = self.client_sockets[0]
+                logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
+            else:
+                self.active_client = None
     
     def start_kvm_streaming(self):
         logging.info("start_kvm_streaming: initiating control transfer")
@@ -551,6 +564,7 @@ class KVMWorker(QObject):
                         current_vks.discard(vk)
 
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD0 in current_vks):
+                    logging.debug(f"Hotkey detected for toggle_kvm_active with current_vks={current_vks}")
                     # send key releases before disabling streaming so the client doesn't
                     # get stuck with modifiers held down
                     for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD0]:
@@ -561,6 +575,7 @@ class KVMWorker(QObject):
                     self.toggle_kvm_active(self.switch_monitor)
                     return
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD1 in current_vks):
+                    logging.debug(f"Hotkey detected for laptop with current_vks={current_vks}")
                     for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD1]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
@@ -569,6 +584,7 @@ class KVMWorker(QObject):
                     self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
                     return
                 if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD2 in current_vks):
+                    logging.debug(f"Hotkey detected for elitedesk with current_vks={current_vks}")
                     for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD2]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
