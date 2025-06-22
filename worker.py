@@ -420,6 +420,7 @@ class KVMWorker(QObject):
                 else:
                     packed, event = payload, None
                 to_remove = []
+                active_lost = False
                 targets = [self.active_client] if self.active_client else list(self.client_sockets)
                 for sock in list(targets):
                     if sock not in self.client_sockets:
@@ -470,6 +471,11 @@ class KVMWorker(QObject):
                         del self.client_infos[s]
                     if s == self.active_client:
                         self.active_client = None
+                        active_lost = True
+                if active_lost:
+                    self.status_update.emit(
+                        "Kapcsolat megszakadt. Várakozás új kliensre..."
+                    )
                 if to_remove and not self.client_sockets:
                     self.deactivate_kvm(reason="all clients disconnected")
                     break
