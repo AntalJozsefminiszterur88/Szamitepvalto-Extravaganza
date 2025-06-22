@@ -386,6 +386,7 @@ class KVMWorker(QObject):
         is_warping = False
 
         send_queue = queue.Queue()
+        unsent_events = []
 
         def sender():
             while self.kvm_active and self._running:
@@ -429,6 +430,8 @@ class KVMWorker(QObject):
                             f"Failed sending event {event} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
                             exc_info=True,
                         )
+                        if event != '<unpack failed>':
+                            unsent_events.append(event)
                         to_remove.append(sock)
                 for s in to_remove:
                     try:
@@ -457,6 +460,7 @@ class KVMWorker(QObject):
                     self.client_infos.get(self.active_client),
                     len(self.client_sockets),
                 )
+                unsent_events.append(data)
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
@@ -470,6 +474,7 @@ class KVMWorker(QObject):
                 return True
             except Exception as e:
                 logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
+                unsent_events.append(data)
                 self.deactivate_kvm()
                 return False
 
@@ -582,6 +587,18 @@ class KVMWorker(QObject):
         k_listener.stop()
         send_queue.put(None)
         sender_thread.join()
+        while not send_queue.empty():
+            leftover = send_queue.get()
+            if leftover and isinstance(leftover, tuple):
+                _, evt = leftover
+            else:
+                evt = None
+            if evt:
+                unsent_events.append(evt)
+
+        if unsent_events:
+            logging.warning("Unsent or failed events: %s", unsent_events)
+
         logging.info("Streaming listenerek leálltak.")
 
     def run_client(self):
