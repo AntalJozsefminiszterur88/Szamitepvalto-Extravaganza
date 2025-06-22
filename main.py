@@ -12,16 +12,10 @@ from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
 
 # A naplózást itt, a legfelső szinten állítjuk be.
-log_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-log_file = os.path.join(log_dir, "kvm_switch.log")
-
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file, mode='w'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 
 
