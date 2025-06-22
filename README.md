@@ -123,6 +123,7 @@ python clipboard_sync.py client <server-ip> --port 8765
 
 Whenever the clipboard changes on any connected computer the new contents are sent to all others.
 The script relies on the `pyperclip` library for cross-platform clipboard access.
+On Linux systems `pyperclip` needs either `xclip` or `xsel` installed for clipboard operations to work.
 
 ## Formatting
 
