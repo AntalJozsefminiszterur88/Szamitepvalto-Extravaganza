@@ -116,3 +116,12 @@ python clipboard_sync.py client <server-ip> --port 8765
 
 Whenever the clipboard changes on any connected computer the new contents are sent to all others.
 The script relies on the `pyperclip` library for cross-platform clipboard access.
+
+## Contributing
+
+Before submitting a pull request, remove any `__pycache__` directories. These contain compiled Python files that should not be committed. The repository's `.gitignore` already excludes them once removed.
+
+```bash
+find . -name "__pycache__" -type d -exec rm -r {} +
+```
+
