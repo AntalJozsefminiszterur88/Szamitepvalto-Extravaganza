@@ -338,6 +338,20 @@ class MainWindow(QMainWindow):
         if not self.progress_dialog or not self.progress_dialog.isVisible():
             return
 
+        if operation in ("archiving", "archiving_complete"):
+            maximum = total if total > 0 else 1
+            self.progress_dialog.setMaximum(maximum)
+            self.progress_dialog.setValue(done)
+            if operation == "archiving":
+                self.progress_dialog.setLabelText(
+                    f"Tömörítés: {name} ({done}/{total} fájl)"
+                )
+            else:
+                self.progress_dialog.setLabelText(
+                    "Tömörítés kész. Küldés előkészítése..."
+                )
+            return
+
         maximum = total if total > 0 else 100
         self.progress_dialog.setMaximum(maximum)
 
