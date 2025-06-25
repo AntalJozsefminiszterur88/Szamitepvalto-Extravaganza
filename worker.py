@@ -167,6 +167,7 @@ class KVMWorker(QObject):
             )
         except Exception as e:
             logging.debug("Failed to query temp dir disk usage: %s", e)
+        start_time = time.time()
         try:
             # Pre-scan all paths to determine total number of files
             total_files = 0
@@ -179,6 +180,34 @@ class KVMWorker(QObject):
 
             archived_files = 0
             with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
+                def _write_with_heartbeat(src_path, arcname, ctype):
+                    """Write file while emitting heartbeat signal for large files."""
+                    hb_thread = None
+                    stop_evt = threading.Event()
+
+                    if os.path.getsize(src_path) > 1_000_000_000:
+                        def hb_loop():
+                            while not stop_evt.is_set():
+                                try:
+                                    self.file_progress_update.emit(
+                                        'archiving_large_file_working',
+                                        os.path.basename(src_path),
+                                        0,
+                                        0,
+                                    )
+                                except Exception:
+                                    pass
+                                stop_evt.wait(1)
+
+                        hb_thread = threading.Thread(target=hb_loop, daemon=True)
+                        hb_thread.start()
+
+                    try:
+                        zf.write(src_path, arcname, compress_type=ctype)
+                    finally:
+                        stop_evt.set()
+                        if hb_thread is not None:
+                            hb_thread.join()
                 for p in paths:
                     if os.path.isdir(p):
                         base = os.path.basename(p.rstrip(os.sep))
@@ -198,7 +227,7 @@ class KVMWorker(QObject):
                                     ext = os.path.splitext(f)[1].lower()
                                     if file_size > 1_000_000_000 or ext in {'.mkv', '.mp4', '.mov'}:
                                         compress_type = zipfile.ZIP_STORED
-                                    zf.write(full, rel, compress_type=compress_type)
+                                    _write_with_heartbeat(full, rel, compress_type)
                                     logging.debug("Archived %s", full)
                                 except MemoryError:
                                     msg = (
@@ -237,7 +266,7 @@ class KVMWorker(QObject):
                             ext = os.path.splitext(p)[1].lower()
                             if file_size > 1_000_000_000 or ext in {'.mkv', '.mp4', '.mov'}:
                                 compress_type = zipfile.ZIP_STORED
-                            zf.write(p, os.path.basename(p), compress_type=compress_type)
+                            _write_with_heartbeat(p, os.path.basename(p), compress_type)
                             logging.debug("Archived %s", p)
                         except MemoryError:
                             msg = (
@@ -273,6 +302,9 @@ class KVMWorker(QObject):
             logging.error("Failed to create archive: %s", e, exc_info=True)
             self.file_transfer_error.emit(f"Archive creation failed: {e}")
             return None
+        duration = time.time() - start_time
+        if duration > 600:
+            logging.warning("Archive creation took %.1f seconds", duration)
         logging.debug("Archive created at %s", archive)
         return archive
 
