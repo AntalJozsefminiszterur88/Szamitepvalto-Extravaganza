@@ -1,9 +1,20 @@
 # worker.py - VÉGLEGES JAVÍTOTT VERZIÓ
 # Javítva: Streaming listener `AttributeError`, "sticky key" hiba, visszaváltási logika, egér-akadás.
 
-import socket, time, threading, logging, tkinter, queue, struct
+import socket
+import time
+import threading
+import logging
+import tkinter
+import queue
+import struct
+import os
+import shutil
+import tempfile
+import zipfile
 from typing import Optional
 import msgpack
+import pyperclip
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
@@ -15,12 +26,14 @@ STREAM_LOOP_DELAY = 0.05
 # Maximum number of events queued for sending before old ones are dropped
 SEND_QUEUE_MAXSIZE = 200
 
+
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
-        'device_name'
+        'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
+        'network_file_clipboard'
     )
 
     finished = Signal()
@@ -45,6 +58,10 @@ class KVMWorker(QObject):
         self.server_ip = None
         self.connection_thread = None
         self.device_name = settings.get('device_name', socket.gethostname())
+        self.clipboard_thread = None
+        self.last_clipboard = ""
+        self.server_socket = None
+        self.network_file_clipboard = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -61,6 +78,162 @@ class KVMWorker(QObject):
                 kc.release(k)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Clipboard utilities
+    # ------------------------------------------------------------------
+    def _set_clipboard(self, text: str) -> None:
+        """Safely set the system clipboard."""
+        try:
+            pyperclip.copy(text)
+            self.last_clipboard = text
+        except Exception as e:
+            logging.error("Failed to set clipboard: %s", e)
+
+    def _get_clipboard(self) -> str:
+        """Safely read the system clipboard."""
+        try:
+            return pyperclip.paste()
+        except Exception as e:
+            logging.error("Failed to read clipboard: %s", e)
+            return self.last_clipboard
+
+    # ------------------------------------------------------------------
+    # Network helpers
+    # ------------------------------------------------------------------
+    def _send_message(self, sock, data) -> bool:
+        """Send a msgpack message through the given socket."""
+        try:
+            packed = msgpack.packb(data, use_bin_type=True)
+            sock.sendall(struct.pack('!I', len(packed)) + packed)
+            return True
+        except Exception as e:
+            logging.error("Failed to send message: %s", e, exc_info=True)
+            return False
+
+    def _broadcast_message(self, data, exclude=None) -> None:
+        """Broadcast a message to all connected clients."""
+        packed = msgpack.packb(data, use_bin_type=True)
+        for s in list(self.client_sockets):
+            if s is exclude:
+                continue
+            try:
+                s.sendall(struct.pack('!I', len(packed)) + packed)
+            except Exception as e:
+                logging.error("Failed to broadcast message: %s", e)
+
+    # ------------------------------------------------------------------
+    # Clipboard synchronization
+    # ------------------------------------------------------------------
+    def _clipboard_loop_server(self) -> None:
+        while self._running:
+            text = self._get_clipboard()
+            if text != self.last_clipboard:
+                self.last_clipboard = text
+                self._broadcast_message({'type': 'clipboard_text', 'text': text})
+            time.sleep(0.5)
+
+    def _clipboard_loop_client(self, sock) -> None:
+        while self._running and self.server_socket is sock:
+            text = self._get_clipboard()
+            if text != self.last_clipboard:
+                self.last_clipboard = text
+                self._send_message(sock, {'type': 'clipboard_text', 'text': text})
+            time.sleep(0.5)
+
+    # ------------------------------------------------------------------
+    # File transfer helpers
+    # ------------------------------------------------------------------
+    def _create_archive(self, paths):
+        temp_dir = tempfile.mkdtemp()
+        archive = os.path.join(temp_dir, 'share.zip')
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for p in paths:
+                if os.path.isdir(p):
+                    base = os.path.basename(p.rstrip(os.sep))
+                    for root, _, files in os.walk(p):
+                        for f in files:
+                            full = os.path.join(root, f)
+                            rel = os.path.join(base, os.path.relpath(full, p))
+                            zf.write(full, rel)
+                else:
+                    zf.write(p, os.path.basename(p))
+        return archive
+
+    def _send_archive(self, sock, archive_path, dest_dir):
+        size = os.path.getsize(archive_path)
+        name = os.path.basename(archive_path)
+        self._send_message(sock, {'type': 'file_metadata', 'name': name, 'size': size, 'dest': dest_dir})
+        with open(archive_path, 'rb') as f:
+            while True:
+                chunk = f.read(4096)
+                if not chunk:
+                    break
+                self._send_message(sock, {'type': 'file_chunk', 'data': chunk})
+        self._send_message(sock, {'type': 'file_end'})
+
+    # ------------------------------------------------------------------
+    # Public API used by the GUI
+    # ------------------------------------------------------------------
+    def share_files(self, paths, operation='copy') -> None:
+        threading.Thread(target=self._share_files_thread, args=(paths, operation), daemon=True).start()
+
+    def _share_files_thread(self, paths, operation):
+        archive = self._create_archive(paths)
+        if self.settings['role'] == 'ado':
+            self.network_file_clipboard = {
+                'paths': paths,
+                'operation': operation,
+                'archive': archive,
+            }
+            self._broadcast_message({
+                'type': 'network_clipboard_set',
+                'source_id': self.device_name,
+                'operation': operation,
+            })
+        else:
+            sock = self.server_socket
+            if not sock:
+                logging.warning('No server connection for file share')
+                return
+            size = os.path.getsize(archive)
+            meta = {
+                'type': 'upload_file_start',
+                'size': size,
+                'paths': paths,
+                'operation': operation,
+                'name': os.path.basename(archive),
+            }
+            self._send_message(sock, meta)
+            with open(archive, 'rb') as f:
+                while True:
+                    chunk = f.read(4096)
+                    if not chunk:
+                        break
+                    self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk})
+            self._send_message(sock, {'type': 'upload_file_end'})
+
+    def request_paste(self, dest_dir) -> None:
+        if self.settings['role'] == 'ado':
+            if not self.network_file_clipboard or not self.network_file_clipboard.get('archive'):
+                logging.warning('No shared files to paste')
+                return
+            with zipfile.ZipFile(self.network_file_clipboard['archive'], 'r') as zf:
+                zf.extractall(dest_dir)
+            if self.network_file_clipboard.get('operation') == 'cut':
+                for pth in self.network_file_clipboard.get('paths', []):
+                    try:
+                        if os.path.isdir(pth):
+                            shutil.rmtree(pth)
+                        else:
+                            os.remove(pth)
+                    except Exception as e:
+                        logging.error('Failed to delete %s: %s', pth, e)
+                self.network_file_clipboard = None
+        else:
+            sock = self.server_socket
+            if sock:
+                self._send_message(sock, {'type': 'paste_request', 'destination': dest_dir})
 
     def set_active_client_by_name(self, name):
         """Select a connected client by name as the active target."""
@@ -119,6 +292,8 @@ class KVMWorker(QObject):
         self.active_client = None
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
+        if self.clipboard_thread and self.clipboard_thread.is_alive():
+            self.clipboard_thread.join(timeout=1)
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
 
@@ -133,6 +308,11 @@ class KVMWorker(QObject):
     def run_server(self):
         accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
         accept_thread.start()
+
+        self.clipboard_thread = threading.Thread(
+            target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
+        )
+        self.clipboard_thread.start()
         
         info = ServiceInfo(
             SERVICE_TYPE,
@@ -142,7 +322,9 @@ class KVMWorker(QObject):
         )
         self.zeroconf.register_service(info)
         self.status_update.emit(
-            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: Asztal - Ctrl + Numpad 0, Laptop - Ctrl + Numpad 1, ElitDesk - Ctrl + Numpad 2"
+            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: "
+            "Asztal - Ctrl + Numpad 0, Laptop - Ctrl + Numpad 1, "
+            "ElitDesk - Ctrl + Numpad 2"
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
@@ -252,6 +434,13 @@ class KVMWorker(QObject):
             pass
         self.client_infos[sock] = client_name
         logging.info(f"Client connected: {client_name} ({addr})")
+        # send current clipboard to newly connected client
+        if self.last_clipboard:
+            try:
+                self._send_message(sock, {'type': 'clipboard_text', 'text': self.last_clipboard})
+            except Exception:
+                pass
+        upload_info = None
 
         try:
             while self._running:
@@ -273,6 +462,51 @@ class KVMWorker(QObject):
                                 self.toggle_client_control('elitedesk', switch_monitor=True)
                             elif cmd == 'switch_laptop':
                                 self.toggle_client_control('laptop', switch_monitor=False)
+                            elif data.get('type') == 'clipboard_text':
+                                text = data.get('text', '')
+                                if text != self.last_clipboard:
+                                    self._set_clipboard(text)
+                                    self._broadcast_message(data, exclude=sock)
+                            elif data.get('type') == 'paste_request':
+                                dest = data.get('destination')
+                                if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
+                                    self._send_archive(sock, self.network_file_clipboard['archive'], dest)
+                                    if self.network_file_clipboard.get('operation') == 'cut':
+                                        for pth in self.network_file_clipboard.get('paths', []):
+                                            try:
+                                                if os.path.isdir(pth):
+                                                    shutil.rmtree(pth)
+                                                else:
+                                                    os.remove(pth)
+                                            except Exception as e:
+                                                logging.error("Failed to delete %s: %s", pth, e)
+                                        self.network_file_clipboard = None
+                            elif data.get('type') == 'upload_file_start':
+                                incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
+                                incoming_file = open(incoming_path, 'wb')
+                                upload_info = {
+                                    'file': incoming_file,
+                                    'path': incoming_path,
+                                    'paths': data.get('paths', []),
+                                    'operation': data.get('operation', 'copy'),
+                                }
+                            elif data.get('type') == 'upload_file_chunk':
+                                if upload_info:
+                                    upload_info['file'].write(data['data'])
+                            elif data.get('type') == 'upload_file_end':
+                                if upload_info:
+                                    upload_info['file'].close()
+                                    self.network_file_clipboard = {
+                                        'paths': upload_info['paths'],
+                                        'operation': upload_info['operation'],
+                                        'archive': upload_info['path'],
+                                    }
+                                    self._broadcast_message({
+                                        'type': 'network_clipboard_set',
+                                        'source_id': client_name,
+                                        'operation': upload_info['operation'],
+                                    }, exclude=sock)
+                                    upload_info = None
                         except Exception:
                             logging.warning("Hibas parancs a klienstol")
                 except socket.timeout:
@@ -704,6 +938,8 @@ class KVMWorker(QObject):
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     logging.info(f"Connecting to {ip}:{self.settings['port']}")
                     s.connect((ip, self.settings['port']))
+                    self.server_socket = s
+                    incoming_info = None
 
                     try:
                         hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
@@ -711,6 +947,11 @@ class KVMWorker(QObject):
                         logging.debug("Handshake sent to server")
                     except Exception as e:
                         logging.error(f"Failed to send handshake: {e}")
+
+                    self.clipboard_thread = threading.Thread(
+                        target=self._clipboard_loop_client, args=(s,), daemon=True, name="ClipboardCli"
+                    )
+                    self.clipboard_thread.start()
 
                     logging.info("TCP kapcsolat sikeres.")
                     self.status_update.emit("Csatlakozva. Irányítás átvéve.")
@@ -809,6 +1050,30 @@ class KVMWorker(QObject):
                                     else:
                                         keyboard_controller.release(k_press)
                                         pressed_keys.discard(k_press)
+                            elif event_type == 'clipboard_text':
+                                text = data.get('text', '')
+                                if text != self.last_clipboard:
+                                    self._set_clipboard(text)
+                            elif event_type == 'file_metadata':
+                                incoming_tmp = os.path.join(tempfile.gettempdir(), data['name'])
+                                incoming_file = open(incoming_tmp, 'wb')
+                                incoming_info = {
+                                    'path': incoming_tmp,
+                                    'dest': data['dest'],
+                                    'size': data['size'],
+                                    'name': data['name'],
+                                    'file': incoming_file,
+                                }
+                            elif event_type == 'file_chunk':
+                                if incoming_info:
+                                    incoming_info['file'].write(data['data'])
+                            elif event_type == 'file_end':
+                                if incoming_info:
+                                    incoming_info['file'].close()
+                                    with zipfile.ZipFile(incoming_info['path'], 'r') as zf:
+                                        zf.extractall(incoming_info['dest'])
+                                    os.remove(incoming_info['path'])
+                                    incoming_info = None
                         except Exception:
                             logging.warning("Hibás adatcsomag")
 
@@ -824,6 +1089,11 @@ class KVMWorker(QObject):
                         hb_thread.join(timeout=0.1)
                     except Exception:
                         pass
+                if self.clipboard_thread is not None:
+                    try:
+                        self.clipboard_thread.join(timeout=0.1)
+                    except Exception:
+                        pass
                 for k in list(pressed_keys):
                     try:
                         keyboard_controller.release(k)
@@ -835,4 +1105,5 @@ class KVMWorker(QObject):
                     except Exception:
                         pass
                 self.release_hotkey_keys()
+                self.server_socket = None
                 time.sleep(1)
