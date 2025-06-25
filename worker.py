@@ -220,8 +220,12 @@ class KVMWorker(QObject):
             shutil.rmtree(temp_extract, ignore_errors=True)
 
     def _send_archive(self, sock, archive_path, dest_dir):
+        logging.debug(
+            "Entering _send_archive. cancel=%s dest=%s",
+            self._cancel_transfer.is_set(),
+            dest_dir,
+        )
         self._cancel_transfer.clear()
-        logging.debug("Sending archive, cancel flag cleared")
         prev_to = sock.gettimeout()
         sock.settimeout(TRANSFER_TIMEOUT)
         try:
@@ -258,6 +262,7 @@ class KVMWorker(QObject):
             sock.settimeout(prev_to)
             self._cancel_transfer.clear()
             logging.debug("Archive send finished, cancel flag cleared")
+            logging.debug("Exiting _send_archive")
 
     def _clear_network_file_clipboard(self):
         """Remove any stored temporary archive and clear the clipboard info."""
@@ -276,6 +281,7 @@ class KVMWorker(QObject):
                     e,
                 )
         self.network_file_clipboard = None
+        logging.debug("Network file clipboard cleared")
 
     def cancel_file_transfer(self):
         """Signal ongoing file transfer loops to cancel."""
@@ -289,10 +295,15 @@ class KVMWorker(QObject):
         threading.Thread(target=self._share_files_thread, args=(paths, operation), daemon=True).start()
 
     def _share_files_thread(self, paths, operation):
+        logging.debug(
+            "Entering _share_files_thread. Cancel flag: %s",
+            self._cancel_transfer.is_set(),
+        )
         self._cancel_transfer.clear()
-        logging.debug("_share_files_thread started, cancel flag cleared")
         archive = self._create_archive(paths)
         if not archive:
+            self._clear_network_file_clipboard()
+            logging.debug("Archive creation failed, exiting _share_files_thread")
             return
         temp_archive_dir = os.path.dirname(archive)
         try:
@@ -352,9 +363,21 @@ class KVMWorker(QObject):
                 finally:
                     sock.settimeout(prev_to)
         finally:
-            shutil.rmtree(temp_archive_dir, ignore_errors=True)
+            if self.settings['role'] != 'ado':
+                shutil.rmtree(temp_archive_dir, ignore_errors=True)
+            self._cancel_transfer.clear()
+            logging.debug(
+                "Exiting _share_files_thread. Network clipboard: %s",
+                self.network_file_clipboard,
+            )
 
     def request_paste(self, dest_dir) -> None:
+        logging.debug(
+            "request_paste called. role=%s cancel=%s",
+            self.settings['role'],
+            self._cancel_transfer.is_set(),
+        )
+        self._cancel_transfer.clear()
         if self.settings['role'] == 'ado':
             if not self.network_file_clipboard or not self.network_file_clipboard.get('archive'):
                 logging.warning('No shared files to paste')
@@ -386,9 +409,9 @@ class KVMWorker(QObject):
         else:
             sock = self.server_socket
             if sock:
-                self._cancel_transfer.clear()
-                logging.debug("Paste request sent, cancel flag cleared")
+                logging.debug("Sending paste_request to server")
                 self._send_message(sock, {'type': 'paste_request', 'destination': dest_dir})
+        logging.debug("request_paste completed. cancel=%s", self._cancel_transfer.is_set())
 
     def set_active_client_by_name(self, name):
         """Select a connected client by name as the active target."""
@@ -590,6 +613,11 @@ class KVMWorker(QObject):
             pass
         self.client_infos[sock] = client_name
         logging.info(f"Client connected: {client_name} ({addr})")
+        logging.debug(
+            "monitor_client start for %s cancel=%s",
+            client_name,
+            self._cancel_transfer.is_set(),
+        )
         # send current clipboard to newly connected client
         if self.last_clipboard:
             try:
@@ -741,6 +769,7 @@ class KVMWorker(QObject):
                 self.active_client = None
             if self.kvm_active and not self.client_sockets:
                 self.deactivate_kvm(reason="all clients disconnected")
+            logging.debug("monitor_client exit for %s", client_name)
 
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
@@ -1147,6 +1176,12 @@ class KVMWorker(QObject):
                 time.sleep(0.5)
                 continue
 
+            logging.debug(
+                "connect_to_server attempting to connect to %s cancel=%s",
+                ip,
+                self._cancel_transfer.is_set(),
+            )
+
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -1369,3 +1404,4 @@ class KVMWorker(QObject):
                 self.release_hotkey_keys()
                 self.server_socket = None
                 time.sleep(1)
+                logging.debug("connect_to_server loop ended")
