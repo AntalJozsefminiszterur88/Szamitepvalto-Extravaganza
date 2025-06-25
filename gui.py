@@ -338,47 +338,47 @@ class MainWindow(QMainWindow):
         if not self.progress_dialog or not self.progress_dialog.isVisible():
             return
 
-        if operation in ("archiving", "archiving_complete"):
+        if operation == "archiving":
             maximum = total if total > 0 else 1
             self.progress_dialog.setMaximum(maximum)
             self.progress_dialog.setValue(done)
-            if operation == "archiving":
-                self.progress_dialog.setLabelText(
-                    f"Tömörítés: {name} ({done}/{total} fájl)"
-                )
-            else:
-                self.progress_dialog.setLabelText(
-                    "Tömörítés kész. Küldés előkészítése..."
-                )
-            return
-
-        maximum = total if total > 0 else 100
-        self.progress_dialog.setMaximum(maximum)
-
-        if total > 0:
-            self.progress_dialog.setValue(done)
+            self.progress_dialog.setLabelText(
+                f"Tömörítés: {name} ({done}/{total} fájl)"
+            )
+        elif operation == "archiving_complete":
+            self.progress_dialog.setLabelText(
+                "Tömörítés kész. Küldés előkészítése..."
+            )
+            self.progress_dialog.setMaximum(0)
+            self.progress_dialog.setValue(0)
         else:
-            self.progress_dialog.setValue(100 if done >= total else 0)
+            maximum = total if total > 0 else 100
+            self.progress_dialog.setMaximum(maximum)
 
-        current_mb = done / 1024 / 1024
-        total_mb = total / 1024 / 1024
-
-        if done >= total and total >= 0:
-            self.progress_dialog.setValue(maximum)
-            self.progress_dialog.setLabelText(f"{name}: Kész! ({total_mb:.1f}MB)")
-            try:
-                self.progress_dialog.setCancelButton(None)
-            except Exception:
-                btn = self.progress_dialog.findChild(QPushButton)
-                if btn:
-                    btn.setEnabled(False)
-            QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
-        else:
-            if total == 0 and done == 0:
-                label_text = f"{name}: Adatok feldolgozása..."
+            if total > 0:
+                self.progress_dialog.setValue(done)
             else:
-                label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
-            self.progress_dialog.setLabelText(label_text)
+                self.progress_dialog.setValue(100 if done >= total else 0)
+
+            current_mb = done / 1024 / 1024
+            total_mb = total / 1024 / 1024
+
+            if done >= total and total >= 0:
+                self.progress_dialog.setValue(maximum)
+                self.progress_dialog.setLabelText(f"{name}: Kész! ({total_mb:.1f}MB)")
+                try:
+                    self.progress_dialog.setCancelButton(None)
+                except Exception:
+                    btn = self.progress_dialog.findChild(QPushButton)
+                    if btn:
+                        btn.setEnabled(False)
+                QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
+            else:
+                if total == 0 and done == 0:
+                    label_text = f"{name}: Adatok feldolgozása..."
+                else:
+                    label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
+                self.progress_dialog.setLabelText(label_text)
 
 
     def _close_progress_dialog_if_exists(self):
