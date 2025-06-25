@@ -74,7 +74,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("KVM Switch Vezérlőpult v7")
         self.setWindowIcon(QIcon(ICON_PATH))
         # Prevent resizing during runtime
-        self.setFixedSize(QSize(450, 400))
+        # Provide a bit more vertical room so texts are not cramped
+        self.setFixedSize(QSize(450, 480))
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
