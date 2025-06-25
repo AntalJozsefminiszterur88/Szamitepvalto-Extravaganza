@@ -332,7 +332,7 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setAutoClose(False)
         self.progress_dialog.setAutoReset(False)
         self.progress_dialog.setMinimumDuration(0)
-        self.progress_dialog.setLabelText("Művelet előkészítése...")
+        self.progress_dialog.setLabelText(f"{title} előkészítése...")
         self.progress_dialog.show()
 
     def update_progress(self, operation: str, name: str, done: int, total: int):
@@ -360,9 +360,11 @@ class MainWindow(QMainWindow):
             return
 
         if operation in ("sending_archive", "receiving_archive"):
-            title = "Fájl küldése" if operation == "sending_archive" else "Fájl fogadása"
-            if self.progress_dialog.windowTitle() != title:
-                self.progress_dialog.setWindowTitle(title)
+            if operation == "sending_archive":
+                self.progress_dialog.setWindowTitle("Fájl küldése")
+            else:
+                self.progress_dialog.setWindowTitle("Fájl fogadása")
+
             maximum = total if total > 0 else 1
             self.progress_dialog.setMaximum(maximum)
             self.progress_dialog.setValue(min(done, maximum))
