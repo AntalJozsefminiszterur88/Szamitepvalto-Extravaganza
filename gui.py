@@ -193,6 +193,7 @@ class MainWindow(QMainWindow):
         self.kvm_worker.status_update.connect(self.on_status_update)
         self.kvm_worker.file_progress_update.connect(self.update_progress)
         self.kvm_worker.file_transfer_error.connect(self.on_transfer_error)
+        self.kvm_worker.incoming_upload_started.connect(self.on_incoming_upload_started)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         self.set_controls_enabled(False)
@@ -340,6 +341,10 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setLabelText(f"{title} előkészítése...")
         self.progress_dialog.show()
 
+    def on_incoming_upload_started(self, filename: str, total_size: int):
+        self.show_progress_dialog("Fájl fogadása")
+        self.update_progress("receiving_archive", filename, 0, total_size)
+
     def update_progress(self, operation: str, name: str, done: int, total: int):
         """Update progress dialog based on signals from the worker thread."""
         if not self.progress_dialog or not self.progress_dialog.isVisible():
@@ -354,25 +359,15 @@ class MainWindow(QMainWindow):
         )
 
         if operation == "archiving_large_file_working":
-            if self.progress_dialog.windowTitle() != "Tömörítés...":
-                logging.debug(
-                    "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
-                    operation,
-                    "Tömörítés...",
-                    f"Tömörítés (nagy fájl): {name} - Folyamatban...",
-                    0,
-                    0,
-                )
-                self.progress_dialog.setWindowTitle("Tömörítés...")
-            else:
-                logging.debug(
-                    "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
-                    operation,
-                    self.progress_dialog.windowTitle(),
-                    f"Tömörítés (nagy fájl): {name} - Folyamatban...",
-                    0,
-                    0,
-                )
+            self.progress_dialog.setWindowTitle("Tömörítés...")
+            logging.debug(
+                "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                operation,
+                "Tömörítés...",
+                f"Tömörítés (nagy fájl): {name} - Folyamatban...",
+                0,
+                0,
+            )
             self.progress_dialog.setMaximum(0)
             self.progress_dialog.setValue(0)
             self.progress_dialog.setLabelText(
@@ -381,6 +376,7 @@ class MainWindow(QMainWindow):
             return
 
         if operation == "archiving":
+            self.progress_dialog.setWindowTitle("Tömörítés...")
             maximum = total if total > 0 else 1
             label = f"Tömörítés: {name} ({done}/{total} fájl)"
             logging.debug(
@@ -391,20 +387,19 @@ class MainWindow(QMainWindow):
                 maximum,
                 done,
             )
-            if self.progress_dialog.windowTitle() != "Tömörítés...":
-                self.progress_dialog.setWindowTitle("Tömörítés...")
             self.progress_dialog.setMaximum(maximum)
             self.progress_dialog.setValue(done)
             self.progress_dialog.setLabelText(label)
             return
 
         if operation == "archiving_complete":
+            self.progress_dialog.setWindowTitle("Tömörítés...")
             maximum = total if total > 0 else 1
             label = "Tömörítés kész. Átvitel előkészítése..."
             logging.debug(
                 "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
                 operation,
-                self.progress_dialog.windowTitle(),
+                "Tömörítés...",
                 label,
                 maximum,
                 maximum,
@@ -418,17 +413,12 @@ class MainWindow(QMainWindow):
             desired_title = (
                 "Fájl küldése" if operation == "sending_archive" else "Fájl fogadása"
             )
+            self.progress_dialog.setWindowTitle(desired_title)
             maximum = total if total > 0 else 1
             value = min(done, maximum)
             current_mb = done / 1024 / 1024
             total_mb = total / 1024 / 1024
-            label_text = ""
-            if total == 0:
-                label_text = f"{name}: Adatok feldolgozása..."
-            elif done >= total:
-                label_text = f"{name}: Kész! ({total_mb:.1f}MB)"
-            else:
-                label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
+            label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
             logging.debug(
                 "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
                 operation,
@@ -437,16 +427,13 @@ class MainWindow(QMainWindow):
                 maximum,
                 value,
             )
-            if self.progress_dialog.windowTitle() != desired_title:
-                self.progress_dialog.setWindowTitle(desired_title)
             self.progress_dialog.setMaximum(maximum)
             self.progress_dialog.setValue(value)
 
-            if total == 0:
-                label_text = f"{name}: Adatok feldolgozása..."
-            elif done >= total:
+            if done >= total:
                 self.progress_dialog.setValue(maximum)
-                label_text = f"{name}: Kész! ({total_mb:.1f}MB)"
+                if total > 0:
+                    label_text = f"{name}: Kész! ({total_mb:.1f}MB)"
                 try:
                     self.progress_dialog.setCancelButton(None)
                 except Exception:
@@ -455,10 +442,9 @@ class MainWindow(QMainWindow):
                         btn.setEnabled(False)
                 logging.debug("GUI: Transfer complete for %s. Starting 5s close timer.", name)
                 QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
-            else:
-                label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
 
             self.progress_dialog.setLabelText(label_text)
+            return
 
     def _close_progress_dialog_if_exists(self):
         if self.progress_dialog:
