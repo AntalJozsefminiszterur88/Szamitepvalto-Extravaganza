@@ -156,6 +156,17 @@ class KVMWorker(QObject):
         temp_dir = tempfile.mkdtemp()
         archive = os.path.join(temp_dir, 'share.zip')
         logging.debug("Created temp archive dir %s", temp_dir)
+        # Log available space in the temporary directory which will hold the archive
+        try:
+            usage = shutil.disk_usage(tempfile.gettempdir())
+            logging.debug(
+                "Temp dir disk usage - total: %s, used: %s, free: %s",
+                usage.total,
+                usage.used,
+                usage.free,
+            )
+        except Exception as e:
+            logging.debug("Failed to query temp dir disk usage: %s", e)
         try:
             # Pre-scan all paths to determine total number of files
             total_files = 0
@@ -167,7 +178,7 @@ class KVMWorker(QObject):
                     total_files += 1
 
             archived_files = 0
-            with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
                 for p in paths:
                     if os.path.isdir(p):
                         base = os.path.basename(p.rstrip(os.sep))
@@ -175,7 +186,37 @@ class KVMWorker(QObject):
                             for f in files:
                                 full = os.path.join(root, f)
                                 rel = os.path.join(base, os.path.relpath(full, p))
-                                zf.write(full, rel)
+                                file_size = os.path.getsize(full)
+                                if file_size > 1_000_000_000:
+                                    logging.info(
+                                        "Adding large file %s (%d bytes) to archive",
+                                        full,
+                                        file_size,
+                                    )
+                                try:
+                                    compress_type = zipfile.ZIP_DEFLATED
+                                    ext = os.path.splitext(f)[1].lower()
+                                    if file_size > 1_000_000_000 or ext in {'.mkv', '.mp4', '.mov'}:
+                                        compress_type = zipfile.ZIP_STORED
+                                    zf.write(full, rel, compress_type=compress_type)
+                                    logging.debug("Archived %s", full)
+                                except MemoryError:
+                                    msg = (
+                                        f"Archiv\xe1l\xe1si hiba: Kev\xe9s a mem\xf3ria a(z) {os.path.basename(full)} t\xf6m\xf6r\xedt\xe9s\xe9hez."
+                                    )
+                                    logging.error(msg, exc_info=True)
+                                    self.file_transfer_error.emit(msg)
+                                    return None
+                                except (IOError, OSError) as e:
+                                    msg = f"Archiv\xe1l\xe1si hiba: Nincs el\xe9g hely vagy IO probl\xe9ma ({e})."
+                                    logging.error(msg, exc_info=True)
+                                    self.file_transfer_error.emit(msg)
+                                    return None
+                                except zipfile.LargeZipFile as e:
+                                    msg = f"Archiv\xe1l\xe1si hiba: {e}"
+                                    logging.error(msg, exc_info=True)
+                                    self.file_transfer_error.emit(msg)
+                                    return None
                                 archived_files += 1
                                 self.file_progress_update.emit(
                                     'archiving',
@@ -184,7 +225,37 @@ class KVMWorker(QObject):
                                     total_files,
                                 )
                     else:
-                        zf.write(p, os.path.basename(p))
+                        file_size = os.path.getsize(p)
+                        if file_size > 1_000_000_000:
+                            logging.info(
+                                "Adding large file %s (%d bytes) to archive",
+                                p,
+                                file_size,
+                            )
+                        try:
+                            compress_type = zipfile.ZIP_DEFLATED
+                            ext = os.path.splitext(p)[1].lower()
+                            if file_size > 1_000_000_000 or ext in {'.mkv', '.mp4', '.mov'}:
+                                compress_type = zipfile.ZIP_STORED
+                            zf.write(p, os.path.basename(p), compress_type=compress_type)
+                            logging.debug("Archived %s", p)
+                        except MemoryError:
+                            msg = (
+                                f"Archiv\xe1l\xe1si hiba: Kev\xe9s a mem\xf3ria a(z) {os.path.basename(p)} t\xf6m\xf6r\xedt\xe9s\xe9hez."
+                            )
+                            logging.error(msg, exc_info=True)
+                            self.file_transfer_error.emit(msg)
+                            return None
+                        except (IOError, OSError) as e:
+                            msg = f"Archiv\xe1l\xe1si hiba: Nincs el\xe9g hely vagy IO probl\xe9ma ({e})."
+                            logging.error(msg, exc_info=True)
+                            self.file_transfer_error.emit(msg)
+                            return None
+                        except zipfile.LargeZipFile as e:
+                            msg = f"Archiv\xe1l\xe1si hiba: {e}"
+                            logging.error(msg, exc_info=True)
+                            self.file_transfer_error.emit(msg)
+                            return None
                         archived_files += 1
                         self.file_progress_update.emit(
                             'archiving',
