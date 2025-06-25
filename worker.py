@@ -68,6 +68,7 @@ class KVMWorker(QObject):
         self.last_clipboard = ""
         self.server_socket = None
         self.network_file_clipboard = None
+        logging.debug("Network file clipboard cleared")
         self._cancel_transfer = threading.Event()
 
     def release_hotkey_keys(self):
@@ -219,6 +220,8 @@ class KVMWorker(QObject):
             shutil.rmtree(temp_extract, ignore_errors=True)
 
     def _send_archive(self, sock, archive_path, dest_dir):
+        self._cancel_transfer.clear()
+        logging.debug("Sending archive, cancel flag cleared")
         prev_to = sock.gettimeout()
         sock.settimeout(TRANSFER_TIMEOUT)
         try:
@@ -253,12 +256,17 @@ class KVMWorker(QObject):
             self.file_transfer_error.emit(str(e))
         finally:
             sock.settimeout(prev_to)
+            self._cancel_transfer.clear()
+            logging.debug("Archive send finished, cancel flag cleared")
 
     def _clear_network_file_clipboard(self):
         """Remove any stored temporary archive and clear the clipboard info."""
         if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
             try:
                 os.remove(self.network_file_clipboard['archive'])
+                logging.debug(
+                    "Removed temporary archive %s", self.network_file_clipboard['archive']
+                )
             except FileNotFoundError:
                 pass
             except Exception as e:
@@ -272,6 +280,7 @@ class KVMWorker(QObject):
     def cancel_file_transfer(self):
         """Signal ongoing file transfer loops to cancel."""
         self._cancel_transfer.set()
+        logging.debug("File transfer cancel signal set")
 
     # ------------------------------------------------------------------
     # Public API used by the GUI
@@ -281,6 +290,7 @@ class KVMWorker(QObject):
 
     def _share_files_thread(self, paths, operation):
         self._cancel_transfer.clear()
+        logging.debug("_share_files_thread started, cancel flag cleared")
         archive = self._create_archive(paths)
         if not archive:
             return
@@ -294,6 +304,9 @@ class KVMWorker(QObject):
                     'archive': archive,
                     'source_id': self.device_name,
                 }
+                logging.debug(
+                    "Network file clipboard set: %s", self.network_file_clipboard
+                )
                 self._broadcast_message({
                     'type': 'network_clipboard_set',
                     'source_id': self.device_name,
@@ -373,6 +386,8 @@ class KVMWorker(QObject):
         else:
             sock = self.server_socket
             if sock:
+                self._cancel_transfer.clear()
+                logging.debug("Paste request sent, cancel flag cleared")
                 self._send_message(sock, {'type': 'paste_request', 'destination': dest_dir})
 
     def set_active_client_by_name(self, name):
@@ -621,6 +636,8 @@ class KVMWorker(QObject):
                                     logging.error('Failed to open incoming file: %s', e, exc_info=True)
                                     self.file_transfer_error.emit(str(e))
                                     break
+                                self._cancel_transfer.clear()
+                                logging.debug("Receiving upload, cancel flag cleared")
                                 sock.settimeout(TRANSFER_TIMEOUT)
                                 upload_info = {
                                     'file': incoming_file,
@@ -656,6 +673,9 @@ class KVMWorker(QObject):
                                         'archive': upload_info['path'],
                                         'source_id': upload_info.get('source_id', client_name),
                                     }
+                                    logging.debug(
+                                        "Network file clipboard set: %s", self.network_file_clipboard
+                                    )
                                     self._broadcast_message({
                                         'type': 'network_clipboard_set',
                                         'source_id': upload_info.get('source_id', client_name),
@@ -700,6 +720,7 @@ class KVMWorker(QObject):
                                     upload_info = None
                                 sock.settimeout(1.0)
                                 self._cancel_transfer.clear()
+                                logging.debug("Upload canceled or finished, cancel flag cleared")
                         except Exception:
                             logging.warning("Hibas parancs a klienstol")
                 except socket.timeout:
@@ -1133,6 +1154,8 @@ class KVMWorker(QObject):
                     s.connect((ip, self.settings['port']))
                     self.server_socket = s
                     incoming_info = None
+                    self._cancel_transfer.clear()
+                    logging.debug("Connected to server, cancel flag cleared")
 
                     try:
                         hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
@@ -1255,6 +1278,8 @@ class KVMWorker(QObject):
                                     logging.error('Failed to open receive file: %s', e, exc_info=True)
                                     self.file_transfer_error.emit(str(e))
                                     break
+                                self._cancel_transfer.clear()
+                                logging.debug("Receiving file, cancel flag cleared")
                                 s.settimeout(TRANSFER_TIMEOUT)
                                 incoming_info = {
                                     'path': incoming_tmp,
@@ -1312,6 +1337,7 @@ class KVMWorker(QObject):
                                 incoming_info = None
                             s.settimeout(None)
                             self._cancel_transfer.clear()
+                            logging.debug("Download canceled or finished, cancel flag cleared")
 
             except Exception as e:
                 if self._running:
