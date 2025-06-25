@@ -380,7 +380,6 @@ class MainWindow(QMainWindow):
                     label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
                 self.progress_dialog.setLabelText(label_text)
 
-
     def _close_progress_dialog_if_exists(self):
         if self.progress_dialog:
             self.progress_dialog.close()
