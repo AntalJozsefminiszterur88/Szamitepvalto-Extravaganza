@@ -27,6 +27,8 @@ STREAM_LOOP_DELAY = 0.05
 SEND_QUEUE_MAXSIZE = 200
 # File transfer chunk size
 FILE_CHUNK_SIZE = 65536
+# Socket timeout (seconds) during file transfers
+TRANSFER_TIMEOUT = 30
 
 
 class KVMWorker(QObject):
@@ -170,11 +172,36 @@ class KVMWorker(QObject):
             return None
         return archive
 
+    def _safe_extract_archive(self, archive_path, dest_dir):
+        """Extract archive to dest_dir and cleanup on failure."""
+        temp_extract = tempfile.mkdtemp(dir=dest_dir)
+        try:
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                zf.extractall(temp_extract)
+            if self._cancel_transfer.is_set():
+                raise RuntimeError('transfer canceled')
+            for name in os.listdir(temp_extract):
+                shutil.move(os.path.join(temp_extract, name), os.path.join(dest_dir, name))
+        except Exception:
+            shutil.rmtree(temp_extract, ignore_errors=True)
+            raise
+        else:
+            shutil.rmtree(temp_extract, ignore_errors=True)
+
     def _send_archive(self, sock, archive_path, dest_dir):
+        prev_to = sock.gettimeout()
+        sock.settimeout(TRANSFER_TIMEOUT)
         try:
             size = os.path.getsize(archive_path)
             name = os.path.basename(archive_path)
-            if not self._send_message(sock, {'type': 'file_metadata', 'name': name, 'size': size, 'dest': dest_dir}):
+            meta = {
+                'type': 'file_metadata',
+                'name': name,
+                'size': size,
+                'dest': dest_dir,
+                'source_id': self.network_file_clipboard.get('source_id') if self.network_file_clipboard else self.device_name,
+            }
+            if not self._send_message(sock, meta):
                 return
             sent = 0
             with open(archive_path, 'rb') as f:
@@ -194,6 +221,8 @@ class KVMWorker(QObject):
         except Exception as e:
             logging.error('Error sending archive: %s', e, exc_info=True)
             self.file_transfer_error.emit(str(e))
+        finally:
+            sock.settimeout(prev_to)
 
     def cancel_file_transfer(self):
         """Signal ongoing file transfer loops to cancel."""
@@ -215,6 +244,7 @@ class KVMWorker(QObject):
                 'paths': paths,
                 'operation': operation,
                 'archive': archive,
+                'source_id': self.device_name,
             }
             self._broadcast_message({
                 'type': 'network_clipboard_set',
@@ -233,9 +263,12 @@ class KVMWorker(QObject):
                 'paths': paths,
                 'operation': operation,
                 'name': os.path.basename(archive),
+                'source_id': self.device_name,
             }
             if not self._send_message(sock, meta):
                 return
+            prev_to = sock.gettimeout()
+            sock.settimeout(TRANSFER_TIMEOUT)
             sent = 0
             try:
                 with open(archive, 'rb') as f:
@@ -255,6 +288,8 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.error('Upload failed: %s', e, exc_info=True)
                 self.file_transfer_error.emit(str(e))
+            finally:
+                sock.settimeout(prev_to)
 
     def request_paste(self, dest_dir) -> None:
         if self.settings['role'] == 'ado':
@@ -262,22 +297,29 @@ class KVMWorker(QObject):
                 logging.warning('No shared files to paste')
                 return
             try:
-                with zipfile.ZipFile(self.network_file_clipboard['archive'], 'r') as zf:
-                    zf.extractall(dest_dir)
+                self._safe_extract_archive(self.network_file_clipboard['archive'], dest_dir)
             except Exception as e:
                 logging.error('Extraction failed: %s', e, exc_info=True)
                 self.file_transfer_error.emit(str(e))
                 return
             if self.network_file_clipboard.get('operation') == 'cut':
-                for pth in self.network_file_clipboard.get('paths', []):
-                    try:
-                        if os.path.isdir(pth):
-                            shutil.rmtree(pth)
-                        else:
-                            os.remove(pth)
-                    except Exception as e:
-                        logging.error('Failed to delete %s: %s', pth, e)
-                self.network_file_clipboard = None
+                src_id = self.network_file_clipboard.get('source_id')
+                if src_id == self.device_name:
+                    for pth in self.network_file_clipboard.get('paths', []):
+                        try:
+                            if os.path.isdir(pth):
+                                shutil.rmtree(pth)
+                            else:
+                                os.remove(pth)
+                        except Exception as e:
+                            logging.error('Failed to delete %s: %s', pth, e)
+                    self.network_file_clipboard = None
+                else:
+                    for s, name in self.client_infos.items():
+                        if name == src_id:
+                            self._send_message(s, {'type': 'delete_source', 'paths': self.network_file_clipboard.get('paths', [])})
+                            break
+                    self.network_file_clipboard = None
         else:
             sock = self.server_socket
             if sock:
@@ -520,16 +562,6 @@ class KVMWorker(QObject):
                                 if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
                                     self._cancel_transfer.clear()
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
-                                    if self.network_file_clipboard.get('operation') == 'cut':
-                                        for pth in self.network_file_clipboard.get('paths', []):
-                                            try:
-                                                if os.path.isdir(pth):
-                                                    shutil.rmtree(pth)
-                                                else:
-                                                    os.remove(pth)
-                                            except Exception as e:
-                                                logging.error("Failed to delete %s: %s", pth, e)
-                                        self.network_file_clipboard = None
                             elif data.get('type') == 'upload_file_start':
                                 incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
                                 try:
@@ -538,6 +570,7 @@ class KVMWorker(QObject):
                                     logging.error('Failed to open incoming file: %s', e, exc_info=True)
                                     self.file_transfer_error.emit(str(e))
                                     break
+                                sock.settimeout(TRANSFER_TIMEOUT)
                                 upload_info = {
                                     'file': incoming_file,
                                     'path': incoming_path,
@@ -545,6 +578,7 @@ class KVMWorker(QObject):
                                     'operation': data.get('operation', 'copy'),
                                     'size': data.get('size', 0),
                                     'name': data.get('name'),
+                                    'source_id': data.get('source_id', client_name),
                                     'received': 0,
                                 }
                                 self.file_progress_update.emit('receiving_archive', upload_info['name'], 0, upload_info['size'])
@@ -568,14 +602,42 @@ class KVMWorker(QObject):
                                         'paths': upload_info['paths'],
                                         'operation': upload_info['operation'],
                                         'archive': upload_info['path'],
+                                        'source_id': upload_info.get('source_id', client_name),
                                     }
                                     self._broadcast_message({
                                         'type': 'network_clipboard_set',
-                                        'source_id': client_name,
+                                        'source_id': upload_info.get('source_id', client_name),
                                         'operation': upload_info['operation'],
                                     }, exclude=sock)
                                     self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
                                     upload_info = None
+                                    sock.settimeout(1.0)
+                            elif data.get('type') == 'paste_success':
+                                src = data.get('source_id')
+                                if (
+                                    self.network_file_clipboard
+                                    and self.network_file_clipboard.get('operation') == 'cut'
+                                    and self.network_file_clipboard.get('source_id') == src
+                                ):
+                                    if src == self.device_name:
+                                        for pth in self.network_file_clipboard.get('paths', []):
+                                            try:
+                                                if os.path.isdir(pth):
+                                                    shutil.rmtree(pth)
+                                                else:
+                                                    os.remove(pth)
+                                            except Exception as e:
+                                                logging.error("Failed to delete %s: %s", pth, e)
+                                        self.network_file_clipboard = None
+                                    else:
+                                        for s2, n2 in self.client_infos.items():
+                                            if n2 == src:
+                                                self._send_message(s2, {
+                                                    'type': 'delete_source',
+                                                    'paths': self.network_file_clipboard.get('paths', []),
+                                                })
+                                                break
+                                        self.network_file_clipboard = None
                             if self._cancel_transfer.is_set():
                                 if upload_info:
                                     try:
@@ -584,6 +646,7 @@ class KVMWorker(QObject):
                                     except Exception:
                                         pass
                                     upload_info = None
+                                sock.settimeout(1.0)
                                 self._cancel_transfer.clear()
                         except Exception:
                             logging.warning("Hibas parancs a klienstol")
@@ -1140,6 +1203,7 @@ class KVMWorker(QObject):
                                     logging.error('Failed to open receive file: %s', e, exc_info=True)
                                     self.file_transfer_error.emit(str(e))
                                     break
+                                s.settimeout(TRANSFER_TIMEOUT)
                                 incoming_info = {
                                     'path': incoming_tmp,
                                     'dest': data['dest'],
@@ -1147,6 +1211,7 @@ class KVMWorker(QObject):
                                     'name': data['name'],
                                     'file': incoming_file,
                                     'received': 0,
+                                    'source_id': data.get('source_id', self.device_name),
                                 }
                                 self.file_progress_update.emit('receiving_archive', incoming_info['name'], 0, incoming_info['size'])
                             elif event_type == 'file_chunk':
@@ -1165,11 +1230,23 @@ class KVMWorker(QObject):
                             elif event_type == 'file_end':
                                 if incoming_info:
                                     incoming_info['file'].close()
-                                    with zipfile.ZipFile(incoming_info['path'], 'r') as zf:
-                                        zf.extractall(incoming_info['dest'])
-                                    os.remove(incoming_info['path'])
+                                    try:
+                                        self._safe_extract_archive(incoming_info['path'], incoming_info['dest'])
+                                    finally:
+                                        os.remove(incoming_info['path'])
+                                    self._send_message(s, {'type': 'paste_success', 'source_id': incoming_info.get('source_id')})
+                                    s.settimeout(None)
                                     self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['size'], incoming_info['size'])
                                     incoming_info = None
+                            elif event_type == 'delete_source':
+                                for pth in data.get('paths', []):
+                                    try:
+                                        if os.path.isdir(pth):
+                                            shutil.rmtree(pth)
+                                        else:
+                                            os.remove(pth)
+                                    except Exception as e:
+                                        logging.error('Failed to delete %s: %s', pth, e)
                         except Exception:
                             logging.warning("Hibás adatcsomag")
 
@@ -1181,6 +1258,7 @@ class KVMWorker(QObject):
                                 except Exception:
                                     pass
                                 incoming_info = None
+                            s.settimeout(None)
                             self._cancel_transfer.clear()
 
             except Exception as e:
