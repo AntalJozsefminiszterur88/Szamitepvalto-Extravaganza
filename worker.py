@@ -153,7 +153,7 @@ class KVMWorker(QObject):
     # ------------------------------------------------------------------
     # File transfer helpers
     # ------------------------------------------------------------------
-    def _create_archive(self, paths):
+    def _create_archive(self, paths, cancel_event: Optional[threading.Event] = None):
         temp_dir = tempfile.mkdtemp()
         archive = os.path.join(temp_dir, 'share.zip')
         logging.debug("Created temp archive dir %s", temp_dir)
@@ -187,10 +187,14 @@ class KVMWorker(QObject):
                     stop_evt = threading.Event()
                     tick = 0
 
-                    if os.path.getsize(src_path) > 1_000_000_000:
+                    def should_stop():
+                        return stop_evt.is_set() or (cancel_event and cancel_event.is_set())
+
+                    file_size = os.path.getsize(src_path)
+                    if file_size > 1_000_000_000:
                         def hb_loop():
                             nonlocal tick
-                            while not stop_evt.is_set():
+                            while not should_stop():
                                 tick += 1
                                 try:
                                     logging.debug(
@@ -215,14 +219,28 @@ class KVMWorker(QObject):
                         hb_thread.start()
 
                     try:
-                        logging.info(
-                            "Attempting zf.write() for LARGE file: %s, size: %d, compress_type: %s",
-                            src_path,
-                            os.path.getsize(src_path),
-                            ctype,
-                        )
-                        zf.write(src_path, arcname, compress_type=ctype)
-                        logging.info("zf.write() COMPLETED for: %s", src_path)
+                        if cancel_event and cancel_event.is_set():
+                            raise RuntimeError('archive canceled')
+                        if file_size > 1_000_000_000:
+                            logging.info(
+                                "Attempting zf.write() for: %s (arcname: %s, size: %s, type: %s)",
+                                src_path,
+                                arcname,
+                                file_size,
+                                ctype,
+                            )
+                            write_start_time = time.time()
+                            zf.write(src_path, arcname, compress_type=ctype)
+                            write_duration = time.time() - write_start_time
+                            logging.info(
+                                "zf.write() for %s COMPLETED in %.2f seconds",
+                                src_path,
+                                write_duration,
+                            )
+                        else:
+                            zf.write(src_path, arcname, compress_type=ctype)
+                        if cancel_event and cancel_event.is_set():
+                            raise RuntimeError('archive canceled')
                     finally:
                         stop_evt.set()
                         if hb_thread is not None:
@@ -248,6 +266,8 @@ class KVMWorker(QObject):
                                         compress_type = zipfile.ZIP_STORED
                                     _write_with_heartbeat(full, rel, compress_type)
                                     logging.debug("Archived %s", full)
+                                    if cancel_event and cancel_event.is_set():
+                                        raise RuntimeError('archive canceled')
                                 except MemoryError:
                                     msg = (
                                         f"Archiv\xe1l\xe1si hiba: Kev\xe9s a mem\xf3ria a(z) {os.path.basename(full)} t\xf6m\xf6r\xedt\xe9s\xe9hez."
@@ -294,6 +314,8 @@ class KVMWorker(QObject):
                                 compress_type = zipfile.ZIP_STORED
                             _write_with_heartbeat(p, os.path.basename(p), compress_type)
                             logging.debug("Archived %s", p)
+                            if cancel_event and cancel_event.is_set():
+                                raise RuntimeError('archive canceled')
                         except MemoryError:
                             msg = (
                                 f"Archiv\xe1l\xe1si hiba: Kev\xe9s a mem\xf3ria a(z) {os.path.basename(p)} t\xf6m\xf6r\xedt\xe9s\xe9hez."
@@ -340,6 +362,10 @@ class KVMWorker(QObject):
             )
         except Exception as e:
             logging.error("Failed to create archive: %s", e, exc_info=True)
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as cleanup_err:
+                logging.error("Failed to cleanup temp dir %s: %s", temp_dir, cleanup_err)
             self.file_transfer_error.emit(f"Archive creation failed: {e}")
             return None
         duration = time.time() - start_time
@@ -470,7 +496,29 @@ class KVMWorker(QObject):
             self._cancel_transfer.is_set(),
         )
         logging.debug("Cancel flag cleared at start of _share_files_thread")
-        archive = self._create_archive(paths)
+        timeout = self.settings.get('archive_timeout_seconds', 900)
+        cancel_evt = threading.Event()
+        result = {}
+
+        def run_archiving():
+            result['archive'] = self._create_archive(paths, cancel_event=cancel_evt)
+
+        arch_thread = threading.Thread(target=run_archiving, daemon=True)
+        arch_thread.start()
+        arch_thread.join(timeout)
+        if arch_thread.is_alive():
+            cancel_evt.set()
+            arch_thread.join(5)
+            logging.critical(
+                "Archiving of %s timed out after %.1f minutes.",
+                paths,
+                timeout / 60,
+            )
+            self.file_transfer_error.emit("Archiv\xe1l\xe1s id\u0151t\xfall\xe9p\xe9s (t\xfal nagy f\xe1jl?)")
+            if result.get('archive'):
+                shutil.rmtree(os.path.dirname(result['archive']), ignore_errors=True)
+            return
+        archive = result.get('archive')
         if not archive:
             self._clear_network_file_clipboard()
             logging.debug("Archive creation failed, exiting _share_files_thread")
