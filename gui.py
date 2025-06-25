@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QMenu,
     QFileDialog,
+    QProgressDialog,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QSize, QSettings, QThread, Qt
@@ -65,7 +66,7 @@ class MainWindow(QMainWindow):
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
-        'tray_icon', 'share_button', 'paste_button'
+        'tray_icon', 'share_button', 'cut_share_button', 'paste_button', 'progress_dialog'
     )
 
     # A MainWindow többi része változatlan...
@@ -131,9 +132,12 @@ class MainWindow(QMainWindow):
         file_layout = QHBoxLayout()
         self.share_button = QPushButton("Megosztás")
         self.share_button.clicked.connect(self.share_network_file)
+        self.cut_share_button = QPushButton("Kivágás")
+        self.cut_share_button.clicked.connect(lambda: self.share_network_file(cut=True))
         self.paste_button = QPushButton("Beillesztés")
         self.paste_button.clicked.connect(self.paste_network_file)
         file_layout.addWidget(self.share_button)
+        file_layout.addWidget(self.cut_share_button)
         file_layout.addWidget(self.paste_button)
         file_box.setLayout(file_layout)
         main_layout.addWidget(file_box)
@@ -150,6 +154,7 @@ class MainWindow(QMainWindow):
 
         self.kvm_thread = None
         self.kvm_worker = None
+        self.progress_dialog = None
         self.init_tray_icon()
         self.load_settings()
 
@@ -186,6 +191,8 @@ class MainWindow(QMainWindow):
         self.kvm_thread.started.connect(self.kvm_worker.run)
         self.kvm_worker.finished.connect(self.on_service_stopped)
         self.kvm_worker.status_update.connect(self.on_status_update)
+        self.kvm_worker.file_progress_update.connect(self.update_progress)
+        self.kvm_worker.file_transfer_error.connect(self.on_transfer_error)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         self.set_controls_enabled(False)
@@ -294,13 +301,18 @@ class MainWindow(QMainWindow):
         time.sleep(0.2)
         QApplication.instance().quit()
 
-    def share_network_file(self):
+    def share_network_file(self, cut: bool = False):
         if not self.kvm_worker:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Fájl vagy mappa kiválasztása")
-        if not path:
-            return
-        self.kvm_worker.share_files([path], 'copy')
+        files, _ = QFileDialog.getOpenFileNames(self, "Fájlok kiválasztása")
+        if not files:
+            folder = QFileDialog.getExistingDirectory(self, "Mappa kiválasztása")
+            if not folder:
+                return
+            files = [folder]
+        self.show_progress_dialog("Fájl küldése")
+        op = 'cut' if cut else 'copy'
+        self.kvm_worker.share_files(files, op)
 
     def paste_network_file(self):
         if not self.kvm_worker:
@@ -308,4 +320,37 @@ class MainWindow(QMainWindow):
         dest = QFileDialog.getExistingDirectory(self, "Cél mappa kiválasztása")
         if not dest:
             return
+        self.show_progress_dialog("Fájl fogadása")
         self.kvm_worker.request_paste(dest)
+
+    def show_progress_dialog(self, title: str):
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        self.progress_dialog = QProgressDialog("", "Mégse", 0, 100, self)
+        self.progress_dialog.setWindowTitle(title)
+        self.progress_dialog.canceled.connect(self.cancel_transfer)
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.show()
+
+    def update_progress(self, operation: str, name: str, done: int, total: int):
+        if not self.progress_dialog:
+            return
+        self.progress_dialog.setMaximum(total)
+        self.progress_dialog.setValue(done)
+        self.progress_dialog.setLabelText(f"{name}: {done/1024/1024:.1f}MB / {total/1024/1024:.1f}MB")
+        if done >= total:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+    def cancel_transfer(self):
+        if self.kvm_worker:
+            self.kvm_worker.cancel_file_transfer()
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None
+
+    def on_transfer_error(self, msg: str):
+        self.on_status_update(f"Hiba: {msg}")
+        if self.progress_dialog:
+            self.progress_dialog.close()
+            self.progress_dialog = None

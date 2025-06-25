@@ -25,6 +25,8 @@ from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUM
 STREAM_LOOP_DELAY = 0.05
 # Maximum number of events queued for sending before old ones are dropped
 SEND_QUEUE_MAXSIZE = 200
+# File transfer chunk size
+FILE_CHUNK_SIZE = 65536
 
 
 class KVMWorker(QObject):
@@ -33,11 +35,13 @@ class KVMWorker(QObject):
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
-        'network_file_clipboard'
+        'network_file_clipboard', '_cancel_transfer'
     )
 
     finished = Signal()
     status_update = Signal(str)
+    file_progress_update = Signal(str, str, int, int)
+    file_transfer_error = Signal(str)
 
     def __init__(self, settings):
         super().__init__()
@@ -62,6 +66,7 @@ class KVMWorker(QObject):
         self.last_clipboard = ""
         self.server_socket = None
         self.network_file_clipboard = None
+        self._cancel_transfer = threading.Event()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -147,30 +152,52 @@ class KVMWorker(QObject):
     def _create_archive(self, paths):
         temp_dir = tempfile.mkdtemp()
         archive = os.path.join(temp_dir, 'share.zip')
-        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for p in paths:
-                if os.path.isdir(p):
-                    base = os.path.basename(p.rstrip(os.sep))
-                    for root, _, files in os.walk(p):
-                        for f in files:
-                            full = os.path.join(root, f)
-                            rel = os.path.join(base, os.path.relpath(full, p))
-                            zf.write(full, rel)
-                else:
-                    zf.write(p, os.path.basename(p))
+        try:
+            with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for p in paths:
+                    if os.path.isdir(p):
+                        base = os.path.basename(p.rstrip(os.sep))
+                        for root, _, files in os.walk(p):
+                            for f in files:
+                                full = os.path.join(root, f)
+                                rel = os.path.join(base, os.path.relpath(full, p))
+                                zf.write(full, rel)
+                    else:
+                        zf.write(p, os.path.basename(p))
+        except Exception as e:
+            logging.error("Failed to create archive: %s", e, exc_info=True)
+            self.file_transfer_error.emit(f"Archive creation failed: {e}")
+            return None
         return archive
 
     def _send_archive(self, sock, archive_path, dest_dir):
-        size = os.path.getsize(archive_path)
-        name = os.path.basename(archive_path)
-        self._send_message(sock, {'type': 'file_metadata', 'name': name, 'size': size, 'dest': dest_dir})
-        with open(archive_path, 'rb') as f:
-            while True:
-                chunk = f.read(4096)
-                if not chunk:
-                    break
-                self._send_message(sock, {'type': 'file_chunk', 'data': chunk})
-        self._send_message(sock, {'type': 'file_end'})
+        try:
+            size = os.path.getsize(archive_path)
+            name = os.path.basename(archive_path)
+            if not self._send_message(sock, {'type': 'file_metadata', 'name': name, 'size': size, 'dest': dest_dir}):
+                return
+            sent = 0
+            with open(archive_path, 'rb') as f:
+                while not self._cancel_transfer.is_set():
+                    chunk = f.read(FILE_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    if not self._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
+                        raise IOError('send failed')
+                    sent += len(chunk)
+                    self.file_progress_update.emit('sending_archive', name, sent, size)
+            if self._cancel_transfer.is_set():
+                self._send_message(sock, {'type': 'transfer_canceled'})
+                return
+            self._send_message(sock, {'type': 'file_end'})
+            self.file_progress_update.emit('sending_archive', name, size, size)
+        except Exception as e:
+            logging.error('Error sending archive: %s', e, exc_info=True)
+            self.file_transfer_error.emit(str(e))
+
+    def cancel_file_transfer(self):
+        """Signal ongoing file transfer loops to cancel."""
+        self._cancel_transfer.set()
 
     # ------------------------------------------------------------------
     # Public API used by the GUI
@@ -179,7 +206,10 @@ class KVMWorker(QObject):
         threading.Thread(target=self._share_files_thread, args=(paths, operation), daemon=True).start()
 
     def _share_files_thread(self, paths, operation):
+        self._cancel_transfer.clear()
         archive = self._create_archive(paths)
+        if not archive:
+            return
         if self.settings['role'] == 'ado':
             self.network_file_clipboard = {
                 'paths': paths,
@@ -204,22 +234,40 @@ class KVMWorker(QObject):
                 'operation': operation,
                 'name': os.path.basename(archive),
             }
-            self._send_message(sock, meta)
-            with open(archive, 'rb') as f:
-                while True:
-                    chunk = f.read(4096)
-                    if not chunk:
-                        break
-                    self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk})
-            self._send_message(sock, {'type': 'upload_file_end'})
+            if not self._send_message(sock, meta):
+                return
+            sent = 0
+            try:
+                with open(archive, 'rb') as f:
+                    while not self._cancel_transfer.is_set():
+                        chunk = f.read(FILE_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
+                            raise IOError('send failed')
+                        sent += len(chunk)
+                        self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
+                if self._cancel_transfer.is_set():
+                    self._send_message(sock, {'type': 'transfer_canceled'})
+                    return
+                self._send_message(sock, {'type': 'upload_file_end'})
+                self.file_progress_update.emit('sending_archive', os.path.basename(archive), size, size)
+            except Exception as e:
+                logging.error('Upload failed: %s', e, exc_info=True)
+                self.file_transfer_error.emit(str(e))
 
     def request_paste(self, dest_dir) -> None:
         if self.settings['role'] == 'ado':
             if not self.network_file_clipboard or not self.network_file_clipboard.get('archive'):
                 logging.warning('No shared files to paste')
                 return
-            with zipfile.ZipFile(self.network_file_clipboard['archive'], 'r') as zf:
-                zf.extractall(dest_dir)
+            try:
+                with zipfile.ZipFile(self.network_file_clipboard['archive'], 'r') as zf:
+                    zf.extractall(dest_dir)
+            except Exception as e:
+                logging.error('Extraction failed: %s', e, exc_info=True)
+                self.file_transfer_error.emit(str(e))
+                return
             if self.network_file_clipboard.get('operation') == 'cut':
                 for pth in self.network_file_clipboard.get('paths', []):
                     try:
@@ -470,6 +518,7 @@ class KVMWorker(QObject):
                             elif data.get('type') == 'paste_request':
                                 dest = data.get('destination')
                                 if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
+                                    self._cancel_transfer.clear()
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
                                     if self.network_file_clipboard.get('operation') == 'cut':
                                         for pth in self.network_file_clipboard.get('paths', []):
@@ -483,16 +532,35 @@ class KVMWorker(QObject):
                                         self.network_file_clipboard = None
                             elif data.get('type') == 'upload_file_start':
                                 incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
-                                incoming_file = open(incoming_path, 'wb')
+                                try:
+                                    incoming_file = open(incoming_path, 'wb')
+                                except Exception as e:
+                                    logging.error('Failed to open incoming file: %s', e, exc_info=True)
+                                    self.file_transfer_error.emit(str(e))
+                                    break
                                 upload_info = {
                                     'file': incoming_file,
                                     'path': incoming_path,
                                     'paths': data.get('paths', []),
                                     'operation': data.get('operation', 'copy'),
+                                    'size': data.get('size', 0),
+                                    'name': data.get('name'),
+                                    'received': 0,
                                 }
+                                self.file_progress_update.emit('receiving_archive', upload_info['name'], 0, upload_info['size'])
                             elif data.get('type') == 'upload_file_chunk':
                                 if upload_info:
-                                    upload_info['file'].write(data['data'])
+                                    try:
+                                        upload_info['file'].write(data['data'])
+                                        upload_info['received'] += len(data['data'])
+                                        self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['received'], upload_info['size'])
+                                        if self._cancel_transfer.is_set():
+                                            break
+                                    except Exception as e:
+                                        logging.error('Error writing chunk: %s', e, exc_info=True)
+                                        self.file_transfer_error.emit(str(e))
+                                        self._cancel_transfer.set()
+                                        break
                             elif data.get('type') == 'upload_file_end':
                                 if upload_info:
                                     upload_info['file'].close()
@@ -506,7 +574,17 @@ class KVMWorker(QObject):
                                         'source_id': client_name,
                                         'operation': upload_info['operation'],
                                     }, exclude=sock)
+                                    self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
                                     upload_info = None
+                            if self._cancel_transfer.is_set():
+                                if upload_info:
+                                    try:
+                                        upload_info['file'].close()
+                                        os.remove(upload_info['path'])
+                                    except Exception:
+                                        pass
+                                    upload_info = None
+                                self._cancel_transfer.clear()
                         except Exception:
                             logging.warning("Hibas parancs a klienstol")
                 except socket.timeout:
@@ -1056,26 +1134,54 @@ class KVMWorker(QObject):
                                     self._set_clipboard(text)
                             elif event_type == 'file_metadata':
                                 incoming_tmp = os.path.join(tempfile.gettempdir(), data['name'])
-                                incoming_file = open(incoming_tmp, 'wb')
+                                try:
+                                    incoming_file = open(incoming_tmp, 'wb')
+                                except Exception as e:
+                                    logging.error('Failed to open receive file: %s', e, exc_info=True)
+                                    self.file_transfer_error.emit(str(e))
+                                    break
                                 incoming_info = {
                                     'path': incoming_tmp,
                                     'dest': data['dest'],
                                     'size': data['size'],
                                     'name': data['name'],
                                     'file': incoming_file,
+                                    'received': 0,
                                 }
+                                self.file_progress_update.emit('receiving_archive', incoming_info['name'], 0, incoming_info['size'])
                             elif event_type == 'file_chunk':
                                 if incoming_info:
-                                    incoming_info['file'].write(data['data'])
+                                    try:
+                                        incoming_info['file'].write(data['data'])
+                                        incoming_info['received'] += len(data['data'])
+                                        self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['received'], incoming_info['size'])
+                                        if self._cancel_transfer.is_set():
+                                            break
+                                    except Exception as e:
+                                        logging.error('Receive error: %s', e, exc_info=True)
+                                        self.file_transfer_error.emit(str(e))
+                                        self._cancel_transfer.set()
+                                        break
                             elif event_type == 'file_end':
                                 if incoming_info:
                                     incoming_info['file'].close()
                                     with zipfile.ZipFile(incoming_info['path'], 'r') as zf:
                                         zf.extractall(incoming_info['dest'])
                                     os.remove(incoming_info['path'])
+                                    self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['size'], incoming_info['size'])
                                     incoming_info = None
                         except Exception:
                             logging.warning("Hibás adatcsomag")
+
+                        if self._cancel_transfer.is_set():
+                            if incoming_info:
+                                try:
+                                    incoming_info['file'].close()
+                                    os.remove(incoming_info['path'])
+                                except Exception:
+                                    pass
+                                incoming_info = None
+                            self._cancel_transfer.clear()
 
             except Exception as e:
                 if self._running:
