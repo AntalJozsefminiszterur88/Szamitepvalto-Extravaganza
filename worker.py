@@ -224,6 +224,21 @@ class KVMWorker(QObject):
         finally:
             sock.settimeout(prev_to)
 
+    def _clear_network_file_clipboard(self):
+        """Remove any stored temporary archive and clear the clipboard info."""
+        if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
+            try:
+                os.remove(self.network_file_clipboard['archive'])
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                logging.error(
+                    "Failed to remove temporary archive %s: %s",
+                    self.network_file_clipboard['archive'],
+                    e,
+                )
+        self.network_file_clipboard = None
+
     def cancel_file_transfer(self):
         """Signal ongoing file transfer loops to cancel."""
         self._cancel_transfer.set()
@@ -239,57 +254,62 @@ class KVMWorker(QObject):
         archive = self._create_archive(paths)
         if not archive:
             return
-        if self.settings['role'] == 'ado':
-            self.network_file_clipboard = {
-                'paths': paths,
-                'operation': operation,
-                'archive': archive,
-                'source_id': self.device_name,
-            }
-            self._broadcast_message({
-                'type': 'network_clipboard_set',
-                'source_id': self.device_name,
-                'operation': operation,
-            })
-        else:
-            sock = self.server_socket
-            if not sock:
-                logging.warning('No server connection for file share')
-                return
-            size = os.path.getsize(archive)
-            meta = {
-                'type': 'upload_file_start',
-                'size': size,
-                'paths': paths,
-                'operation': operation,
-                'name': os.path.basename(archive),
-                'source_id': self.device_name,
-            }
-            if not self._send_message(sock, meta):
-                return
-            prev_to = sock.gettimeout()
-            sock.settimeout(TRANSFER_TIMEOUT)
-            sent = 0
-            try:
-                with open(archive, 'rb') as f:
-                    while not self._cancel_transfer.is_set():
-                        chunk = f.read(FILE_CHUNK_SIZE)
-                        if not chunk:
-                            break
-                        if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
-                            raise IOError('send failed')
-                        sent += len(chunk)
-                        self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
-                if self._cancel_transfer.is_set():
-                    self._send_message(sock, {'type': 'transfer_canceled'})
+        temp_archive_dir = os.path.dirname(archive)
+        try:
+            if self.settings['role'] == 'ado':
+                self._clear_network_file_clipboard()
+                self.network_file_clipboard = {
+                    'paths': paths,
+                    'operation': operation,
+                    'archive': archive,
+                    'source_id': self.device_name,
+                }
+                self._broadcast_message({
+                    'type': 'network_clipboard_set',
+                    'source_id': self.device_name,
+                    'operation': operation,
+                })
+            else:
+                sock = self.server_socket
+                if not sock:
+                    logging.warning('No server connection for file share')
                     return
-                self._send_message(sock, {'type': 'upload_file_end'})
-                self.file_progress_update.emit('sending_archive', os.path.basename(archive), size, size)
-            except Exception as e:
-                logging.error('Upload failed: %s', e, exc_info=True)
-                self.file_transfer_error.emit(str(e))
-            finally:
-                sock.settimeout(prev_to)
+                size = os.path.getsize(archive)
+                meta = {
+                    'type': 'upload_file_start',
+                    'size': size,
+                    'paths': paths,
+                    'operation': operation,
+                    'name': os.path.basename(archive),
+                    'source_id': self.device_name,
+                }
+                if not self._send_message(sock, meta):
+                    return
+                prev_to = sock.gettimeout()
+                sock.settimeout(TRANSFER_TIMEOUT)
+                sent = 0
+                try:
+                    with open(archive, 'rb') as f:
+                        while not self._cancel_transfer.is_set():
+                            chunk = f.read(FILE_CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
+                                raise IOError('send failed')
+                            sent += len(chunk)
+                            self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
+                    if self._cancel_transfer.is_set():
+                        self._send_message(sock, {'type': 'transfer_canceled'})
+                        return
+                    self._send_message(sock, {'type': 'upload_file_end'})
+                    self.file_progress_update.emit('sending_archive', os.path.basename(archive), size, size)
+                except Exception as e:
+                    logging.error('Upload failed: %s', e, exc_info=True)
+                    self.file_transfer_error.emit(str(e))
+                finally:
+                    sock.settimeout(prev_to)
+        finally:
+            shutil.rmtree(temp_archive_dir, ignore_errors=True)
 
     def request_paste(self, dest_dir) -> None:
         if self.settings['role'] == 'ado':
@@ -313,13 +333,13 @@ class KVMWorker(QObject):
                                 os.remove(pth)
                         except Exception as e:
                             logging.error('Failed to delete %s: %s', pth, e)
-                    self.network_file_clipboard = None
+                    self._clear_network_file_clipboard()
                 else:
                     for s, name in self.client_infos.items():
                         if name == src_id:
                             self._send_message(s, {'type': 'delete_source', 'paths': self.network_file_clipboard.get('paths', [])})
                             break
-                    self.network_file_clipboard = None
+                    self._clear_network_file_clipboard()
         else:
             sock = self.server_socket
             if sock:
@@ -386,6 +406,7 @@ class KVMWorker(QObject):
             self.clipboard_thread.join(timeout=1)
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
+        self._clear_network_file_clipboard()
 
     def run(self):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
@@ -598,6 +619,7 @@ class KVMWorker(QObject):
                             elif data.get('type') == 'upload_file_end':
                                 if upload_info:
                                     upload_info['file'].close()
+                                    self._clear_network_file_clipboard()
                                     self.network_file_clipboard = {
                                         'paths': upload_info['paths'],
                                         'operation': upload_info['operation'],
@@ -628,7 +650,7 @@ class KVMWorker(QObject):
                                                     os.remove(pth)
                                             except Exception as e:
                                                 logging.error("Failed to delete %s: %s", pth, e)
-                                        self.network_file_clipboard = None
+                                        self._clear_network_file_clipboard()
                                     else:
                                         for s2, n2 in self.client_infos.items():
                                             if n2 == src:
@@ -637,7 +659,7 @@ class KVMWorker(QObject):
                                                     'paths': self.network_file_clipboard.get('paths', []),
                                                 })
                                                 break
-                                        self.network_file_clipboard = None
+                                        self._clear_network_file_clipboard()
                             if self._cancel_transfer.is_set():
                                 if upload_info:
                                     try:
