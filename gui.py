@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QSystemTrayIcon,
     QMenu,
+    QFileDialog,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QSize, QSettings, QThread, Qt
@@ -64,7 +65,7 @@ class MainWindow(QMainWindow):
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
-        'tray_icon'
+        'tray_icon', 'share_button', 'paste_button'
     )
 
     # A MainWindow többi része változatlan...
@@ -124,6 +125,17 @@ class MainWindow(QMainWindow):
         other_layout.addWidget(self.autostart_check, 1, 0, 1, 2)
         other_box.setLayout(other_layout)
         main_layout.addWidget(other_box)
+
+        file_box = QGroupBox("Hálózati Fájl Vágólap")
+        file_layout = QHBoxLayout()
+        self.share_button = QPushButton("Megosztás")
+        self.share_button.clicked.connect(self.share_network_file)
+        self.paste_button = QPushButton("Beillesztés")
+        self.paste_button.clicked.connect(self.paste_network_file)
+        file_layout.addWidget(self.share_button)
+        file_layout.addWidget(self.paste_button)
+        file_box.setLayout(file_layout)
+        main_layout.addWidget(file_box)
 
         self.start_button = QPushButton("KVM Szolgáltatás Indítása")
         self.start_button.clicked.connect(self.toggle_kvm_service)
@@ -280,3 +292,19 @@ class MainWindow(QMainWindow):
         self.stop_kvm_service()
         time.sleep(0.2)
         QApplication.instance().quit()
+
+    def share_network_file(self):
+        if not self.kvm_worker:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Fájl vagy mappa kiválasztása")
+        if not path:
+            return
+        self.kvm_worker.share_files([path], 'copy')
+
+    def paste_network_file(self):
+        if not self.kvm_worker:
+            return
+        dest = QFileDialog.getExistingDirectory(self, "Cél mappa kiválasztása")
+        if not dest:
+            return
+        self.kvm_worker.request_paste(dest)
