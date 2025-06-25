@@ -155,6 +155,7 @@ class KVMWorker(QObject):
     def _create_archive(self, paths):
         temp_dir = tempfile.mkdtemp()
         archive = os.path.join(temp_dir, 'share.zip')
+        logging.debug("Created temp archive dir %s", temp_dir)
         try:
             # Pre-scan all paths to determine total number of files
             total_files = 0
@@ -201,11 +202,13 @@ class KVMWorker(QObject):
             logging.error("Failed to create archive: %s", e, exc_info=True)
             self.file_transfer_error.emit(f"Archive creation failed: {e}")
             return None
+        logging.debug("Archive created at %s", archive)
         return archive
 
     def _safe_extract_archive(self, archive_path, dest_dir):
         """Extract archive to dest_dir and cleanup on failure."""
         temp_extract = tempfile.mkdtemp(dir=dest_dir)
+        logging.debug("Created temporary extract dir %s", temp_extract)
         try:
             with zipfile.ZipFile(archive_path, 'r') as zf:
                 zf.extractall(temp_extract)
@@ -215,17 +218,20 @@ class KVMWorker(QObject):
                 shutil.move(os.path.join(temp_extract, name), os.path.join(dest_dir, name))
         except Exception:
             shutil.rmtree(temp_extract, ignore_errors=True)
+            logging.debug("Extraction failed, removed %s", temp_extract)
             raise
         else:
             shutil.rmtree(temp_extract, ignore_errors=True)
+            logging.debug("Extraction complete, removed %s", temp_extract)
 
     def _send_archive(self, sock, archive_path, dest_dir):
+        self._cancel_transfer.clear()
         logging.debug(
             "Entering _send_archive. cancel=%s dest=%s",
             self._cancel_transfer.is_set(),
             dest_dir,
         )
-        self._cancel_transfer.clear()
+        logging.debug("Cancel flag cleared at start of _send_archive")
         prev_to = sock.gettimeout()
         sock.settimeout(TRANSFER_TIMEOUT)
         try:
@@ -295,11 +301,12 @@ class KVMWorker(QObject):
         threading.Thread(target=self._share_files_thread, args=(paths, operation), daemon=True).start()
 
     def _share_files_thread(self, paths, operation):
+        self._cancel_transfer.clear()
         logging.debug(
             "Entering _share_files_thread. Cancel flag: %s",
             self._cancel_transfer.is_set(),
         )
-        self._cancel_transfer.clear()
+        logging.debug("Cancel flag cleared at start of _share_files_thread")
         archive = self._create_archive(paths)
         if not archive:
             self._clear_network_file_clipboard()
@@ -372,12 +379,13 @@ class KVMWorker(QObject):
             )
 
     def request_paste(self, dest_dir) -> None:
+        self._cancel_transfer.clear()
         logging.debug(
             "request_paste called. role=%s cancel=%s",
             self.settings['role'],
             self._cancel_transfer.is_set(),
         )
-        self._cancel_transfer.clear()
+        logging.debug("Cancel flag cleared at start of request_paste")
         if self.settings['role'] == 'ado':
             if not self.network_file_clipboard or not self.network_file_clipboard.get('archive'):
                 logging.warning('No shared files to paste')
@@ -412,6 +420,8 @@ class KVMWorker(QObject):
                 logging.debug("Sending paste_request to server")
                 self._send_message(sock, {'type': 'paste_request', 'destination': dest_dir})
         logging.debug("request_paste completed. cancel=%s", self._cancel_transfer.is_set())
+        self._cancel_transfer.clear()
+        logging.debug("Cancel flag cleared at end of request_paste")
 
     def set_active_client_by_name(self, name):
         """Select a connected client by name as the active target."""
@@ -655,14 +665,17 @@ class KVMWorker(QObject):
                                 dest = data.get('destination')
                                 if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
                                     self._cancel_transfer.clear()
+                                    logging.debug("Cancel flag cleared for paste_request")
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
                             elif data.get('type') == 'upload_file_start':
                                 incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
+                                self._clear_network_file_clipboard()
                                 try:
                                     incoming_file = open(incoming_path, 'wb')
                                 except Exception as e:
                                     logging.error('Failed to open incoming file: %s', e, exc_info=True)
                                     self.file_transfer_error.emit(str(e))
+                                    self._clear_network_file_clipboard()
                                     break
                                 self._cancel_transfer.clear()
                                 logging.debug("Receiving upload, cancel flag cleared")
@@ -689,6 +702,7 @@ class KVMWorker(QObject):
                                     except Exception as e:
                                         logging.error('Error writing chunk: %s', e, exc_info=True)
                                         self.file_transfer_error.emit(str(e))
+                                        self._clear_network_file_clipboard()
                                         self._cancel_transfer.set()
                                         break
                             elif data.get('type') == 'upload_file_end':
@@ -712,6 +726,8 @@ class KVMWorker(QObject):
                                     self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
                                     upload_info = None
                                     sock.settimeout(1.0)
+                                    self._cancel_transfer.clear()
+                                    logging.debug("Upload finished, cancel flag cleared")
                             elif data.get('type') == 'paste_success':
                                 src = data.get('source_id')
                                 if (
@@ -746,6 +762,7 @@ class KVMWorker(QObject):
                                     except Exception:
                                         pass
                                     upload_info = None
+                                self._clear_network_file_clipboard()
                                 sock.settimeout(1.0)
                                 self._cancel_transfer.clear()
                                 logging.debug("Upload canceled or finished, cancel flag cleared")
@@ -761,6 +778,9 @@ class KVMWorker(QObject):
                 sock.close()
             except Exception:
                 pass
+            upload_info = None
+            self._cancel_transfer.clear()
+            self._clear_network_file_clipboard()
             if sock in self.client_sockets:
                 self.client_sockets.remove(sock)
             if sock in self.client_infos:
@@ -1191,6 +1211,7 @@ class KVMWorker(QObject):
                     incoming_info = None
                     self._cancel_transfer.clear()
                     logging.debug("Connected to server, cancel flag cleared")
+                    logging.debug("Cancel flag state at connect: %s", self._cancel_transfer.is_set())
 
                     try:
                         hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
@@ -1307,14 +1328,14 @@ class KVMWorker(QObject):
                                     self._set_clipboard(text)
                             elif event_type == 'file_metadata':
                                 incoming_tmp = os.path.join(tempfile.gettempdir(), data['name'])
+                                self._cancel_transfer.clear()
+                                logging.debug("Receiving file, cancel flag cleared")
                                 try:
                                     incoming_file = open(incoming_tmp, 'wb')
                                 except Exception as e:
                                     logging.error('Failed to open receive file: %s', e, exc_info=True)
                                     self.file_transfer_error.emit(str(e))
                                     break
-                                self._cancel_transfer.clear()
-                                logging.debug("Receiving file, cancel flag cleared")
                                 s.settimeout(TRANSFER_TIMEOUT)
                                 incoming_info = {
                                     'path': incoming_tmp,
@@ -1350,6 +1371,8 @@ class KVMWorker(QObject):
                                     s.settimeout(None)
                                     self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['size'], incoming_info['size'])
                                     incoming_info = None
+                                    self._cancel_transfer.clear()
+                                    logging.debug("Download finished, cancel flag cleared")
                             elif event_type == 'delete_source':
                                 for pth in data.get('paths', []):
                                     try:
@@ -1402,6 +1425,8 @@ class KVMWorker(QObject):
                     except Exception:
                         pass
                 self.release_hotkey_keys()
+                incoming_info = None
+                self._cancel_transfer.clear()
                 self.server_socket = None
                 time.sleep(1)
                 logging.debug("connect_to_server loop ended")
