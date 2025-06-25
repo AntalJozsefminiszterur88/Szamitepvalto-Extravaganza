@@ -155,6 +155,16 @@ class KVMWorker(QObject):
         temp_dir = tempfile.mkdtemp()
         archive = os.path.join(temp_dir, 'share.zip')
         try:
+            # Pre-scan all paths to determine total number of files
+            total_files = 0
+            for p in paths:
+                if os.path.isdir(p):
+                    for _, _, files in os.walk(p):
+                        total_files += len(files)
+                else:
+                    total_files += 1
+
+            archived_files = 0
             with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zf:
                 for p in paths:
                     if os.path.isdir(p):
@@ -164,8 +174,28 @@ class KVMWorker(QObject):
                                 full = os.path.join(root, f)
                                 rel = os.path.join(base, os.path.relpath(full, p))
                                 zf.write(full, rel)
+                                archived_files += 1
+                                self.file_progress_update.emit(
+                                    'archiving',
+                                    os.path.basename(full),
+                                    archived_files,
+                                    total_files,
+                                )
                     else:
                         zf.write(p, os.path.basename(p))
+                        archived_files += 1
+                        self.file_progress_update.emit(
+                            'archiving',
+                            os.path.basename(p),
+                            archived_files,
+                            total_files,
+                        )
+            self.file_progress_update.emit(
+                'archiving_complete',
+                os.path.basename(archive),
+                total_files,
+                total_files,
+            )
         except Exception as e:
             logging.error("Failed to create archive: %s", e, exc_info=True)
             self.file_transfer_error.emit(f"Archive creation failed: {e}")
