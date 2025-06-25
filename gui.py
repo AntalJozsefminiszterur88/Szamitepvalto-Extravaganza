@@ -332,6 +332,11 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setAutoClose(False)
         self.progress_dialog.setAutoReset(False)
         self.progress_dialog.setMinimumDuration(0)
+        logging.debug(
+            "GUI: show_progress_dialog called with title: %s. Current worker role: %s",
+            title,
+            self.kvm_worker.settings.get('role') if self.kvm_worker else 'N/A',
+        )
         self.progress_dialog.setLabelText(f"{title} előkészítése...")
         self.progress_dialog.show()
 
@@ -339,10 +344,35 @@ class MainWindow(QMainWindow):
         """Update progress dialog based on signals from the worker thread."""
         if not self.progress_dialog or not self.progress_dialog.isVisible():
             return
+        logging.debug(
+            "GUI update_progress RECEIVED: op=%s, name=%s, done=%d, total=%d, dialog_visible=%s",
+            operation,
+            name,
+            done,
+            total,
+            self.progress_dialog.isVisible() if self.progress_dialog else 'NoDialog',
+        )
 
         if operation == "archiving_large_file_working":
             if self.progress_dialog.windowTitle() != "Tömörítés...":
+                logging.debug(
+                    "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                    operation,
+                    "Tömörítés...",
+                    f"Tömörítés (nagy fájl): {name} - Folyamatban...",
+                    0,
+                    0,
+                )
                 self.progress_dialog.setWindowTitle("Tömörítés...")
+            else:
+                logging.debug(
+                    "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                    operation,
+                    self.progress_dialog.windowTitle(),
+                    f"Tömörítés (nagy fájl): {name} - Folyamatban...",
+                    0,
+                    0,
+                )
             self.progress_dialog.setMaximum(0)
             self.progress_dialog.setValue(0)
             self.progress_dialog.setLabelText(
@@ -351,38 +381,66 @@ class MainWindow(QMainWindow):
             return
 
         if operation == "archiving":
+            maximum = total if total > 0 else 1
+            label = f"Tömörítés: {name} ({done}/{total} fájl)"
+            logging.debug(
+                "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                operation,
+                "Tömörítés...",
+                label,
+                maximum,
+                done,
+            )
             if self.progress_dialog.windowTitle() != "Tömörítés...":
                 self.progress_dialog.setWindowTitle("Tömörítés...")
-            maximum = total if total > 0 else 1
             self.progress_dialog.setMaximum(maximum)
             self.progress_dialog.setValue(done)
-            self.progress_dialog.setLabelText(
-                f"Tömörítés: {name} ({done}/{total} fájl)"
-            )
+            self.progress_dialog.setLabelText(label)
             return
 
         if operation == "archiving_complete":
             maximum = total if total > 0 else 1
+            label = "Tömörítés kész. Átvitel előkészítése..."
+            logging.debug(
+                "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                operation,
+                self.progress_dialog.windowTitle(),
+                label,
+                maximum,
+                maximum,
+            )
             self.progress_dialog.setMaximum(maximum)
             self.progress_dialog.setValue(maximum)
-            self.progress_dialog.setLabelText(
-                "Tömörítés kész. Átvitel előkészítése..."
-            )
+            self.progress_dialog.setLabelText(label)
             return
 
         if operation in ("sending_archive", "receiving_archive"):
             desired_title = (
                 "Fájl küldése" if operation == "sending_archive" else "Fájl fogadása"
             )
-            if self.progress_dialog.windowTitle() != desired_title:
-                self.progress_dialog.setWindowTitle(desired_title)
-
             maximum = total if total > 0 else 1
-            self.progress_dialog.setMaximum(maximum)
-            self.progress_dialog.setValue(min(done, maximum))
-
+            value = min(done, maximum)
             current_mb = done / 1024 / 1024
             total_mb = total / 1024 / 1024
+            label_text = ""
+            if total == 0:
+                label_text = f"{name}: Adatok feldolgozása..."
+            elif done >= total:
+                label_text = f"{name}: Kész! ({total_mb:.1f}MB)"
+            else:
+                label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
+            logging.debug(
+                "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                operation,
+                desired_title,
+                label_text,
+                maximum,
+                value,
+            )
+            if self.progress_dialog.windowTitle() != desired_title:
+                self.progress_dialog.setWindowTitle(desired_title)
+            self.progress_dialog.setMaximum(maximum)
+            self.progress_dialog.setValue(value)
 
             if total == 0:
                 label_text = f"{name}: Adatok feldolgozása..."
@@ -395,6 +453,7 @@ class MainWindow(QMainWindow):
                     btn = self.progress_dialog.findChild(QPushButton)
                     if btn:
                         btn.setEnabled(False)
+                logging.debug("GUI: Transfer complete for %s. Starting 5s close timer.", name)
                 QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
             else:
                 label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
