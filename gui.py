@@ -336,7 +336,18 @@ class MainWindow(QMainWindow):
         self.progress_dialog.show()
 
     def update_progress(self, operation: str, name: str, done: int, total: int):
+        """Update progress dialog based on signals from the worker thread."""
         if not self.progress_dialog or not self.progress_dialog.isVisible():
+            return
+
+        if operation == "archiving_large_file_working":
+            if self.progress_dialog.windowTitle() != "Tömörítés...":
+                self.progress_dialog.setWindowTitle("Tömörítés...")
+            self.progress_dialog.setMaximum(0)
+            self.progress_dialog.setValue(0)
+            self.progress_dialog.setLabelText(
+                f"Tömörítés (nagy fájl): {name} - Folyamatban..."
+            )
             return
 
         if operation == "archiving":
@@ -360,10 +371,11 @@ class MainWindow(QMainWindow):
             return
 
         if operation in ("sending_archive", "receiving_archive"):
-            if operation == "sending_archive":
-                self.progress_dialog.setWindowTitle("Fájl küldése")
-            else:
-                self.progress_dialog.setWindowTitle("Fájl fogadása")
+            desired_title = (
+                "Fájl küldése" if operation == "sending_archive" else "Fájl fogadása"
+            )
+            if self.progress_dialog.windowTitle() != desired_title:
+                self.progress_dialog.setWindowTitle(desired_title)
 
             maximum = total if total > 0 else 1
             self.progress_dialog.setMaximum(maximum)
