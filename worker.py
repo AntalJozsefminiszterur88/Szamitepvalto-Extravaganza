@@ -44,6 +44,7 @@ class KVMWorker(QObject):
     status_update = Signal(str)
     file_progress_update = Signal(str, str, int, int)
     file_transfer_error = Signal(str)
+    incoming_upload_started = Signal(str, int)
 
     def __init__(self, settings):
         super().__init__()
@@ -864,6 +865,10 @@ class KVMWorker(QObject):
                                     self.file_transfer_error.emit(str(e))
                                     self._clear_network_file_clipboard()
                                     break
+                                self.incoming_upload_started.emit(
+                                    data.get('name'),
+                                    data.get('size', 0)
+                                )
                                 self._cancel_transfer.clear()
                                 logging.debug("Receiving upload, cancel flag cleared")
                                 sock.settimeout(TRANSFER_TIMEOUT)
