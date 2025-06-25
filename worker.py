@@ -184,11 +184,21 @@ class KVMWorker(QObject):
                     """Write file while emitting heartbeat signal for large files."""
                     hb_thread = None
                     stop_evt = threading.Event()
+                    tick = 0
 
                     if os.path.getsize(src_path) > 1_000_000_000:
                         def hb_loop():
+                            nonlocal tick
                             while not stop_evt.is_set():
+                                tick += 1
                                 try:
+                                    logging.debug(
+                                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                        'archiving_large_file_working',
+                                        os.path.basename(src_path),
+                                        0,
+                                        0,
+                                    )
                                     self.file_progress_update.emit(
                                         'archiving_large_file_working',
                                         os.path.basename(src_path),
@@ -197,13 +207,21 @@ class KVMWorker(QObject):
                                     )
                                 except Exception:
                                     pass
+                                logging.debug("Heartbeat for large file %s: tick %d", src_path, tick)
                                 stop_evt.wait(1)
 
                         hb_thread = threading.Thread(target=hb_loop, daemon=True)
                         hb_thread.start()
 
                     try:
+                        logging.info(
+                            "Attempting zf.write() for LARGE file: %s, size: %d, compress_type: %s",
+                            src_path,
+                            os.path.getsize(src_path),
+                            ctype,
+                        )
                         zf.write(src_path, arcname, compress_type=ctype)
+                        logging.info("zf.write() COMPLETED for: %s", src_path)
                     finally:
                         stop_evt.set()
                         if hb_thread is not None:
@@ -247,6 +265,13 @@ class KVMWorker(QObject):
                                     self.file_transfer_error.emit(msg)
                                     return None
                                 archived_files += 1
+                                logging.debug(
+                                    "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                    'archiving',
+                                    os.path.basename(full),
+                                    archived_files,
+                                    total_files,
+                                )
                                 self.file_progress_update.emit(
                                     'archiving',
                                     os.path.basename(full),
@@ -286,12 +311,26 @@ class KVMWorker(QObject):
                             self.file_transfer_error.emit(msg)
                             return None
                         archived_files += 1
+                        logging.debug(
+                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                            'archiving',
+                            os.path.basename(p),
+                            archived_files,
+                            total_files,
+                        )
                         self.file_progress_update.emit(
                             'archiving',
                             os.path.basename(p),
                             archived_files,
                             total_files,
                         )
+            logging.debug(
+                "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                'archiving_complete',
+                os.path.basename(archive),
+                total_files,
+                total_files,
+            )
             self.file_progress_update.emit(
                 'archiving_complete',
                 os.path.basename(archive),
@@ -352,18 +391,38 @@ class KVMWorker(QObject):
             sent = 0
             with open(archive_path, 'rb') as f:
                 while not self._cancel_transfer.is_set():
+                    logging.debug(
+                        "_send_archive loop tick. cancel=%s sent=%d",
+                        self._cancel_transfer.is_set(),
+                        sent,
+                    )
                     chunk = f.read(FILE_CHUNK_SIZE)
                     if not chunk:
                         break
                     if not self._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
                         raise IOError('send failed')
                     sent += len(chunk)
+                    logging.debug(
+                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                        'sending_archive',
+                        name,
+                        sent,
+                        size,
+                    )
                     self.file_progress_update.emit('sending_archive', name, sent, size)
             if self._cancel_transfer.is_set():
                 self._send_message(sock, {'type': 'transfer_canceled'})
                 return
             self._send_message(sock, {'type': 'file_end'})
+            logging.debug(
+                "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                'sending_archive',
+                name,
+                size,
+                size,
+            )
             self.file_progress_update.emit('sending_archive', name, size, size)
+            logging.debug("_send_archive loop completed. cancel=%s", self._cancel_transfer.is_set())
         except Exception as e:
             logging.error('Error sending archive: %s', e, exc_info=True)
             self.file_transfer_error.emit(str(e))
@@ -455,18 +514,38 @@ class KVMWorker(QObject):
                 try:
                     with open(archive, 'rb') as f:
                         while not self._cancel_transfer.is_set():
+                            logging.debug(
+                                "_share_files_thread upload loop. cancel=%s sent=%d",
+                                self._cancel_transfer.is_set(),
+                                sent,
+                            )
                             chunk = f.read(FILE_CHUNK_SIZE)
                             if not chunk:
                                 break
                             if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
                                 raise IOError('send failed')
                             sent += len(chunk)
+                            logging.debug(
+                                "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                'sending_archive',
+                                os.path.basename(archive),
+                                sent,
+                                size,
+                            )
                             self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
                     if self._cancel_transfer.is_set():
                         self._send_message(sock, {'type': 'transfer_canceled'})
                         return
                     self._send_message(sock, {'type': 'upload_file_end'})
+                    logging.debug(
+                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                        'sending_archive',
+                        os.path.basename(archive),
+                        size,
+                        size,
+                    )
                     self.file_progress_update.emit('sending_archive', os.path.basename(archive), size, size)
+                    logging.debug("_share_files_thread upload loop completed. cancel=%s", self._cancel_transfer.is_set())
                 except Exception as e:
                     logging.error('Upload failed: %s', e, exc_info=True)
                     self.file_transfer_error.emit(str(e))
@@ -741,6 +820,11 @@ class KVMWorker(QObject):
 
         try:
             while self._running:
+                logging.debug(
+                    "monitor_client main loop. cancel=%s received=%d",
+                    self._cancel_transfer.is_set(),
+                    upload_info['received'] if upload_info else 0,
+                )
                 try:
                     chunk = sock.recv(4096)
                     if not chunk:
@@ -793,12 +877,26 @@ class KVMWorker(QObject):
                                     'source_id': data.get('source_id', client_name),
                                     'received': 0,
                                 }
+                                logging.debug(
+                                    "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                    'receiving_archive',
+                                    upload_info['name'],
+                                    0,
+                                    upload_info['size'],
+                                )
                                 self.file_progress_update.emit('receiving_archive', upload_info['name'], 0, upload_info['size'])
                             elif data.get('type') == 'upload_file_chunk':
                                 if upload_info:
                                     try:
                                         upload_info['file'].write(data['data'])
                                         upload_info['received'] += len(data['data'])
+                                        logging.debug(
+                                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                            'receiving_archive',
+                                            upload_info['name'],
+                                            upload_info['received'],
+                                            upload_info['size'],
+                                        )
                                         self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['received'], upload_info['size'])
                                         if self._cancel_transfer.is_set():
                                             break
@@ -826,6 +924,13 @@ class KVMWorker(QObject):
                                         'source_id': upload_info.get('source_id', client_name),
                                         'operation': upload_info['operation'],
                                     }, exclude=sock)
+                                    logging.debug(
+                                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                        'receiving_archive',
+                                        upload_info['name'],
+                                        upload_info['size'],
+                                        upload_info['size'],
+                                    )
                                     self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
                                     upload_info = None
                                     sock.settimeout(1.0)
@@ -1388,6 +1493,11 @@ class KVMWorker(QObject):
                         return data
 
                     while self._running and self.server_ip == ip:
+                        logging.debug(
+                            "connect_to_server recv loop. cancel=%s received=%d",
+                            self._cancel_transfer.is_set(),
+                            incoming_info['received'] if incoming_info else 0,
+                        )
                         raw_len = recv_all(s, 4)
                         if not raw_len:
                             break
@@ -1449,12 +1559,26 @@ class KVMWorker(QObject):
                                     'received': 0,
                                     'source_id': data.get('source_id', self.device_name),
                                 }
+                                logging.debug(
+                                    "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                    'receiving_archive',
+                                    incoming_info['name'],
+                                    0,
+                                    incoming_info['size'],
+                                )
                                 self.file_progress_update.emit('receiving_archive', incoming_info['name'], 0, incoming_info['size'])
                             elif event_type == 'file_chunk':
                                 if incoming_info:
                                     try:
                                         incoming_info['file'].write(data['data'])
                                         incoming_info['received'] += len(data['data'])
+                                        logging.debug(
+                                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                            'receiving_archive',
+                                            incoming_info['name'],
+                                            incoming_info['received'],
+                                            incoming_info['size'],
+                                        )
                                         self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['received'], incoming_info['size'])
                                         if self._cancel_transfer.is_set():
                                             break
@@ -1472,6 +1596,13 @@ class KVMWorker(QObject):
                                         os.remove(incoming_info['path'])
                                     self._send_message(s, {'type': 'paste_success', 'source_id': incoming_info.get('source_id')})
                                     s.settimeout(None)
+                                    logging.debug(
+                                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                        'receiving_archive',
+                                        incoming_info['name'],
+                                        incoming_info['size'],
+                                        incoming_info['size'],
+                                    )
                                     self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['size'], incoming_info['size'])
                                     incoming_info = None
                                     self._cancel_transfer.clear()
