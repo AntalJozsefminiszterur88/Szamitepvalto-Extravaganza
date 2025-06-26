@@ -384,7 +384,29 @@ class KVMWorker(QObject):
             if self._cancel_transfer.is_set():
                 raise RuntimeError('transfer canceled')
             for name in os.listdir(temp_extract):
-                shutil.move(os.path.join(temp_extract, name), os.path.join(dest_dir, name))
+                source_path = os.path.join(temp_extract, name)
+                target_path_base = os.path.join(dest_dir, name)
+
+                # --- START NEW FILENAME CONFLICT LOGIC ---
+                final_target_path = target_path_base
+                counter = 2
+                base, ext = os.path.splitext(name)
+
+                while os.path.exists(final_target_path):
+                    if ext:
+                        new_name = f"{base} ({counter}){ext}"
+                    else:
+                        new_name = f"{name} ({counter})"
+                    final_target_path = os.path.join(dest_dir, new_name)
+                    counter += 1
+
+                if final_target_path != target_path_base:
+                    logging.info(
+                        f"Filename conflict: '{target_path_base}' exists. Renaming to '{final_target_path}'"
+                    )
+                # --- END NEW FILENAME CONFLICT LOGIC ---
+
+                shutil.move(source_path, final_target_path)
         except Exception:
             shutil.rmtree(temp_extract, ignore_errors=True)
             logging.debug("Extraction failed, removed %s", temp_extract)
