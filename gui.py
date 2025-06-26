@@ -118,7 +118,7 @@ class MainWindow(QMainWindow):
         other_layout = QGridLayout()
         other_layout.addWidget(QLabel("Gyorsbillentyű:"), 0, 0)
         self.hotkey_label = QLabel(
-            "Asztal: Ctrl + Numpad 0 | Laptop: Ctrl + Numpad 1 | ElitDesk: Ctrl + Numpad 2"
+            "Asztal: Shift + Numpad 0 | Laptop: Shift + Numpad 1 | ElitDesk: Shift + Numpad 2"
         )
         other_layout.addWidget(self.hotkey_label, 0, 1)
         self.autostart_check = QCheckBox(
