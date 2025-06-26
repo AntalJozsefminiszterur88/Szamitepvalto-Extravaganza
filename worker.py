@@ -229,6 +229,13 @@ class KVMWorker(QObject):
                         hb_thread = threading.Thread(target=hb_loop, daemon=True)
                         hb_thread.start()
 
+                    if cancel_event and cancel_event.is_set():
+                        logging.info(
+                            "zf.write() for %s SKIPPED due to cancel_event being set before write attempt.",
+                            src_path,
+                        )
+                        raise RuntimeError('archive canceled before write')
+
                     try:
                         if cancel_event and cancel_event.is_set():
                             raise RuntimeError('archive canceled')
@@ -787,12 +794,12 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        hotkey_desktop_l = {keyboard.Key.shift_l, VK_NUMPAD0}
-        hotkey_desktop_r = {keyboard.Key.shift_r, VK_NUMPAD0}
-        hotkey_laptop_l = {keyboard.Key.shift_l, VK_NUMPAD1}
-        hotkey_laptop_r = {keyboard.Key.shift_r, VK_NUMPAD1}
-        hotkey_elitdesk_l = {keyboard.Key.shift_l, VK_NUMPAD2}
-        hotkey_elitdesk_r = {keyboard.Key.shift_r, VK_NUMPAD2}
+        hotkey_desktop_l = {VK_LSHIFT, VK_NUMPAD0}
+        hotkey_desktop_r = {VK_RSHIFT, VK_NUMPAD0}
+        hotkey_laptop_l = {VK_LSHIFT, VK_NUMPAD1}
+        hotkey_laptop_r = {VK_RSHIFT, VK_NUMPAD1}
+        hotkey_elitdesk_l = {VK_LSHIFT, VK_NUMPAD2}
+        hotkey_elitdesk_r = {VK_RSHIFT, VK_NUMPAD2}
         current_pressed_ids = set()
         pending_client = None
 
