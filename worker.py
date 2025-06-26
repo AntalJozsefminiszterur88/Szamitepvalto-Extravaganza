@@ -622,10 +622,16 @@ class KVMWorker(QObject):
                 logging.warning('No shared files to paste')
                 return
             try:
+                archive_name = os.path.basename(self.network_file_clipboard['archive']) if self.network_file_clipboard and self.network_file_clipboard.get('archive') else "archívum"
+                logging.info("[WORKER_DEBUG] Starting server-side paste (extraction) for: %s", archive_name)
+                self.file_progress_update.emit('extracting_archive', archive_name, 0, 1)
                 self._safe_extract_archive(self.network_file_clipboard['archive'], dest_dir)
+                logging.info("[WORKER_DEBUG] Server-side paste (extraction) COMPLETED for: %s", archive_name)
+                self.file_progress_update.emit('extracting_archive', archive_name, 1, 1)
             except Exception as e:
                 logging.error('Extraction failed: %s', e, exc_info=True)
-                self.file_transfer_error.emit(str(e))
+                logging.error('[WORKER_DEBUG] Server-side paste (extraction) FAILED for: %s. Error: %s', archive_name, e)
+                self.file_transfer_error.emit(f"Kibontási hiba: {e}")
                 return
             if self.network_file_clipboard.get('operation') == 'cut':
                 src_id = self.network_file_clipboard.get('source_id')
