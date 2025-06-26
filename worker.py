@@ -1233,14 +1233,7 @@ class KVMWorker(QObject):
                         sock.settimeout(0.1)
                         sock.sendall(struct.pack('!I', len(packed)) + packed)
                         sock.settimeout(1.0)
-                        if event and event.get('type') == 'move_relative':
-                            logging.debug(
-                                "Mouse move sent to %s: dx=%s dy=%s",
-                                self.client_infos.get(sock, sock.getpeername()),
-                                event.get('dx'),
-                                event.get('dy'),
-                            )
-                        else:
+                        if not (event and event.get('type') == 'move_relative'):
                             logging.debug(
                                 "Sent %d bytes to %s",
                                 len(packed),
@@ -1307,11 +1300,7 @@ class KVMWorker(QObject):
                         pass
                     logging.debug("Send queue full, dropping oldest event")
                 send_queue.put_nowait((packed, data))
-                if data.get('type') == 'move_relative':
-                    logging.debug(
-                        f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
-                    )
-                else:
+                if data.get('type') != 'move_relative':
                     logging.debug(f"Queued event: {data}")
                 return True
             except Exception as e:
@@ -1594,7 +1583,6 @@ class KVMWorker(QObject):
                             break
                         try:
                             data = msgpack.unpackb(payload, raw=False)
-                            logging.debug(f"Received event: {data}")
                             last_event_time = time.time()
                             event_type = data.get('type')
                             if event_type == 'move_relative':
