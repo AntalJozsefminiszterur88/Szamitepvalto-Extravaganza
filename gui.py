@@ -333,29 +333,46 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setAutoClose(False)
         self.progress_dialog.setAutoReset(False)
         self.progress_dialog.setMinimumDuration(0)
-        logging.debug(
-            "GUI: show_progress_dialog called with title: %s. Current worker role: %s",
+        logging.info(
+            "[GUI_DEBUG] show_progress_dialog called with title: %s. Current worker role: %s",
             title,
             self.kvm_worker.settings.get('role') if self.kvm_worker else 'N/A',
         )
         self.progress_dialog.setLabelText(f"{title} előkészítése...")
+        logging.info("[GUI_DEBUG] show_progress_dialog: Label set to: %s", self.progress_dialog.labelText())
         self.progress_dialog.show()
 
     def on_incoming_upload_started(self, filename: str, total_size: int):
+        logging.info(
+            "[GUI_DEBUG] on_incoming_upload_started triggered. Filename: %s, Size: %d",
+            filename,
+            total_size,
+        )
         self.show_progress_dialog("Fájl fogadása")
+        logging.info(
+            "[GUI_DEBUG] on_incoming_upload_started: Progress dialog shown. Current label: %s",
+            self.progress_dialog.labelText() if self.progress_dialog else "N/A",
+        )
         self.update_progress("receiving_archive", filename, 0, total_size)
+        logging.info(
+            "[GUI_DEBUG] on_incoming_upload_started: update_progress called. Current label: %s",
+            self.progress_dialog.labelText() if self.progress_dialog else "N/A",
+        )
 
     def update_progress(self, operation: str, name: str, done: int, total: int):
         """Update progress dialog based on signals from the worker thread."""
+        logging.info(
+            "[GUI_DEBUG] update_progress: Top of method. Dialog visible: %s",
+            self.progress_dialog.isVisible() if self.progress_dialog else 'NoDialog',
+        )
         if not self.progress_dialog or not self.progress_dialog.isVisible():
             return
-        logging.debug(
-            "GUI update_progress RECEIVED: op=%s, name=%s, done=%d, total=%d, dialog_visible=%s",
+        logging.info(
+            "[GUI_DEBUG] update_progress triggered. Operation: %s, Name: %s, Done: %d, Total: %d",
             operation,
             name,
             done,
             total,
-            self.progress_dialog.isVisible() if self.progress_dialog else 'NoDialog',
         )
 
         if operation == "archiving_large_file_working":
@@ -413,14 +430,19 @@ class MainWindow(QMainWindow):
             desired_title = (
                 "Fájl küldése" if operation == "sending_archive" else "Fájl fogadása"
             )
+            logging.info(
+                "[GUI_DEBUG] update_progress (%s): Current dialog label BEFORE setWindowTitle/setLabelText: %s",
+                operation,
+                self.progress_dialog.labelText(),
+            )
             self.progress_dialog.setWindowTitle(desired_title)
             maximum = total if total > 0 else 1
             value = min(done, maximum)
             current_mb = done / 1024 / 1024
             total_mb = total / 1024 / 1024
             label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
-            logging.debug(
-                "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+            logging.info(
+                "[GUI_DEBUG] update_progress (%s): Setting dialog. Title='%s', Label='%s', Max=%d, Value=%d",
                 operation,
                 desired_title,
                 label_text,
@@ -434,16 +456,27 @@ class MainWindow(QMainWindow):
                 self.progress_dialog.setValue(maximum)
                 if total > 0:
                     label_text = f"{name}: Kész! ({total_mb:.1f}MB)"
+                    self.progress_dialog.setLabelText(label_text)
                 try:
                     self.progress_dialog.setCancelButton(None)
                 except Exception:
                     btn = self.progress_dialog.findChild(QPushButton)
                     if btn:
                         btn.setEnabled(False)
+                logging.info(
+                    "[GUI_DEBUG] update_progress (%s): Cancel button updated. Dialog label: '%s'",
+                    operation,
+                    self.progress_dialog.labelText(),
+                )
                 logging.debug("GUI: Transfer complete for %s. Starting 5s close timer.", name)
                 QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
 
             self.progress_dialog.setLabelText(label_text)
+            logging.info(
+                "[GUI_DEBUG] update_progress (%s): Current dialog label AFTER setLabelText: %s",
+                operation,
+                self.progress_dialog.labelText(),
+            )
             return
 
     def _close_progress_dialog_if_exists(self):

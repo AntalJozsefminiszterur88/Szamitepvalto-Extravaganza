@@ -904,6 +904,7 @@ class KVMWorker(QObject):
                                     logging.debug("Cancel flag cleared for paste_request")
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
                             elif data.get('type') == 'upload_file_start':
+                                logging.info("[WORKER_DEBUG] Received 'upload_file_start' from client: %s (size: %s)", data.get('name'), data.get('size'))
                                 incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
                                 self._clear_network_file_clipboard()
                                 try:
@@ -917,6 +918,7 @@ class KVMWorker(QObject):
                                     data.get('name'),
                                     data.get('size', 0)
                                 )
+                                logging.info("[WORKER_DEBUG] Emitting incoming_upload_started for: %s, size: %s", data.get('name'), data.get('size', 0))
                                 self._cancel_transfer.clear()
                                 logging.debug("Receiving upload, cancel flag cleared")
                                 sock.settimeout(TRANSFER_TIMEOUT)
@@ -930,8 +932,8 @@ class KVMWorker(QObject):
                                     'source_id': data.get('source_id', client_name),
                                     'received': 0,
                                 }
-                                logging.debug(
-                                    "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                logging.info(
+                                    "[WORKER_DEBUG] Emitting file_progress_update (initial): op=%s, name=%s, done=%d, total=%d",
                                     'receiving_archive',
                                     upload_info['name'],
                                     0,
@@ -944,7 +946,7 @@ class KVMWorker(QObject):
                                         upload_info['file'].write(data['data'])
                                         upload_info['received'] += len(data['data'])
                                         logging.debug(
-                                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                            "[WORKER_DEBUG] Emitting file_progress_update (chunk): op=%s, name=%s, done=%d, total=%d",
                                             'receiving_archive',
                                             upload_info['name'],
                                             upload_info['received'],
@@ -961,6 +963,10 @@ class KVMWorker(QObject):
                                         break
                             elif data.get('type') == 'upload_file_end':
                                 if upload_info:
+                                    logging.info(
+                                        "[WORKER_DEBUG] Received 'upload_file_end' for: %s",
+                                        upload_info['name'],
+                                    )
                                     upload_info['file'].close()
                                     self._clear_network_file_clipboard()
                                     self.network_file_clipboard = {
@@ -978,7 +984,7 @@ class KVMWorker(QObject):
                                         'operation': upload_info['operation'],
                                     }, exclude=sock)
                                     logging.debug(
-                                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                                        "[WORKER_DEBUG] Emitting file_progress_update (end): op=%s, name=%s, done=%d, total=%d",
                                         'receiving_archive',
                                         upload_info['name'],
                                         upload_info['size'],
@@ -1200,7 +1206,7 @@ class KVMWorker(QObject):
                         sock.sendall(struct.pack('!I', len(packed)) + packed)
                         sock.settimeout(1.0)
                         if event and event.get('type') == 'move_relative':
-                            logging.info(
+                            logging.debug(
                                 "Mouse move sent to %s: dx=%s dy=%s",
                                 self.client_infos.get(sock, sock.getpeername()),
                                 event.get('dx'),
@@ -1274,7 +1280,7 @@ class KVMWorker(QObject):
                     logging.debug("Send queue full, dropping oldest event")
                 send_queue.put_nowait((packed, data))
                 if data.get('type') == 'move_relative':
-                    logging.info(
+                    logging.debug(
                         f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
                     )
                 else:
