@@ -19,7 +19,18 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal
-from config import SERVICE_TYPE, SERVICE_NAME_PREFIX, VK_CTRL, VK_CTRL_R, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_F12
+from config import (
+    SERVICE_TYPE,
+    SERVICE_NAME_PREFIX,
+    VK_CTRL,
+    VK_CTRL_R,
+    VK_NUMPAD0,
+    VK_NUMPAD1,
+    VK_NUMPAD2,
+    VK_F12,
+    VK_LSHIFT,
+    VK_RSHIFT,
+)
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
@@ -76,8 +87,8 @@ class KVMWorker(QObject):
         """Release potential stuck hotkey keys without generating input."""
         kc = keyboard.Controller()
         keys = [
-            keyboard.Key.ctrl_l,
-            keyboard.Key.ctrl_r,
+            keyboard.Key.shift_l,
+            keyboard.Key.shift_r,
             keyboard.KeyCode.from_vk(VK_NUMPAD0),
             keyboard.KeyCode.from_vk(VK_NUMPAD1),
             keyboard.KeyCode.from_vk(VK_NUMPAD2),
@@ -223,19 +234,19 @@ class KVMWorker(QObject):
                             raise RuntimeError('archive canceled')
                         if file_size > 1_000_000_000:
                             logging.info(
-                                "Attempting zf.write() for: %s (arcname: %s, size: %s, type: %s)",
+                                "Starting zf.write() for large file: %s (size: %.2f GB, type: %s)",
                                 src_path,
-                                arcname,
-                                file_size,
+                                file_size / (1024**3),
                                 ctype,
                             )
-                            write_start_time = time.time()
+                            write_start_time_actual = time.time()
                             zf.write(src_path, arcname, compress_type=ctype)
-                            write_duration = time.time() - write_start_time
+                            write_duration_actual = time.time() - write_start_time_actual
                             logging.info(
-                                "zf.write() for %s COMPLETED in %.2f seconds",
+                                "zf.write() for large file %s COMPLETED in %.2f seconds (%.2f minutes)",
                                 src_path,
-                                write_duration,
+                                write_duration_actual,
+                                write_duration_actual / 60,
                             )
                         else:
                             zf.write(src_path, arcname, compress_type=ctype)
@@ -771,17 +782,17 @@ class KVMWorker(QObject):
         self.zeroconf.register_service(info)
         self.status_update.emit(
             "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: "
-            "Asztal - Ctrl + Numpad 0, Laptop - Ctrl + Numpad 1, "
-            "ElitDesk - Ctrl + Numpad 2"
+            "Asztal - Shift + Numpad 0, Laptop - Shift + Numpad 1, "
+            "ElitDesk - Shift + Numpad 2"
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        hotkey_desktop = {keyboard.Key.ctrl_l, VK_NUMPAD0}
-        hotkey_desktop_r = {keyboard.Key.ctrl_r, VK_NUMPAD0}
-        hotkey_laptop = {keyboard.Key.ctrl_l, VK_NUMPAD1}
-        hotkey_laptop_r = {keyboard.Key.ctrl_r, VK_NUMPAD1}
-        hotkey_elitdesk = {keyboard.Key.ctrl_l, VK_NUMPAD2}
-        hotkey_elitdesk_r = {keyboard.Key.ctrl_r, VK_NUMPAD2}
+        hotkey_desktop_l = {keyboard.Key.shift_l, VK_NUMPAD0}
+        hotkey_desktop_r = {keyboard.Key.shift_r, VK_NUMPAD0}
+        hotkey_laptop_l = {keyboard.Key.shift_l, VK_NUMPAD1}
+        hotkey_laptop_r = {keyboard.Key.shift_r, VK_NUMPAD1}
+        hotkey_elitdesk_l = {keyboard.Key.shift_l, VK_NUMPAD2}
+        hotkey_elitdesk_r = {keyboard.Key.shift_r, VK_NUMPAD2}
         current_pressed_ids = set()
         pending_client = None
 
@@ -793,13 +804,13 @@ class KVMWorker(QObject):
             key_id = get_id(key)
             current_pressed_ids.add(key_id)
             logging.debug(f"Key pressed: {key} (id={key_id}). Currently pressed: {current_pressed_ids}")
-            if hotkey_desktop.issubset(current_pressed_ids) or hotkey_desktop_r.issubset(current_pressed_ids):
+            if hotkey_desktop_l.issubset(current_pressed_ids) or hotkey_desktop_r.issubset(current_pressed_ids):
                 logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
                 pending_client = 'desktop'
-            elif hotkey_laptop.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
+            elif hotkey_laptop_l.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'laptop'
-            elif hotkey_elitdesk.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
+            elif hotkey_elitdesk_l.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'elitedesk'
 
@@ -1233,7 +1244,14 @@ class KVMWorker(QObject):
                         sock.settimeout(0.1)
                         sock.sendall(struct.pack('!I', len(packed)) + packed)
                         sock.settimeout(1.0)
-                        if not (event and event.get('type') == 'move_relative'):
+                        if event and event.get('type') == 'move_relative':
+                            logging.debug(
+                                "Mouse move sent to %s: dx=%s dy=%s",
+                                self.client_infos.get(sock, sock.getpeername()),
+                                event.get('dx'),
+                                event.get('dy'),
+                            )
+                        else:
                             logging.debug(
                                 "Sent %d bytes to %s",
                                 len(packed),
@@ -1300,7 +1318,11 @@ class KVMWorker(QObject):
                         pass
                     logging.debug("Send queue full, dropping oldest event")
                 send_queue.put_nowait((packed, data))
-                if data.get('type') != 'move_relative':
+                if data.get('type') == 'move_relative':
+                    logging.debug(
+                        f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
+                    )
+                else:
                     logging.debug(f"Queued event: {data}")
                 return True
             except Exception as e:
@@ -1349,29 +1371,29 @@ class KVMWorker(QObject):
                     else:
                         current_vks.discard(vk)
 
-                if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD0 in current_vks):
+                if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD0 in current_vks):
                     logging.debug(f"Hotkey detected for toggle_kvm_active with current_vks={current_vks}")
                     # send key releases before disabling streaming so the client doesn't
                     # get stuck with modifiers held down
-                    for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD0]:
+                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
                     current_vks.clear()
                     self.toggle_kvm_active(self.switch_monitor)
                     return
-                if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD1 in current_vks):
+                if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD1 in current_vks):
                     logging.debug(f"Hotkey detected for laptop with current_vks={current_vks}")
-                    for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD1]:
+                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
                     current_vks.clear()
                     self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
                     return
-                if ((VK_CTRL in current_vks or VK_CTRL_R in current_vks) and VK_NUMPAD2 in current_vks):
+                if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD2 in current_vks):
                     logging.debug(f"Hotkey detected for elitedesk with current_vks={current_vks}")
-                    for vk_code in [VK_CTRL, VK_CTRL_R, VK_NUMPAD2]:
+                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
@@ -1520,8 +1542,8 @@ class KVMWorker(QObject):
                         except Exception:
                             logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
 
-                    hotkey_cmd_l = {keyboard.Key.ctrl_l, keyboard.Key.shift_l, keyboard.KeyCode.from_vk(VK_F12)}
-                    hotkey_cmd_r = {keyboard.Key.ctrl_r, keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
+                    hotkey_cmd_l = {VK_LSHIFT, VK_F12}
+                    hotkey_cmd_r = {VK_RSHIFT, VK_F12}
                     pressed_ids = set()
 
                     def get_id(key):
@@ -1532,7 +1554,7 @@ class KVMWorker(QObject):
                         pressed_ids.add(kid)
                         logging.debug(f"Client hotkey key pressed: {key} (id={kid}). Pressed: {pressed_ids}")
                         if hotkey_cmd_l.issubset(pressed_ids) or hotkey_cmd_r.issubset(pressed_ids):
-                            logging.info("Client hotkey detected, requesting switch_elitedesk")
+                            logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
                             send_command('switch_elitedesk')
 
                     def hk_release(key):
