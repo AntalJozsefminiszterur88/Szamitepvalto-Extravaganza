@@ -426,6 +426,29 @@ class MainWindow(QMainWindow):
             self.progress_dialog.setLabelText(label)
             return
 
+        elif operation == "extracting_archive":
+            logging.info("[GUI_DEBUG] update_progress for 'extracting_archive': Name=%s, Done=%d, Total=%d", name, done, total)
+            self.progress_dialog.setWindowTitle("Fájl feldolgozása")
+
+            if done == 0 and total == 1:
+                self.progress_dialog.setLabelText(f"Kibontás folyamatban: {name}...")
+                self.progress_dialog.setMaximum(total)
+                self.progress_dialog.setValue(done)
+            elif done >= total:
+                self.progress_dialog.setMaximum(total)
+                self.progress_dialog.setValue(total)
+                self.progress_dialog.setLabelText(f"{name}: Feldolgozás kész!")
+                logging.info("[GUI_DEBUG] 'extracting_archive' complete for %s. Starting 5s close timer.", name)
+                try:
+                    cancel_button = self.progress_dialog.findChild(QPushButton)
+                    if cancel_button and cancel_button.text().lower() == "mégse":
+                        cancel_button.setEnabled(False)
+                        cancel_button.setText("Kész")
+                except Exception as e:
+                    logging.warning("[GUI_DEBUG] Failed to update cancel button for extracting_archive: %s", e)
+                QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
+            return
+
         if operation in ("sending_archive", "receiving_archive"):
             desired_title = (
                 "Fájl küldése" if operation == "sending_archive" else "Fájl fogadása"
