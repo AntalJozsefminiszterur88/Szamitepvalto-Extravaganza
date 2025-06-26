@@ -13,7 +13,7 @@ from config import ICON_PATH, APP_NAME, ORG_NAME
 
 # A naplózást itt, a legfelső szinten állítjuk be.
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
