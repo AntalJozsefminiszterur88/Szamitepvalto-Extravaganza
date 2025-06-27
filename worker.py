@@ -804,12 +804,16 @@ class KVMWorker(QObject):
         pending_client = None
 
         def get_id(key):
-            return key.vk if hasattr(key, 'vk') and key.vk is not None else key
+            try:
+                return key.vk
+            except AttributeError:
+                return None
 
         def on_press(key):
             nonlocal pending_client
             key_id = get_id(key)
-            current_pressed_ids.add(key_id)
+            if key_id is not None:
+                current_pressed_ids.add(key_id)
             logging.debug(f"Key pressed: {key} (id={key_id}). Currently pressed: {current_pressed_ids}")
             if hotkey_desktop_l.issubset(current_pressed_ids) or hotkey_desktop_r.issubset(current_pressed_ids):
                 logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
@@ -824,7 +828,8 @@ class KVMWorker(QObject):
         def on_release(key):
             nonlocal pending_client
             key_id = get_id(key)
-            current_pressed_ids.discard(key_id)
+            if key_id is not None:
+                current_pressed_ids.discard(key_id)
             logging.debug(f"Key released: {key} (id={key_id}). Remaining pressed: {current_pressed_ids}")
             if pending_client and not current_pressed_ids:
                 logging.info(f"Hotkey action executed: {pending_client}")
