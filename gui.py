@@ -82,7 +82,8 @@ class MainWindow(QMainWindow):
         # Prevent resizing during runtime
         # Provide a bit more vertical room so texts are not cramped
         # Slightly increased height so long texts fit within the window
-        self.setFixedSize(QSize(450, 520))
+        # Provide a bit more space vertically for future additions
+        self.setFixedSize(QSize(450, 560))
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
