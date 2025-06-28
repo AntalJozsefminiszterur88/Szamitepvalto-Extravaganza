@@ -213,7 +213,6 @@ class MainWindow(QMainWindow):
         self.kvm_worker.status_update.connect(self.on_status_update)
         self.kvm_worker.update_progress_display.connect(self.update_progress_display)
         self.kvm_worker.file_transfer_error.connect(self.on_transfer_error)
-        self.kvm_worker.incoming_upload_started.connect(self.on_incoming_upload_started)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         self.set_controls_enabled(False)
@@ -399,21 +398,6 @@ class MainWindow(QMainWindow):
         self.progress_dialog.setLabelText(f"{title} előkészítése...")
         logging.info("[GUI_DEBUG] show_progress_dialog: Label set to: %s", self.progress_dialog.labelText())
         self.progress_dialog.show()
-
-    def on_incoming_upload_started(self, filename: str, total_size: int):
-        logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started triggered. Filename: %s, Size: %d",
-            filename,
-            total_size,
-        )
-        self.show_progress_dialog("Fájl fogadása")
-        logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started: Progress dialog shown. Current label: %s",
-            self.progress_dialog.labelText() if self.progress_dialog else "N/A",
-        )
-        logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started: initial 0%% progress emitted",
-        )
 
     def update_progress_display(self, percentage: int, label: str):
         """Receives a pre-calculated percentage and label, and applies them directly."""
