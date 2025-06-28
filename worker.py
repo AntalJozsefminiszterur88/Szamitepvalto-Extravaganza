@@ -17,6 +17,7 @@ import msgpack
 import pyperclip
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
+from networking import accept_connections, KVMServiceListener, set_worker_reference
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
 from config import (
@@ -62,7 +63,7 @@ class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
-        'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
+        'switch_monitor', 'local_ip', 'server_ip',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'network_file_clipboard', '_cancel_transfer', 'last_server_ip'
     )
@@ -90,7 +91,6 @@ class KVMWorker(QObject):
         self.switch_monitor = True
         self.local_ip = get_local_ip()
         self.server_ip = None
-        self.connection_thread = None
         settings_store = QSettings(ORG_NAME, APP_NAME)
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
@@ -102,6 +102,7 @@ class KVMWorker(QObject):
         self._cancel_transfer = threading.Event()
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
+        set_worker_reference(self)
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -700,13 +701,17 @@ class KVMWorker(QObject):
                 pass
         self.client_infos.clear()
         self.active_client = None
-        if self.connection_thread and self.connection_thread.is_alive():
-            self.connection_thread.join(timeout=1)
         if self.clipboard_thread and self.clipboard_thread.is_alive():
             self.clipboard_thread.join(timeout=1)
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
         self._clear_network_file_clipboard()
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+            self.server_socket = None
 
     def run(self):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
@@ -717,7 +722,19 @@ class KVMWorker(QObject):
         self.finished.emit()
 
     def run_server(self):
-        accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.server_socket.bind(('', self.settings['port']))
+        self.server_socket.listen(5)
+        logging.info(f"TCP szerver elindítva a {self.settings['port']} porton.")
+
+        accept_thread = threading.Thread(
+            target=accept_connections,
+            args=(self.server_socket,),
+            daemon=True,
+            name="AcceptThread"
+        )
         accept_thread.start()
 
         self.clipboard_thread = threading.Thread(
@@ -1511,47 +1528,13 @@ class KVMWorker(QObject):
         logging.info("Streaming listenerek leálltak.")
 
     def run_client(self):
-        class ServiceListener:
-            def __init__(self, worker):
-                self.worker = worker
-
-            def add_service(self, zc, type, name):
-                info = zc.get_service_info(type, name)
-                if info:
-                    ip = socket.inet_ntoa(info.addresses[0])
-                    if ip == self.worker.local_ip:
-                        return  # ignore our own service
-                    self.worker.server_ip = ip
-                    self.worker.last_server_ip = ip  # remember last found host
-                    logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
-                    self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
-                # Connection thread runs continuously, just update the server IP
-            def update_service(self, zc, type, name):
-                pass
-            def remove_service(self, zc, type, name):
-                self.worker.server_ip = None
-                self.worker.status_update.emit("Az Adó szolgáltatás eltűnt, újra keresem...")
-                logging.warning("Adó szolgáltatás eltűnt.")
-
-        settings_store = QSettings(ORG_NAME, APP_NAME)
-
-        # Start connection thread immediately using stored last IP if available
-        if self.last_server_ip and not self.server_ip:
-            self.server_ip = self.last_server_ip
-        if not self.connection_thread:
-            self.connection_thread = threading.Thread(
-                target=self.connect_to_server,
-                daemon=True,
-                name="ConnectThread",
-            )
-            self.connection_thread.start()
-
-        browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, ServiceListener(self))
+        listener = KVMServiceListener(self)
+        ServiceBrowser(self.zeroconf, SERVICE_TYPE, listener)
         self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
         while self._running:
-            time.sleep(0.5)
+            time.sleep(1)
 
-    def connect_to_server(self):
+    def connect_to_server(self, ip, port):
         mouse_controller = mouse.Controller()
         keyboard_controller = keyboard.Controller()
         pressed_keys = set()
@@ -1562,22 +1545,17 @@ class KVMWorker(QObject):
         }
         hk_listener = None
 
-        while self._running:
-            ip = self.server_ip or self.last_server_ip
-            if not ip:
-                time.sleep(0.5)
-                continue
+        hb_thread = None  # Ensure heartbeat thread variable is always defined
 
-            hb_thread = None  # Ensure heartbeat thread variable is always defined
+        logging.debug(
+            "connect_to_server attempting to connect to %s:%s cancel=%s",
+            ip,
+            port,
+            self._cancel_transfer.is_set(),
+        )
 
-            logging.debug(
-                "connect_to_server attempting to connect to %s cancel=%s",
-                ip,
-                self._cancel_transfer.is_set(),
-            )
-
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     s.settimeout(5.0)
                     logging.info(f"Connecting to {ip}:{self.settings['port']}")
@@ -1650,7 +1628,7 @@ class KVMWorker(QObject):
 
                     def heartbeat():
                         nonlocal last_warning
-                        while self._running and self.server_ip == ip:
+                        while self._running and self.server_socket is s:
                             if time.time() - last_event_time > 2:
                                 if time.time() - last_warning > 2:
                                     logging.warning("No input events received for over 2 seconds")
@@ -1669,7 +1647,7 @@ class KVMWorker(QObject):
                             data += chunk
                         return data
 
-                    while self._running and self.server_ip == ip:
+                    while self._running and self.server_socket is s:
                         logging.debug(
                             "connect_to_server recv loop. cancel=%s received=%d",
                             self._cancel_transfer.is_set(),
@@ -1805,48 +1783,45 @@ class KVMWorker(QObject):
                             self._cancel_transfer.clear()
                             logging.debug("Download canceled or finished, cancel flag cleared")
 
-            except Exception as e:
-                if self._running:
-                    logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-                    self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás 5 mp múlva...")
+        except Exception as e:
+            if self._running:
+                logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
+                self.status_update.emit(f"Kapcsolat sikertelen: {e}.")
 
-            finally:
-                logging.info("Connection to server closed")
-                if hb_thread is not None:
-                    try:
-                        hb_thread.join(timeout=0.1)
-                    except Exception:
-                        pass
-                if self.clipboard_thread is not None:
-                    try:
-                        self.clipboard_thread.join(timeout=0.1)
-                    except Exception:
-                        pass
-                for k in list(pressed_keys):
-                    try:
-                        keyboard_controller.release(k)
-                    except Exception:
-                        pass
-                if hk_listener is not None:
-                    try:
-                        hk_listener.stop()
-                    except Exception:
-                        pass
-                self.release_hotkey_keys()
-                if incoming_info and incoming_info.get('temp_dir'):
-                    logging.warning(
-                        "Cleaning up incomplete download directory: %s",
-                        incoming_info['temp_dir'],
-                    )
-                    try:
-                        incoming_info['file'].close()
-                    except Exception:
-                        pass
-                    shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
-                incoming_info = None
-                self._cancel_transfer.clear()
-                self.server_socket = None
-                if self._running:
-                    logging.info("Újracsatlakozási kísérlet 5 másodperc múlva...")
-                    time.sleep(5)
-                logging.debug("connect_to_server loop ended")
+        finally:
+            logging.info("Connection to server closed")
+            if hb_thread is not None:
+                try:
+                    hb_thread.join(timeout=0.1)
+                except Exception:
+                    pass
+            if self.clipboard_thread is not None:
+                try:
+                    self.clipboard_thread.join(timeout=0.1)
+                except Exception:
+                    pass
+            for k in list(pressed_keys):
+                try:
+                    keyboard_controller.release(k)
+                except Exception:
+                    pass
+            if hk_listener is not None:
+                try:
+                    hk_listener.stop()
+                except Exception:
+                    pass
+            self.release_hotkey_keys()
+            if incoming_info and incoming_info.get('temp_dir'):
+                logging.warning(
+                    "Cleaning up incomplete download directory: %s",
+                    incoming_info['temp_dir'],
+                )
+                try:
+                    incoming_info['file'].close()
+                except Exception:
+                    pass
+                shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
+            incoming_info = None
+            self._cancel_transfer.clear()
+            self.server_socket = None
+            logging.debug("connect_to_server finished")
