@@ -8,6 +8,9 @@ import sys
 APP_NAME = "KVMApp"
 ORG_NAME = "MyKVM"
 
+# Branding information
+BRAND_NAME = "UMKGL Solutions"
+
 # Hálózati beállítások
 DEFAULT_PORT = 65432
 SERVICE_TYPE = "_kvmswitch._tcp.local."

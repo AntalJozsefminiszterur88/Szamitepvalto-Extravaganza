@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
 )
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
+from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer, QStandardPaths
 
 
 from worker import KVMWorker
@@ -68,7 +68,8 @@ class MainWindow(QMainWindow):
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
-        'tray_icon', 'share_button', 'cut_share_button', 'paste_button', 'progress_dialog'
+        'tray_icon', 'share_button', 'cut_share_button', 'paste_button', 'progress_dialog',
+        'temp_path_edit', 'browse_temp_path_button'
     )
 
     # A MainWindow többi része változatlan...
@@ -127,6 +128,17 @@ class MainWindow(QMainWindow):
             "Automatikus indulás a rendszerrel"
         )
         other_layout.addWidget(self.autostart_check, 1, 0, 1, 2)
+
+        other_layout.addWidget(QLabel("Ideiglenes mappa:"), 2, 0)
+        temp_path_layout = QHBoxLayout()
+        self.temp_path_edit = QLineEdit()
+        self.temp_path_edit.setReadOnly(True)
+        temp_path_layout.addWidget(self.temp_path_edit)
+        self.browse_temp_path_button = QPushButton("Tallózás...")
+        self.browse_temp_path_button.clicked.connect(self.browse_temp_directory)
+        temp_path_layout.addWidget(self.browse_temp_path_button)
+        other_layout.addLayout(temp_path_layout, 2, 1)
+
         other_box.setLayout(other_layout)
         main_layout.addWidget(other_box)
 
@@ -178,6 +190,7 @@ class MainWindow(QMainWindow):
                 'host': int(self.host_code.text()),
                 'client': int(self.client_code.text()),
             },
+            'temp_path': self.temp_path_edit.text(),
         }
 
     def toggle_kvm_service(self):
@@ -230,6 +243,7 @@ class MainWindow(QMainWindow):
         settings.setValue("monitor/client_code", self.client_code.text())
         autostart_enabled = self.autostart_check.isChecked()
         settings.setValue("other/autostart", autostart_enabled)
+        settings.setValue("other/temp_path", self.temp_path_edit.text())
         # JAVÍTÁS: Itt hívjuk meg a registry-kezelő függvényt
         try:
             set_autostart(autostart_enabled)
@@ -248,6 +262,9 @@ class MainWindow(QMainWindow):
         self.autostart_check.setChecked(
             settings.value("other/autostart", False, type=bool)
         )
+        default_temp_path = QStandardPaths.writableLocation(QStandardPaths.TempLocation)
+        self.temp_path_edit.setText(settings.value("other/temp_path", default_temp_path))
+        self.temp_path_edit.textChanged.connect(self.save_settings)
         self.radio_desktop.toggled.connect(self.save_settings)
         self.radio_laptop.toggled.connect(self.save_settings)
         self.radio_elitedesk.toggled.connect(self.save_settings)
@@ -264,6 +281,7 @@ class MainWindow(QMainWindow):
         self.host_code.setEnabled(enabled)
         self.client_code.setEnabled(enabled)
         self.autostart_check.setEnabled(enabled)
+        self.browse_temp_path_button.setEnabled(enabled)
 
     def on_status_update(self, message):
         self.status_label.setText(message)
@@ -303,6 +321,12 @@ class MainWindow(QMainWindow):
         self.stop_kvm_service()
         time.sleep(0.2)
         QApplication.instance().quit()
+
+    def browse_temp_directory(self):
+        directory = QFileDialog.getExistingDirectory(self, "Ideiglenes mappa kiválasztása")
+        if directory:
+            self.temp_path_edit.setText(directory)
+            self.save_settings()
 
     def share_network_file(self, cut: bool = False):
         if not self.kvm_worker:

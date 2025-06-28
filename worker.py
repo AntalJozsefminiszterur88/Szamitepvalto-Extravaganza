@@ -24,6 +24,7 @@ from config import (
     SERVICE_NAME_PREFIX,
     APP_NAME,
     ORG_NAME,
+    BRAND_NAME,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -172,13 +173,29 @@ class KVMWorker(QObject):
     # ------------------------------------------------------------------
     # File transfer helpers
     # ------------------------------------------------------------------
+
+    def _get_temp_dir(self) -> str:
+        """Create and return a dedicated temporary directory for this transfer."""
+        base_path = self.settings.get('temp_path') or tempfile.gettempdir()
+        app_temp_path = os.path.join(base_path, BRAND_NAME, APP_NAME)
+        try:
+            os.makedirs(app_temp_path, exist_ok=True)
+            transfer_temp_dir = tempfile.mkdtemp(dir=app_temp_path)
+            logging.info(f"Using temporary directory: {transfer_temp_dir}")
+            return transfer_temp_dir
+        except OSError as e:
+            logging.error(
+                f"Could not create temporary directory at {app_temp_path}: {e}. Falling back to system default."
+            )
+            return tempfile.mkdtemp()
+
     def _create_archive(self, paths, cancel_event: Optional[threading.Event] = None):
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = self._get_temp_dir()
         archive = os.path.join(temp_dir, 'share.zip')
         logging.debug("Created temp archive dir %s", temp_dir)
         # Log available space in the temporary directory which will hold the archive
         try:
-            usage = shutil.disk_usage(tempfile.gettempdir())
+            usage = shutil.disk_usage(temp_dir)
             logging.debug(
                 "Temp dir disk usage - total: %s, used: %s, free: %s",
                 usage.total,
@@ -514,6 +531,7 @@ class KVMWorker(QObject):
             if result.get('archive'):
                 shutil.rmtree(os.path.dirname(result['archive']), ignore_errors=True)
             return
+        temp_archive_dir = None
         archive = result.get('archive')
         if not archive:
             self._clear_network_file_clipboard()
@@ -549,7 +567,8 @@ class KVMWorker(QObject):
                 # but the method expects it. We can pass an empty string.
                 self._send_archive(sock, archive, dest_dir="")
         finally:
-            if self.settings['role'] != 'ado':
+            if temp_archive_dir and self.settings['role'] != 'ado':
+                logging.info(f"Client-side cleanup: Removing temp dir {temp_archive_dir}")
                 shutil.rmtree(temp_archive_dir, ignore_errors=True)
             self._cancel_transfer.clear()
             logging.debug(
@@ -903,7 +922,8 @@ class KVMWorker(QObject):
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
                             elif data.get('type') == 'upload_file_start':
                                 logging.info("[WORKER_DEBUG] Received 'upload_file_start' from client: %s (size: %s)", data.get('name'), data.get('size'))
-                                incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
+                                temp_dir_for_download = self._get_temp_dir()
+                                incoming_path = os.path.join(temp_dir_for_download, data['name'])
                                 self._clear_network_file_clipboard()
                                 try:
                                     incoming_file = open(incoming_path, 'wb')
@@ -923,6 +943,7 @@ class KVMWorker(QObject):
                                 upload_info = {
                                     'file': incoming_file,
                                     'path': incoming_path,
+                                    'temp_dir': temp_dir_for_download,
                                     'paths': data.get('paths', []),
                                     'operation': data.get('operation', 'copy'),
                                     'size': data.get('size', 0),
@@ -1041,6 +1062,9 @@ class KVMWorker(QObject):
                 sock.close()
             except Exception:
                 pass
+            if upload_info and upload_info.get('temp_dir'):
+                logging.warning("Cleaning up incomplete download directory: %s", upload_info['temp_dir'])
+                shutil.rmtree(upload_info['temp_dir'], ignore_errors=True)
             upload_info = None
             self._cancel_transfer.clear()
             self._clear_network_file_clipboard()
@@ -1668,7 +1692,8 @@ class KVMWorker(QObject):
                                 if text != self.last_clipboard:
                                     self._set_clipboard(text)
                             elif event_type == 'file_metadata':
-                                incoming_tmp = os.path.join(tempfile.gettempdir(), data['name'])
+                                temp_dir_for_download = self._get_temp_dir()
+                                incoming_tmp = os.path.join(temp_dir_for_download, data['name'])
                                 self._cancel_transfer.clear()
                                 logging.debug("Receiving file, cancel flag cleared")
                                 try:
@@ -1686,6 +1711,7 @@ class KVMWorker(QObject):
                                     'file': incoming_file,
                                     'received': 0,
                                     'source_id': data.get('source_id', self.device_name),
+                                    'temp_dir': temp_dir_for_download,
                                 }
                                 last_percentage = -1
                                 last_emit_time = time.time()
@@ -1774,6 +1800,11 @@ class KVMWorker(QObject):
                     except Exception:
                         pass
                 self.release_hotkey_keys()
+                if incoming_info and incoming_info.get('temp_dir'):
+                    logging.warning(
+                        "Cleaning up incomplete download directory: %s", incoming_info['temp_dir']
+                    )
+                    shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
                 incoming_info = None
                 self._cancel_transfer.clear()
                 self.server_socket = None
