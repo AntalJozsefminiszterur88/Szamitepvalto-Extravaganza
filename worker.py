@@ -1561,6 +1561,7 @@ class KVMWorker(QObject):
                     if ip == self.worker.local_ip:
                         return  # ignore our own service
                     self.worker.server_ip = ip
+                    self.worker.last_server_ip = ip  # remember last found host
                     logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
                     self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
                 # Connection thread runs continuously, just update the server IP
@@ -1601,7 +1602,7 @@ class KVMWorker(QObject):
         hk_listener = None
 
         while self._running:
-            ip = self.server_ip
+            ip = self.server_ip or self.last_server_ip
             if not ip:
                 time.sleep(0.5)
                 continue
@@ -1620,6 +1621,7 @@ class KVMWorker(QObject):
                     self.server_socket = s
                     settings_store = QSettings(ORG_NAME, APP_NAME)
                     settings_store.setValue('network/last_server_ip', ip)
+                    self.last_server_ip = ip
                     incoming_info = None
                     self._cancel_transfer.clear()
                     logging.debug("Connected to server, cancel flag cleared")
