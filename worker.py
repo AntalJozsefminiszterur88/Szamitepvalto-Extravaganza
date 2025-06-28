@@ -207,6 +207,7 @@ class KVMWorker(QObject):
 
                     last_percentage = -1
                     last_emit_time = time.time()
+                    start_time = time.time()
 
                     if file_size > 1_000_000_000:
                         info = zipfile.ZipInfo(arcname, date_time=time.localtime(time.time())[:6])
@@ -224,7 +225,16 @@ class KVMWorker(QObject):
 
                                 current_percentage = int((sent / file_size) * 100)
                                 if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
-                                    label = f"{os.path.basename(src_path)}: {sent/1024/1024:.1f}MB / {file_size/1024/1024:.1f}MB"
+                                    # --- Speed and ETR Calculation ---
+                                    elapsed_time = time.time() - start_time
+                                    speed_mbps = (sent / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
+                                    remaining_bytes = file_size - sent
+                                    etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
+                                    etr_str = time.strftime('%M:%S', time.gmtime(etr_seconds)) if etr_seconds < 3600 else time.strftime('%H:%M:%S', time.gmtime(etr_seconds))
+
+                                    label = f"{os.path.basename(src_path)}: {sent/1024/1024:.1f}MB / {file_size/1024/1024:.1f}MB\n"
+                                    label += f"Sebesség: {speed_mbps:.1f} MB/s | Hátralévő idő: {etr_str}"
+
                                     self.update_progress_display.emit(current_percentage, label)
                                     last_percentage = current_percentage
                                     last_emit_time = time.time()
@@ -396,6 +406,8 @@ class KVMWorker(QObject):
             sent = 0
             last_percentage = -1
             last_emit_time = time.time()
+            start_time = time.time()  # For average speed calculation
+
             with open(archive_path, 'rb') as f:
                 while not self._cancel_transfer.is_set():
                     chunk = f.read(FILE_CHUNK_SIZE)
@@ -404,11 +416,22 @@ class KVMWorker(QObject):
                     if not self._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
                         raise IOError('send failed')
                     sent += len(chunk)
-                    current_percentage = int((sent / size) * 100) if size > 0 else 0
-                    if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
-                        label = f"{name}: {sent/1024/1024:.1f}MB / {size/1024/1024:.1f}MB"
+
+                    # Throttle the UI update
+                    if time.time() - last_emit_time >= PROGRESS_UPDATE_INTERVAL:
+                        current_percentage = int((sent / size) * 100) if size > 0 else 0
+
+                        # --- Speed and ETR Calculation ---
+                        elapsed_time = time.time() - start_time
+                        speed_mbps = (sent / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
+                        remaining_bytes = size - sent
+                        etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
+                        etr_str = time.strftime('%M:%S', time.gmtime(etr_seconds)) if etr_seconds < 3600 else time.strftime('%H:%M:%S', time.gmtime(etr_seconds))
+
+                        label = f"{name}: {sent/1024/1024:.1f}MB / {size/1024/1024:.1f}MB\n"
+                        label += f"Sebesség: {speed_mbps:.1f} MB/s | Hátralévő idő: {etr_str}"
+
                         self.update_progress_display.emit(current_percentage, label)
-                        last_percentage = current_percentage
                         last_emit_time = time.time()
             if self._cancel_transfer.is_set():
                 self._send_message(sock, {'type': 'transfer_canceled'})
@@ -514,54 +537,17 @@ class KVMWorker(QObject):
                     'source_id': self.device_name,
                     'operation': operation,
                 })
-            else:
+            else:  # This is the client-side sending logic
                 sock = self.server_socket
                 if not sock:
                     logging.warning('No server connection for file share')
+                    self.file_transfer_error.emit("Nincs kapcsolat a szerverrel a küldéshez.")
                     return
-                size = os.path.getsize(archive)
-                meta = {
-                    'type': 'upload_file_start',
-                    'size': size,
-                    'paths': paths,
-                    'operation': operation,
-                    'name': os.path.basename(archive),
-                    'source_id': self.device_name,
-                }
-                if not self._send_message(sock, meta):
-                    return
-                prev_to = sock.gettimeout()
-                sock.settimeout(TRANSFER_TIMEOUT)
-                sent = 0
-                last_percentage = -1
-                last_emit_time = time.time()
-                try:
-                    with open(archive, 'rb') as f:
-                        while not self._cancel_transfer.is_set():
-                            chunk = f.read(FILE_CHUNK_SIZE)
-                            if not chunk:
-                                break
-                            if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
-                                raise IOError('send failed')
-                            sent += len(chunk)
-                            current_percentage = int((sent / size) * 100) if size > 0 else 0
-                            if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
-                                label = f"{os.path.basename(archive)}: {sent/1024/1024:.1f}MB / {size/1024/1024:.1f}MB"
-                                self.update_progress_display.emit(current_percentage, label)
-                                last_percentage = current_percentage
-                                last_emit_time = time.time()
-                    if self._cancel_transfer.is_set():
-                        self._send_message(sock, {'type': 'transfer_canceled'})
-                        return
-                    self._send_message(sock, {'type': 'upload_file_end'})
-                    final_label = f"{os.path.basename(archive)}: Kész! ({size/1024/1024:.1f}MB)"
-                    self.update_progress_display.emit(100, final_label)
-                    logging.debug("_share_files_thread upload loop completed. cancel=%s", self._cancel_transfer.is_set())
-                except Exception as e:
-                    logging.error('Upload failed: %s', e, exc_info=True)
-                    self.file_transfer_error.emit(str(e))
-                finally:
-                    sock.settimeout(prev_to)
+
+                # Use the robust _send_archive method for sending.
+                # The 'dest' parameter for _send_archive is not used on the sending side,
+                # but the method expects it. We can pass an empty string.
+                self._send_archive(sock, archive, dest_dir="")
         finally:
             if self.settings['role'] != 'ado':
                 shutil.rmtree(temp_archive_dir, ignore_errors=True)
@@ -943,6 +929,7 @@ class KVMWorker(QObject):
                                     'name': data.get('name'),
                                     'source_id': data.get('source_id', client_name),
                                     'received': 0,
+                                    'start_time': time.time(),
                                 }
                                 last_percentage = -1
                                 last_emit_time = time.time()
@@ -952,9 +939,19 @@ class KVMWorker(QObject):
                                     try:
                                         upload_info['file'].write(data['data'])
                                         upload_info['received'] += len(data['data'])
-                                        current_percentage = int((upload_info['received'] / upload_info['size']) * 100) if upload_info['size'] > 0 else 0
-                                        if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
-                                            label = f"{upload_info['name']}: {upload_info['received']/1024/1024:.1f}MB / {upload_info['size']/1024/1024:.1f}MB"
+                                        if time.time() - last_emit_time >= PROGRESS_UPDATE_INTERVAL:
+                                            current_percentage = int((upload_info['received'] / upload_info['size']) * 100) if upload_info['size'] > 0 else 0
+
+                                            # --- Speed and ETR Calculation ---
+                                            elapsed_time = time.time() - upload_info['start_time']
+                                            speed_mbps = (upload_info['received'] / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
+                                            remaining_bytes = upload_info['size'] - upload_info['received']
+                                            etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
+                                            etr_str = time.strftime('%M:%S', time.gmtime(etr_seconds)) if etr_seconds < 3600 else time.strftime('%H:%M:%S', time.gmtime(etr_seconds))
+
+                                            label = f"{upload_info['name']}: {upload_info['received']/1024/1024:.1f}MB / {upload_info['size']/1024/1024:.1f}MB\n"
+                                            label += f"Sebesség: {speed_mbps:.1f} MB/s | Hátralévő idő: {etr_str}"
+
                                             self.update_progress_display.emit(current_percentage, label)
                                             last_percentage = current_percentage
                                             last_emit_time = time.time()
