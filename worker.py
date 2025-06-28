@@ -196,77 +196,56 @@ class KVMWorker(QObject):
 
             archived_files = 0
             with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-                def _write_with_heartbeat(src_path, arcname, ctype):
-                    """Write file while emitting heartbeat signal for large files."""
-                    hb_thread = None
-                    stop_evt = threading.Event()
-                    tick = 0
-
-                    def should_stop():
-                        return stop_evt.is_set() or (cancel_event and cancel_event.is_set())
-
+                def _write_with_progress(src_path, arcname, ctype):
+                    """Write file and emit progress updates for large files."""
                     file_size = os.path.getsize(src_path)
+
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError('archive canceled before write')
+
                     if file_size > 1_000_000_000:
-                        def hb_loop():
-                            nonlocal tick
-                            while not should_stop():
-                                tick += 1
+                        logging.info(
+                            "Starting streaming write for large file: %s (size: %.2f GB, type: %s)",
+                            src_path,
+                            file_size / (1024**3),
+                            ctype,
+                        )
+                        info = zipfile.ZipInfo(arcname)
+                        info.compress_type = ctype
+                        sent = 0
+                        with open(src_path, 'rb') as src_file, zf.open(info, 'w', force_zip64=True) as dest:
+                            while True:
+                                if cancel_event and cancel_event.is_set():
+                                    raise RuntimeError('archive canceled')
+                                chunk = src_file.read(FILE_CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                dest.write(chunk)
+                                sent += len(chunk)
                                 try:
-                                    logging.debug(
-                                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                                        'archiving_large_file_working',
-                                        os.path.basename(src_path),
-                                        0,
-                                        0,
-                                    )
                                     self.file_progress_update.emit(
-                                        'archiving_large_file_working',
+                                        'archiving_large_file',
                                         os.path.basename(src_path),
-                                        0,
-                                        0,
+                                        sent,
+                                        file_size,
                                     )
                                 except Exception:
                                     pass
-                                logging.debug("Heartbeat for large file %s: tick %d", src_path, tick)
-                                stop_evt.wait(1)
-
-                        hb_thread = threading.Thread(target=hb_loop, daemon=True)
-                        hb_thread.start()
-
-                    if cancel_event and cancel_event.is_set():
-                        logging.info(
-                            "zf.write() for %s SKIPPED due to cancel_event being set before write attempt.",
-                            src_path,
+                        self.file_progress_update.emit(
+                            'archiving_large_file',
+                            os.path.basename(src_path),
+                            file_size,
+                            file_size,
                         )
-                        raise RuntimeError('archive canceled before write')
-
-                    try:
+                        logging.info(
+                            "Finished streaming write for large file %s", src_path
+                        )
+                    else:
                         if cancel_event and cancel_event.is_set():
                             raise RuntimeError('archive canceled')
-                        if file_size > 1_000_000_000:
-                            logging.info(
-                                "Starting zf.write() for large file: %s (size: %.2f GB, type: %s)",
-                                src_path,
-                                file_size / (1024**3),
-                                ctype,
-                            )
-                            write_start_time_actual = time.time()
-                            zf.write(src_path, arcname, compress_type=ctype)
-                            write_duration_actual = time.time() - write_start_time_actual
-                            logging.info(
-                                "zf.write() for large file %s COMPLETED in %.2f seconds (%.2f minutes)",
-                                src_path,
-                                write_duration_actual,
-                                write_duration_actual / 60,
-                            )
-                        else:
-                            zf.write(src_path, arcname, compress_type=ctype)
+                        zf.write(src_path, arcname, compress_type=ctype)
                         if cancel_event and cancel_event.is_set():
                             raise RuntimeError('archive canceled')
-                    finally:
-                        stop_evt.set()
-                        if hb_thread is not None:
-                            hb_thread.join()
                 for p in paths:
                     if os.path.isdir(p):
                         base = os.path.basename(p.rstrip(os.sep))
@@ -286,7 +265,7 @@ class KVMWorker(QObject):
                                     ext = os.path.splitext(f)[1].lower()
                                     if file_size > 1_000_000_000 or ext in {'.mkv', '.mp4', '.mov'}:
                                         compress_type = zipfile.ZIP_STORED
-                                    _write_with_heartbeat(full, rel, compress_type)
+                                    _write_with_progress(full, rel, compress_type)
                                     logging.debug("Archived %s", full)
                                     if cancel_event and cancel_event.is_set():
                                         raise RuntimeError('archive canceled')
@@ -334,7 +313,7 @@ class KVMWorker(QObject):
                             ext = os.path.splitext(p)[1].lower()
                             if file_size > 1_000_000_000 or ext in {'.mkv', '.mp4', '.mov'}:
                                 compress_type = zipfile.ZIP_STORED
-                            _write_with_heartbeat(p, os.path.basename(p), compress_type)
+                            _write_with_progress(p, os.path.basename(p), compress_type)
                             logging.debug("Archived %s", p)
                             if cancel_event and cancel_event.is_set():
                                 raise RuntimeError('archive canceled')
