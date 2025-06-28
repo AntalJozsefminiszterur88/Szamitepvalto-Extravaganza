@@ -54,6 +54,13 @@ application logs activity to the console and stores settings via
 computer this instance represents (Desktop, Laptop or EliteDesk) and start or
 stop the KVM service. The correct operating mode is selected automatically.
 
+### Automatic connection
+
+The receiver continuously searches for the host using Zeroconf and
+also retries the last known IP address. This means that whether the
+host or any receiver is powered on first, they will automatically find
+each other and connect once both sides are running.
+
 The desktop acting as the host now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
