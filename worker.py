@@ -441,13 +441,16 @@ class KVMWorker(QObject):
             if not self._send_message(sock, meta):
                 return
             sent = 0
+            last_log = time.time()
             with open(archive_path, 'rb') as f:
                 while not self._cancel_transfer.is_set():
-                    logging.debug(
-                        "_send_archive loop tick. cancel=%s sent=%d",
-                        self._cancel_transfer.is_set(),
-                        sent,
-                    )
+                    if time.time() - last_log >= 10:
+                        percent = (sent / size * 100) if size else 0
+                        logging.info(
+                            "Küldés folyamatban: %.1f%%",
+                            percent,
+                        )
+                        last_log = time.time()
                     chunk = f.read(FILE_CHUNK_SIZE)
                     if not chunk:
                         break
@@ -585,27 +588,23 @@ class KVMWorker(QObject):
                 prev_to = sock.gettimeout()
                 sock.settimeout(TRANSFER_TIMEOUT)
                 sent = 0
+                last_log = time.time()
                 try:
                     with open(archive, 'rb') as f:
                         while not self._cancel_transfer.is_set():
-                            logging.debug(
-                                "_share_files_thread upload loop. cancel=%s sent=%d",
-                                self._cancel_transfer.is_set(),
-                                sent,
-                            )
+                            if time.time() - last_log >= 10:
+                                percent = (sent / size * 100) if size else 0
+                                logging.info(
+                                    "Küldés folyamatban: %.1f%%",
+                                    percent,
+                                )
+                                last_log = time.time()
                             chunk = f.read(FILE_CHUNK_SIZE)
                             if not chunk:
                                 break
                             if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
                                 raise IOError('send failed')
                             sent += len(chunk)
-                            logging.debug(
-                                "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                                'sending_archive',
-                                os.path.basename(archive),
-                                sent,
-                                size,
-                            )
                             self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
                     if self._cancel_transfer.is_set():
                         self._send_message(sock, {'type': 'transfer_canceled'})
@@ -940,12 +939,15 @@ class KVMWorker(QObject):
         upload_info = None
 
         try:
+            last_log = time.time()
             while self._running:
-                logging.debug(
-                    "monitor_client main loop. cancel=%s received=%d",
-                    self._cancel_transfer.is_set(),
-                    upload_info['received'] if upload_info else 0,
-                )
+                if time.time() - last_log >= 10:
+                    logging.debug(
+                        "monitor_client main loop. cancel=%s received=%d",
+                        self._cancel_transfer.is_set(),
+                        upload_info['received'] if upload_info else 0,
+                    )
+                    last_log = time.time()
                 try:
                     chunk = sock.recv(4096)
                     if not chunk:
@@ -1004,6 +1006,7 @@ class KVMWorker(QObject):
                                     'source_id': data.get('source_id', client_name),
                                     'received': 0,
                                 }
+                                last_log = time.time()
                                 logging.info(
                                     "[WORKER_DEBUG] Emitting file_progress_update (initial): op=%s, name=%s, done=%d, total=%d",
                                     'receiving_archive',
@@ -1017,13 +1020,15 @@ class KVMWorker(QObject):
                                     try:
                                         upload_info['file'].write(data['data'])
                                         upload_info['received'] += len(data['data'])
-                                        logging.debug(
-                                            "[WORKER_DEBUG] Emitting file_progress_update (chunk): op=%s, name=%s, done=%d, total=%d",
-                                            'receiving_archive',
-                                            upload_info['name'],
-                                            upload_info['received'],
-                                            upload_info['size'],
-                                        )
+                                        if time.time() - last_log >= 10:
+                                            percent = (
+                                                upload_info['received'] / upload_info['size'] * 100
+                                            ) if upload_info['size'] else 0
+                                            logging.info(
+                                                "Fogadás folyamatban: %.1f%%",
+                                                percent,
+                                            )
+                                            last_log = time.time()
                                         self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['received'], upload_info['size'])
                                         if self._cancel_transfer.is_set():
                                             break
