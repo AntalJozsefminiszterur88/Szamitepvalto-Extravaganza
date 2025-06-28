@@ -18,10 +18,12 @@ import pyperclip
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QSettings
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
+    APP_NAME,
+    ORG_NAME,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -48,7 +50,7 @@ class KVMWorker(QObject):
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
-        'network_file_clipboard', '_cancel_transfer'
+        'network_file_clipboard', '_cancel_transfer', 'last_server_ip'
     )
 
     finished = Signal()
@@ -75,6 +77,8 @@ class KVMWorker(QObject):
         self.local_ip = socket.gethostbyname(socket.gethostname())
         self.server_ip = None
         self.connection_thread = None
+        settings_store = QSettings(ORG_NAME, APP_NAME)
+        self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
         self.clipboard_thread = None
         self.last_clipboard = ""
@@ -1508,6 +1512,7 @@ class KVMWorker(QObject):
         class ServiceListener:
             def __init__(self, worker):
                 self.worker = worker
+
             def add_service(self, zc, type, name):
                 info = zc.get_service_info(type, name)
                 if info:
@@ -1517,15 +1522,26 @@ class KVMWorker(QObject):
                     self.worker.server_ip = ip
                     logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
                     self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
-                    if not (self.worker.connection_thread and self.worker.connection_thread.is_alive()):
-                        self.worker.connection_thread = threading.Thread(target=self.worker.connect_to_server, daemon=True, name="ConnectThread")
-                        self.worker.connection_thread.start()
+                # Connection thread runs continuously, just update the server IP
             def update_service(self, zc, type, name):
                 pass
             def remove_service(self, zc, type, name):
                 self.worker.server_ip = None
                 self.worker.status_update.emit("Az Adó szolgáltatás eltűnt, újra keresem...")
                 logging.warning("Adó szolgáltatás eltűnt.")
+
+        settings_store = QSettings(ORG_NAME, APP_NAME)
+
+        # Start connection thread immediately using stored last IP if available
+        if self.last_server_ip and not self.server_ip:
+            self.server_ip = self.last_server_ip
+        if not self.connection_thread:
+            self.connection_thread = threading.Thread(
+                target=self.connect_to_server,
+                daemon=True,
+                name="ConnectThread",
+            )
+            self.connection_thread.start()
 
         browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, ServiceListener(self))
         self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
@@ -1561,6 +1577,8 @@ class KVMWorker(QObject):
                     logging.info(f"Connecting to {ip}:{self.settings['port']}")
                     s.connect((ip, self.settings['port']))
                     self.server_socket = s
+                    settings_store = QSettings(ORG_NAME, APP_NAME)
+                    settings_store.setValue('network/last_server_ip', ip)
                     incoming_info = None
                     self._cancel_transfer.clear()
                     logging.debug("Connected to server, cancel flag cleared")
