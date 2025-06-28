@@ -928,7 +928,7 @@ class KVMWorker(QObject):
                                     self._cancel_transfer.clear()
                                     logging.debug("Cancel flag cleared for paste_request")
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
-                            elif data.get('type') == 'upload_file_start':
+                            elif data.get('type') == 'file_metadata':
                                 logging.info("[WORKER_DEBUG] Received 'upload_file_start' from client: %s (size: %s)", data.get('name'), data.get('size'))
                                 temp_dir_for_download = self._get_temp_dir()
                                 incoming_path = os.path.join(temp_dir_for_download, data['name'])
@@ -963,7 +963,7 @@ class KVMWorker(QObject):
                                 last_percentage = -1
                                 last_emit_time = time.time()
                                 self.update_progress_display.emit(0, f"{upload_info['name']}: 0MB / {upload_info['size']/1024/1024:.1f}MB")
-                            elif data.get('type') == 'upload_file_chunk':
+                            elif data.get('type') == 'file_chunk':
                                 if upload_info:
                                     try:
                                         upload_info['file'].write(data['data'])
@@ -992,7 +992,7 @@ class KVMWorker(QObject):
                                         self._clear_network_file_clipboard()
                                         self._cancel_transfer.set()
                                         break
-                            elif data.get('type') == 'upload_file_end':
+                            elif data.get('type') == 'file_end':
                                 if upload_info:
                                     logging.info(
                                         "[WORKER_DEBUG] Received 'upload_file_end' for: %s",
