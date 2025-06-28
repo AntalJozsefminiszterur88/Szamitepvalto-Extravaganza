@@ -473,6 +473,8 @@ class KVMWorker(QObject):
             if self._cancel_transfer.is_set():
                 self._send_message(sock, {'type': 'transfer_canceled'})
                 return
+            # Emit final 100% progress before signaling completion
+            self.file_progress_update.emit('sending_archive', name, size, size)
             self._send_message(sock, {'type': 'file_end'})
             logging.debug(
                 "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
@@ -481,7 +483,6 @@ class KVMWorker(QObject):
                 size,
                 size,
             )
-            self.file_progress_update.emit('sending_archive', name, size, size)
             logging.debug("_send_archive loop completed. cancel=%s", self._cancel_transfer.is_set())
         except Exception as e:
             logging.error('Error sending archive: %s', e, exc_info=True)
@@ -1056,6 +1057,8 @@ class KVMWorker(QObject):
                                         upload_info['name'],
                                     )
                                     upload_info['file'].close()
+                                    # Emit final progress before cleanup
+                                    self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
                                     self._clear_network_file_clipboard()
                                     self.network_file_clipboard = {
                                         'paths': upload_info['paths'],
@@ -1071,14 +1074,6 @@ class KVMWorker(QObject):
                                         'source_id': upload_info.get('source_id', client_name),
                                         'operation': upload_info['operation'],
                                     }, exclude=sock)
-                                    logging.debug(
-                                        "[WORKER_DEBUG] Emitting file_progress_update (end): op=%s, name=%s, done=%d, total=%d",
-                                        'receiving_archive',
-                                        upload_info['name'],
-                                        upload_info['size'],
-                                        upload_info['size'],
-                                    )
-                                    self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
                                     upload_info = None
                                     sock.settimeout(1.0)
                                     self._cancel_transfer.clear()
