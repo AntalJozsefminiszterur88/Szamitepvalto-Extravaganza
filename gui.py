@@ -375,21 +375,37 @@ class MainWindow(QMainWindow):
             total,
         )
 
-        if operation == "archiving_large_file_working":
+        if operation in ("archiving_large_file", "archiving_large_file_working"):
             self.progress_dialog.setWindowTitle("Tömörítés...")
-            logging.debug(
-                "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
-                operation,
-                "Tömörítés...",
-                f"Tömörítés (nagy fájl): {name} - Folyamatban...",
-                0,
-                0,
-            )
-            self.progress_dialog.setMaximum(0)
-            self.progress_dialog.setValue(0)
-            self.progress_dialog.setLabelText(
-                f"Tömörítés (nagy fájl): {name} - Folyamatban..."
-            )
+            if operation == "archiving_large_file":
+                maximum = total if total > 0 else 1
+                mb_done = done / 1024 / 1024
+                mb_total = total / 1024 / 1024
+                label = f"{name}: {mb_done:.1f}MB / {mb_total:.1f}MB"
+                logging.debug(
+                    "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                    operation,
+                    "Tömörítés...",
+                    label,
+                    maximum,
+                    done,
+                )
+                self.progress_dialog.setMaximum(maximum)
+                self.progress_dialog.setValue(done)
+                self.progress_dialog.setLabelText(label)
+            else:
+                label = f"Tömörítés (nagy fájl): {name} - Folyamatban..."
+                logging.debug(
+                    "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
+                    operation,
+                    "Tömörítés...",
+                    label,
+                    0,
+                    0,
+                )
+                self.progress_dialog.setMaximum(0)
+                self.progress_dialog.setValue(0)
+                self.progress_dialog.setLabelText(label)
             return
 
         if operation == "archiving":
@@ -427,7 +443,12 @@ class MainWindow(QMainWindow):
             return
 
         elif operation == "extracting_archive":
-            logging.info("[GUI_DEBUG] update_progress for 'extracting_archive': Name=%s, Done=%d, Total=%d", name, done, total)
+            logging.info(
+                "[GUI_DEBUG] update_progress for 'extracting_archive': Name=%s, Done=%d, Total=%d",
+                name,
+                done,
+                total,
+            )
             self.progress_dialog.setWindowTitle("Fájl feldolgozása")
 
             if done == 0 and total == 1:
