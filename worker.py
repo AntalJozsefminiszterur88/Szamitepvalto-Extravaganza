@@ -495,6 +495,7 @@ class KVMWorker(QObject):
         timeout = self.settings.get('archive_timeout_seconds', 900)
         cancel_evt = threading.Event()
         result = {}
+        temp_archive_dir = None
 
         def run_archiving():
             result['archive'] = self._create_archive(paths, cancel_event=cancel_evt)
@@ -515,12 +516,13 @@ class KVMWorker(QObject):
                 shutil.rmtree(os.path.dirname(result['archive']), ignore_errors=True)
             return
         archive = result.get('archive')
-        if not archive:
-            self._clear_network_file_clipboard()
-            logging.debug("Archive creation failed, exiting _share_files_thread")
-            return
-        temp_archive_dir = os.path.dirname(archive)
         try:
+            if not archive:
+                self._clear_network_file_clipboard()
+                logging.debug("Archive creation failed, exiting _share_files_thread")
+                return
+
+            temp_archive_dir = os.path.dirname(archive)
             if self.settings['role'] == 'ado':
                 self._clear_network_file_clipboard()
                 self.network_file_clipboard = {
@@ -549,7 +551,8 @@ class KVMWorker(QObject):
                 # but the method expects it. We can pass an empty string.
                 self._send_archive(sock, archive, dest_dir="")
         finally:
-            if self.settings['role'] != 'ado':
+            if temp_archive_dir and self.settings['role'] != 'ado':
+                logging.info(f"Client-side cleanup: Removing temporary archive directory {temp_archive_dir}")
                 shutil.rmtree(temp_archive_dir, ignore_errors=True)
             self._cancel_transfer.clear()
             logging.debug(
@@ -1041,6 +1044,16 @@ class KVMWorker(QObject):
                 sock.close()
             except Exception:
                 pass
+            if upload_info and upload_info.get('file'):
+                logging.warning("Cleaning up incomplete download on server: %s", upload_info['path'])
+                try:
+                    upload_info['file'].close()
+                except Exception:
+                    pass
+                try:
+                    os.remove(upload_info['path'])
+                except Exception:
+                    pass
             upload_info = None
             self._cancel_transfer.clear()
             self._clear_network_file_clipboard()
@@ -1774,6 +1787,16 @@ class KVMWorker(QObject):
                     except Exception:
                         pass
                 self.release_hotkey_keys()
+                if incoming_info and incoming_info.get('file'):
+                    logging.warning("Cleaning up incomplete download on client: %s", incoming_info['path'])
+                    try:
+                        incoming_info['file'].close()
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(incoming_info['path'])
+                    except Exception:
+                        pass
                 incoming_info = None
                 self._cancel_transfer.clear()
                 self.server_socket = None
