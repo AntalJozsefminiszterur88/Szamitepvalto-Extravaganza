@@ -25,13 +25,15 @@ from PySide6.QtWidgets import (
     QMenu,
     QFileDialog,
     QProgressDialog,
+    QInputDialog,
+    QMessageBox,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer, QStandardPaths
 
 
 from worker import KVMWorker
-from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
+from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH, TEMP_DIR_PARTS
 
 MB = 1024 * 1024
 
@@ -324,9 +326,37 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     def browse_temp_directory(self):
-        directory = QFileDialog.getExistingDirectory(self, "Ideiglenes mappa kiválasztása")
-        if directory:
-            self.temp_path_edit.setText(directory)
+        """Allow selecting only drive roots and create the temp folder."""
+        import string
+
+        # Detect available drives on Windows
+        drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+
+        if not drives:
+            QMessageBox.warning(self, "Hiba", "Nem találhatók elérhető meghajtók.")
+            return
+
+        drive, ok = QInputDialog.getItem(
+            self,
+            "Lemez kiválasztása",
+            "Válassz meghajtót az ideiglenes fájlokhoz:",
+            drives,
+            editable=False,
+        )
+
+        if ok and drive:
+            target_dir = os.path.join(drive, *TEMP_DIR_PARTS)
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except OSError as e:
+                QMessageBox.warning(
+                    self,
+                    "Hiba",
+                    f"Nem sikerült a mappát létrehozni: {e}"
+                )
+                return
+
+            self.temp_path_edit.setText(target_dir)
             self.save_settings()
 
     def share_network_file(self, cut: bool = False):
