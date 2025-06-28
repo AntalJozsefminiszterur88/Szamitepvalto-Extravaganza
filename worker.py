@@ -1569,8 +1569,10 @@ class KVMWorker(QObject):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    s.settimeout(5.0)
                     logging.info(f"Connecting to {ip}:{self.settings['port']}")
                     s.connect((ip, self.settings['port']))
+                    s.settimeout(None)
                     self.server_socket = s
                     settings_store = QSettings(ORG_NAME, APP_NAME)
                     settings_store.setValue('network/last_server_ip', ip)
