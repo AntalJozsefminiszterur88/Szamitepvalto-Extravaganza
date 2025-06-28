@@ -48,6 +48,16 @@ TRANSFER_TIMEOUT = 30
 PROGRESS_UPDATE_INTERVAL = 0.5
 
 
+def get_local_ip() -> str:
+    """Return the primary local IP address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return socket.gethostbyname(socket.gethostname())
+
+
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
@@ -78,7 +88,7 @@ class KVMWorker(QObject):
         self.zeroconf = Zeroconf()
         self.streaming_thread = None
         self.switch_monitor = True
-        self.local_ip = socket.gethostbyname(socket.gethostname())
+        self.local_ip = get_local_ip()
         self.server_ip = None
         self.connection_thread = None
         settings_store = QSettings(ORG_NAME, APP_NAME)
@@ -718,7 +728,7 @@ class KVMWorker(QObject):
         info = ServiceInfo(
             SERVICE_TYPE,
             f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
-            addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
+            addresses=[socket.inet_aton(self.local_ip)],
             port=self.settings['port']
         )
         self.zeroconf.register_service(info)
