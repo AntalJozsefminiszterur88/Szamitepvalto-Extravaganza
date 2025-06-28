@@ -42,6 +42,8 @@ SEND_QUEUE_MAXSIZE = 200
 FILE_CHUNK_SIZE = 65536
 # Socket timeout (seconds) during file transfers
 TRANSFER_TIMEOUT = 30
+# Minimum delay between progress updates
+PROGRESS_UPDATE_INTERVAL = 0.5
 
 
 class KVMWorker(QObject):
@@ -442,6 +444,7 @@ class KVMWorker(QObject):
                 return
             sent = 0
             last_log = time.time()
+            last_emit = time.time()
             with open(archive_path, 'rb') as f:
                 while not self._cancel_transfer.is_set():
                     if time.time() - last_log >= 10:
@@ -457,14 +460,16 @@ class KVMWorker(QObject):
                     if not self._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
                         raise IOError('send failed')
                     sent += len(chunk)
-                    logging.debug(
-                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                        'sending_archive',
-                        name,
-                        sent,
-                        size,
-                    )
-                    self.file_progress_update.emit('sending_archive', name, sent, size)
+                    if time.time() - last_emit >= PROGRESS_UPDATE_INTERVAL:
+                        logging.debug(
+                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
+                            'sending_archive',
+                            name,
+                            sent,
+                            size,
+                        )
+                        self.file_progress_update.emit('sending_archive', name, sent, size)
+                        last_emit = time.time()
             if self._cancel_transfer.is_set():
                 self._send_message(sock, {'type': 'transfer_canceled'})
                 return
@@ -589,6 +594,7 @@ class KVMWorker(QObject):
                 sock.settimeout(TRANSFER_TIMEOUT)
                 sent = 0
                 last_log = time.time()
+                last_emit = time.time()
                 try:
                     with open(archive, 'rb') as f:
                         while not self._cancel_transfer.is_set():
@@ -605,7 +611,9 @@ class KVMWorker(QObject):
                             if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
                                 raise IOError('send failed')
                             sent += len(chunk)
-                            self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
+                            if time.time() - last_emit >= PROGRESS_UPDATE_INTERVAL:
+                                self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
+                                last_emit = time.time()
                     if self._cancel_transfer.is_set():
                         self._send_message(sock, {'type': 'transfer_canceled'})
                         return
@@ -1007,6 +1015,7 @@ class KVMWorker(QObject):
                                     'received': 0,
                                 }
                                 last_log = time.time()
+                                last_emit = time.time()
                                 logging.info(
                                     "[WORKER_DEBUG] Emitting file_progress_update (initial): op=%s, name=%s, done=%d, total=%d",
                                     'receiving_archive',
@@ -1029,7 +1038,9 @@ class KVMWorker(QObject):
                                                 percent,
                                             )
                                             last_log = time.time()
-                                        self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['received'], upload_info['size'])
+                                        if time.time() - last_emit >= PROGRESS_UPDATE_INTERVAL:
+                                            self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['received'], upload_info['size'])
+                                            last_emit = time.time()
                                         if self._cancel_transfer.is_set():
                                             break
                                     except Exception as e:
