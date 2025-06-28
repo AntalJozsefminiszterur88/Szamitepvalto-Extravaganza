@@ -72,7 +72,6 @@ class KVMWorker(QObject):
     status_update = Signal(str)
     update_progress_display = Signal(int, str)  # percentage, label text
     file_transfer_error = Signal(str)
-    incoming_upload_started = Signal(str, int)
 
     def __init__(self, settings):
         super().__init__()
@@ -967,11 +966,6 @@ class KVMWorker(QObject):
                                     self.file_transfer_error.emit(str(e))
                                     self._clear_network_file_clipboard()
                                     break
-                                self.incoming_upload_started.emit(
-                                    data.get('name'),
-                                    data.get('size', 0)
-                                )
-                                logging.info("[WORKER_DEBUG] Emitting incoming_upload_started for: %s, size: %s", data.get('name'), data.get('size', 0))
                                 self._cancel_transfer.clear()
                                 logging.debug("Receiving upload, cancel flag cleared")
                                 sock.settimeout(TRANSFER_TIMEOUT)
@@ -989,6 +983,7 @@ class KVMWorker(QObject):
                                 }
                                 last_percentage = -1
                                 last_emit_time = time.time()
+                                # Start progress display at 0% using the safe signal
                                 self.update_progress_display.emit(0, f"{upload_info['name']}: 0MB / {upload_info['size']/1024/1024:.1f}MB")
                             elif data.get('type') == 'file_chunk':
                                 if upload_info:
