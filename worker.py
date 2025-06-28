@@ -1404,6 +1404,7 @@ class KVMWorker(QObject):
         
         pressed_keys = set()
         current_vks = set()
+        current_special_keys = set()
 
         def get_vk(key):
             if hasattr(key, "vk") and key.vk is not None:
@@ -1411,6 +1412,20 @@ class KVMWorker(QObject):
             if hasattr(key, "value") and hasattr(key.value, "vk"):
                 return key.value.vk
             return None
+
+        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
+        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
+        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
+        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
+        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
+        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
+
+        hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
+        hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
+        hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
+        hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
+        hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
+        hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
 
 
         def on_key(k, p):
@@ -1422,8 +1437,20 @@ class KVMWorker(QObject):
                         current_vks.add(vk)
                     else:
                         current_vks.discard(vk)
+                if isinstance(k, keyboard.Key):
+                    if p:
+                        current_special_keys.add(k)
+                    else:
+                        current_special_keys.discard(k)
 
-                if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD0 in current_vks):
+                if (
+                    hotkey_desktop_l_numoff.issubset(current_special_keys)
+                    or hotkey_desktop_r_numoff.issubset(current_special_keys)
+                    or (
+                        (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
+                        and VK_NUMPAD0 in current_vks
+                    )
+                ):
                     logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
                     # Send key releases to the client before disabling streaming
                     for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
@@ -1433,7 +1460,14 @@ class KVMWorker(QObject):
                     current_vks.clear()
                     self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
                     return
-                if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD1 in current_vks):
+                if (
+                    hotkey_laptop_l_numoff.issubset(current_special_keys)
+                    or hotkey_laptop_r_numoff.issubset(current_special_keys)
+                    or (
+                        (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
+                        and VK_NUMPAD1 in current_vks
+                    )
+                ):
                     logging.debug(f"Hotkey detected for laptop with current_vks={current_vks}")
                     for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
                         if vk_code in current_vks:
@@ -1442,7 +1476,14 @@ class KVMWorker(QObject):
                     current_vks.clear()
                     self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
                     return
-                if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD2 in current_vks):
+                if (
+                    hotkey_elitdesk_l_numoff.issubset(current_special_keys.union(current_vks))
+                    or hotkey_elitdesk_r_numoff.issubset(current_special_keys.union(current_vks))
+                    or (
+                        (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
+                        and VK_NUMPAD2 in current_vks
+                    )
+                ):
                     logging.debug(f"Hotkey detected for elitedesk with current_vks={current_vks}")
                     for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
                         if vk_code in current_vks:
