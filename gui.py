@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
         self.kvm_thread.started.connect(self.kvm_worker.run)
         self.kvm_worker.finished.connect(self.on_service_stopped)
         self.kvm_worker.status_update.connect(self.on_status_update)
-        self.kvm_worker.file_progress_update.connect(self.update_progress)
+        self.kvm_worker.update_progress_display.connect(self.update_progress_display)
         self.kvm_worker.file_transfer_error.connect(self.on_transfer_error)
         self.kvm_worker.incoming_upload_started.connect(self.on_incoming_upload_started)
         self.kvm_thread.start()
@@ -355,89 +355,30 @@ class MainWindow(QMainWindow):
             "[GUI_DEBUG] on_incoming_upload_started: Progress dialog shown. Current label: %s",
             self.progress_dialog.labelText() if self.progress_dialog else "N/A",
         )
-        self.update_progress("receiving_archive", filename, 0, total_size)
         logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started: update_progress called. Current label: %s",
-            self.progress_dialog.labelText() if self.progress_dialog else "N/A",
+            "[GUI_DEBUG] on_incoming_upload_started: initial 0%% progress emitted",
         )
 
-    def update_progress(self, operation: str, name: str, done: int, total: int):
-        """Update progress dialog based on signals from the worker thread."""
+    def update_progress_display(self, percentage: int, label: str):
+        """Receives a pre-calculated percentage and label, and applies them directly."""
         if not self.progress_dialog or not self.progress_dialog.isVisible():
             return
-        logging.info(
-            "[GUI_DEBUG] update_progress triggered. Op: %s, Name: %s, Done: %d, Total: %d",
-            operation,
-            name,
-            done,
-            total,
-        )
 
-        # --- Universal Percentage Calculation ---
-        # Set maximum to 100 for a percentage-based bar.
+        logging.info("[GUI_DEBUG] update_progress_display: Percent: %d, Label: %s", percentage, label)
+
         self.progress_dialog.setMaximum(100)
-        percentage = int(done / total * 100) if total > 0 else 0
         self.progress_dialog.setValue(percentage)
+        self.progress_dialog.setLabelText(label)
 
-        # --- Label and Title Logic ---
-        if operation in ("archiving_large_file", "sending_archive", "receiving_archive"):
-            title = {
-                "archiving_large_file": "Tömörítés...",
-                "sending_archive": "Fájl küldése",
-                "receiving_archive": "Fájl fogadása",
-            }[operation]
-            self.progress_dialog.setWindowTitle(title)
-
-            # Display progress in MB or GB for clarity
-            current_mb = done / MB
-            total_mb = total / MB
-            label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
-            self.progress_dialog.setLabelText(label_text)
-
-        elif operation == "archiving":
-            self.progress_dialog.setWindowTitle("Tömörítés...")
-            label = f"Tömörítés: {name} ({done}/{total} fájl)"
-            self.progress_dialog.setLabelText(label)
-
-        elif operation == "archiving_complete":
-            self.progress_dialog.setWindowTitle("Tömörítés...")
-            self.progress_dialog.setValue(100)
-            self.progress_dialog.setLabelText("Tömörítés kész. Átvitel előkészítése...")
-            return  # Avoid completion logic below for this intermediate step
-
-        elif operation == "extracting_archive":
-            self.progress_dialog.setWindowTitle("Fájl feldolgozása")
-            self.progress_dialog.setLabelText(f"Kibontás folyamatban: {name}...")
-            self.progress_dialog.setMaximum(total)  # Here total is 1, so it's a 0-1 scale
-            self.progress_dialog.setValue(done)
-
-        # --- Universal Completion Logic ---
-        if done >= total and total > 0:
-            self.progress_dialog.setValue(100)  # Ensure it's full
-
-            final_label = f"{name}: Kész!"
-            if operation in ("archiving_large_file", "sending_archive", "receiving_archive"):
-                total_mb = total / MB
-                final_label = f"{name}: Kész! ({total_mb:.1f}MB)"
-            elif operation == "extracting_archive":
-                final_label = f"{name}: Feldolgozás kész!"
-
-            self.progress_dialog.setLabelText(final_label)
-
-            logging.info(
-                "[GUI_DEBUG] Operation '%s' complete for %s. Starting 5s close timer.",
-                operation,
-                name,
-            )
+        if percentage >= 100:
+            logging.info("[GUI_DEBUG] Progress complete. Starting 5s close timer.")
             try:
-                # Disable cancel button
                 cancel_button = self.progress_dialog.findChild(QPushButton)
                 if cancel_button:
                     cancel_button.setEnabled(False)
                     cancel_button.setText("Kész")
-            except Exception as e:
-                logging.warning("[GUI_DEBUG] Failed to update cancel button: %s", e)
-
+            except Exception:
+                pass
             QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
 
     def _close_progress_dialog_if_exists(self):
