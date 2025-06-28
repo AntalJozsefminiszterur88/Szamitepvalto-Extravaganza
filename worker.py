@@ -24,6 +24,7 @@ from config import (
     SERVICE_NAME_PREFIX,
     APP_NAME,
     ORG_NAME,
+    BRAND_NAME,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -172,13 +173,33 @@ class KVMWorker(QObject):
     # ------------------------------------------------------------------
     # File transfer helpers
     # ------------------------------------------------------------------
+    def _get_temp_dir(self) -> str:
+        """
+        Creates and returns the path to a dedicated temporary directory for the app.
+        Uses the custom path from settings if available, otherwise the system default.
+        """
+        base_path = self.settings.get('temp_path') or tempfile.gettempdir()
+
+        app_temp_path = os.path.join(base_path, BRAND_NAME, APP_NAME)
+
+        try:
+            os.makedirs(app_temp_path, exist_ok=True)
+            transfer_temp_dir = tempfile.mkdtemp(dir=app_temp_path)
+            logging.info(f"Using temporary directory: {transfer_temp_dir}")
+            return transfer_temp_dir
+        except OSError as e:
+            logging.error(
+                f"Could not create temporary directory at {app_temp_path}: {e}. Falling back to system default."
+            )
+            return tempfile.mkdtemp()
+
     def _create_archive(self, paths, cancel_event: Optional[threading.Event] = None):
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = self._get_temp_dir()
         archive = os.path.join(temp_dir, 'share.zip')
         logging.debug("Created temp archive dir %s", temp_dir)
         # Log available space in the temporary directory which will hold the archive
         try:
-            usage = shutil.disk_usage(tempfile.gettempdir())
+            usage = shutil.disk_usage(temp_dir)
             logging.debug(
                 "Temp dir disk usage - total: %s, used: %s, free: %s",
                 usage.total,
@@ -906,7 +927,8 @@ class KVMWorker(QObject):
                                     self._send_archive(sock, self.network_file_clipboard['archive'], dest)
                             elif data.get('type') == 'upload_file_start':
                                 logging.info("[WORKER_DEBUG] Received 'upload_file_start' from client: %s (size: %s)", data.get('name'), data.get('size'))
-                                incoming_path = os.path.join(tempfile.gettempdir(), data['name'])
+                                temp_dir_for_download = self._get_temp_dir()
+                                incoming_path = os.path.join(temp_dir_for_download, data['name'])
                                 self._clear_network_file_clipboard()
                                 try:
                                     incoming_file = open(incoming_path, 'wb')
@@ -926,6 +948,7 @@ class KVMWorker(QObject):
                                 upload_info = {
                                     'file': incoming_file,
                                     'path': incoming_path,
+                                    'temp_dir': temp_dir_for_download,
                                     'paths': data.get('paths', []),
                                     'operation': data.get('operation', 'copy'),
                                     'size': data.get('size', 0),
@@ -1044,16 +1067,13 @@ class KVMWorker(QObject):
                 sock.close()
             except Exception:
                 pass
-            if upload_info and upload_info.get('file'):
-                logging.warning("Cleaning up incomplete download on server: %s", upload_info['path'])
+            if upload_info and upload_info.get('temp_dir'):
+                logging.warning("Cleaning up incomplete download directory: %s", upload_info['temp_dir'])
                 try:
                     upload_info['file'].close()
                 except Exception:
                     pass
-                try:
-                    os.remove(upload_info['path'])
-                except Exception:
-                    pass
+                shutil.rmtree(upload_info['temp_dir'], ignore_errors=True)
             upload_info = None
             self._cancel_transfer.clear()
             self._clear_network_file_clipboard()
@@ -1681,7 +1701,8 @@ class KVMWorker(QObject):
                                 if text != self.last_clipboard:
                                     self._set_clipboard(text)
                             elif event_type == 'file_metadata':
-                                incoming_tmp = os.path.join(tempfile.gettempdir(), data['name'])
+                                temp_dir_for_download = self._get_temp_dir()
+                                incoming_tmp = os.path.join(temp_dir_for_download, data['name'])
                                 self._cancel_transfer.clear()
                                 logging.debug("Receiving file, cancel flag cleared")
                                 try:
@@ -1699,6 +1720,8 @@ class KVMWorker(QObject):
                                     'file': incoming_file,
                                     'received': 0,
                                     'source_id': data.get('source_id', self.device_name),
+                                    'temp_dir': temp_dir_for_download,
+                                    'start_time': time.time(),
                                 }
                                 last_percentage = -1
                                 last_emit_time = time.time()
@@ -1710,7 +1733,14 @@ class KVMWorker(QObject):
                                         incoming_info['received'] += len(data['data'])
                                         current_percentage = int((incoming_info['received'] / incoming_info['size']) * 100) if incoming_info['size'] > 0 else 0
                                         if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
-                                            label = f"{incoming_info['name']}: {incoming_info['received']/1024/1024:.1f}MB / {incoming_info['size']/1024/1024:.1f}MB"
+                                            elapsed_time = time.time() - incoming_info['start_time']
+                                            speed_mbps = (incoming_info['received'] / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
+                                            remaining_bytes = incoming_info['size'] - incoming_info['received']
+                                            etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
+                                            etr_str = time.strftime('%M:%S', time.gmtime(etr_seconds)) if etr_seconds < 3600 else time.strftime('%H:%M:%S', time.gmtime(etr_seconds))
+
+                                            label = f"{incoming_info['name']}: {incoming_info['received']/1024/1024:.1f}MB / {incoming_info['size']/1024/1024:.1f}MB\n"
+                                            label += f"Sebesség: {speed_mbps:.1f} MB/s | Hátralévő idő: {etr_str}"
                                             self.update_progress_display.emit(current_percentage, label)
                                             last_percentage = current_percentage
                                             last_emit_time = time.time()
@@ -1727,7 +1757,7 @@ class KVMWorker(QObject):
                                     try:
                                         self._safe_extract_archive(incoming_info['path'], incoming_info['dest'])
                                     finally:
-                                        os.remove(incoming_info['path'])
+                                        shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
                                     self._send_message(s, {'type': 'paste_success', 'source_id': incoming_info.get('source_id')})
                                     s.settimeout(None)
                                     final_label = f"{incoming_info['name']}: Kész! ({incoming_info['size']/1024/1024:.1f}MB)"
@@ -1751,9 +1781,10 @@ class KVMWorker(QObject):
                             if incoming_info:
                                 try:
                                     incoming_info['file'].close()
-                                    os.remove(incoming_info['path'])
                                 except Exception:
                                     pass
+                                if incoming_info.get('temp_dir'):
+                                    shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
                                 incoming_info = None
                             s.settimeout(None)
                             self._cancel_transfer.clear()
@@ -1787,16 +1818,16 @@ class KVMWorker(QObject):
                     except Exception:
                         pass
                 self.release_hotkey_keys()
-                if incoming_info and incoming_info.get('file'):
-                    logging.warning("Cleaning up incomplete download on client: %s", incoming_info['path'])
+                if incoming_info and incoming_info.get('temp_dir'):
+                    logging.warning(
+                        "Cleaning up incomplete download directory: %s",
+                        incoming_info['temp_dir'],
+                    )
                     try:
                         incoming_info['file'].close()
                     except Exception:
                         pass
-                    try:
-                        os.remove(incoming_info['path'])
-                    except Exception:
-                        pass
+                    shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
                 incoming_info = None
                 self._cancel_transfer.clear()
                 self.server_socket = None

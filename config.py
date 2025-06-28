@@ -7,6 +7,8 @@ import sys
 # Alkalmazás adatai a QSettings-hez
 APP_NAME = "KVMApp"
 ORG_NAME = "MyKVM"
+# Branding
+BRAND_NAME = "UMKGL Solutions"
 
 # Hálózati beállítások
 DEFAULT_PORT = 65432
