@@ -79,7 +79,8 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(ICON_PATH))
         # Prevent resizing during runtime
         # Provide a bit more vertical room so texts are not cramped
-        self.setFixedSize(QSize(450, 480))
+        # Slightly increased height so long texts fit within the window
+        self.setFixedSize(QSize(450, 520))
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -164,7 +165,7 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Állapot: Inaktív")
         self.status_label.setWordWrap(True)
         self.status_label.setAlignment(Qt.AlignTop)
-        self.status_label.setFixedHeight(70)
+        self.status_label.setFixedHeight(90)
         main_layout.addWidget(self.status_label)
 
         self.kvm_thread = None
