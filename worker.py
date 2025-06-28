@@ -86,6 +86,8 @@ class KVMWorker(QObject):
         self.network_file_clipboard = None
         logging.debug("Network file clipboard cleared")
         self._cancel_transfer = threading.Event()
+        self._host_mouse_controller = None
+        self._orig_mouse_pos = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -1234,6 +1236,14 @@ class KVMWorker(QObject):
         if release_keys:
             self.release_hotkey_keys()
 
+        if hasattr(self, '_host_mouse_controller') and hasattr(self, '_orig_mouse_pos'):
+            try:
+                self._host_mouse_controller.position = self._orig_mouse_pos
+            except Exception as e:
+                logging.error(f"Failed to restore mouse position: {e}", exc_info=True)
+            self._host_mouse_controller = None
+            self._orig_mouse_pos = None
+
         if self.active_client not in self.client_sockets:
             if self.active_client is not None:
                 logging.warning("Active client disconnected during deactivation")
@@ -1258,6 +1268,8 @@ class KVMWorker(QObject):
                 return
         
         host_mouse_controller = mouse.Controller()
+        self._host_mouse_controller = host_mouse_controller
+        self._orig_mouse_pos = host_mouse_controller.position
         try:
             root = tkinter.Tk()
             root.withdraw()
