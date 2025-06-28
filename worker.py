@@ -57,7 +57,7 @@ class KVMWorker(QObject):
 
     finished = Signal()
     status_update = Signal(str)
-    file_progress_update = Signal(str, str, int, int)
+    update_progress_display = Signal(int, str)  # percentage, label text
     file_transfer_error = Signal(str)
     incoming_upload_started = Signal(str, int)
 
@@ -201,23 +201,18 @@ class KVMWorker(QObject):
             archived_files = 0
             with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
                 def _write_with_progress(src_path, arcname, ctype):
-                    """Write file and emit progress updates for large files."""
                     file_size = os.path.getsize(src_path)
-
                     if cancel_event and cancel_event.is_set():
-                        raise RuntimeError('archive canceled before write')
+                        raise RuntimeError('archive canceled')
+
+                    last_percentage = -1
+                    last_emit_time = time.time()
 
                     if file_size > 1_000_000_000:
-                        logging.info(
-                            "Starting streaming write for large file: %s (size: %.2f GB, type: %s)",
-                            src_path,
-                            file_size / (1024**3),
-                            ctype,
-                        )
-                        info = zipfile.ZipInfo(arcname)
+                        info = zipfile.ZipInfo(arcname, date_time=time.localtime(time.time())[:6])
                         info.compress_type = ctype
-                        sent = 0
                         with open(src_path, 'rb') as src_file, zf.open(info, 'w', force_zip64=True) as dest:
+                            sent = 0
                             while True:
                                 if cancel_event and cancel_event.is_set():
                                     raise RuntimeError('archive canceled')
@@ -226,30 +221,17 @@ class KVMWorker(QObject):
                                     break
                                 dest.write(chunk)
                                 sent += len(chunk)
-                                try:
-                                    self.file_progress_update.emit(
-                                        'archiving_large_file',
-                                        os.path.basename(src_path),
-                                        sent,
-                                        file_size,
-                                    )
-                                except Exception:
-                                    pass
-                        self.file_progress_update.emit(
-                            'archiving_large_file',
-                            os.path.basename(src_path),
-                            file_size,
-                            file_size,
-                        )
-                        logging.info(
-                            "Finished streaming write for large file %s", src_path
-                        )
+
+                                current_percentage = int((sent / file_size) * 100)
+                                if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
+                                    label = f"{os.path.basename(src_path)}: {sent/1024/1024:.1f}MB / {file_size/1024/1024:.1f}MB"
+                                    self.update_progress_display.emit(current_percentage, label)
+                                    last_percentage = current_percentage
+                                    last_emit_time = time.time()
+                        final_label = f"{os.path.basename(src_path)}: Kész! ({file_size/1024/1024:.1f}MB)"
+                        self.update_progress_display.emit(100, final_label)
                     else:
-                        if cancel_event and cancel_event.is_set():
-                            raise RuntimeError('archive canceled')
                         zf.write(src_path, arcname, compress_type=ctype)
-                        if cancel_event and cancel_event.is_set():
-                            raise RuntimeError('archive canceled')
                 for p in paths:
                     if os.path.isdir(p):
                         base = os.path.basename(p.rstrip(os.sep))
@@ -291,19 +273,9 @@ class KVMWorker(QObject):
                                     self.file_transfer_error.emit(msg)
                                     return None
                                 archived_files += 1
-                                logging.debug(
-                                    "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                                    'archiving',
-                                    os.path.basename(full),
-                                    archived_files,
-                                    total_files,
-                                )
-                                self.file_progress_update.emit(
-                                    'archiving',
-                                    os.path.basename(full),
-                                    archived_files,
-                                    total_files,
-                                )
+                                percentage = int(archived_files / total_files * 100) if total_files else 0
+                                label = f"Tömörítés: {os.path.basename(full)} ({archived_files}/{total_files} fájl)"
+                                self.update_progress_display.emit(percentage, label)
                     else:
                         file_size = os.path.getsize(p)
                         if file_size > 1_000_000_000:
@@ -339,32 +311,11 @@ class KVMWorker(QObject):
                             self.file_transfer_error.emit(msg)
                             return None
                         archived_files += 1
-                        logging.debug(
-                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                            'archiving',
-                            os.path.basename(p),
-                            archived_files,
-                            total_files,
-                        )
-                        self.file_progress_update.emit(
-                            'archiving',
-                            os.path.basename(p),
-                            archived_files,
-                            total_files,
-                        )
-            logging.debug(
-                "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                'archiving_complete',
-                os.path.basename(archive),
-                total_files,
-                total_files,
-            )
-            self.file_progress_update.emit(
-                'archiving_complete',
-                os.path.basename(archive),
-                total_files,
-                total_files,
-            )
+                        percentage = int(archived_files / total_files * 100) if total_files else 0
+                        label = f"Tömörítés: {os.path.basename(p)} ({archived_files}/{total_files} fájl)"
+                        self.update_progress_display.emit(percentage, label)
+            label = f"Tömörítés kész. ({os.path.basename(archive)})"
+            self.update_progress_display.emit(100, label)
         except Exception as e:
             logging.error("Failed to create archive: %s", e, exc_info=True)
             try:
@@ -443,42 +394,30 @@ class KVMWorker(QObject):
             if not self._send_message(sock, meta):
                 return
             sent = 0
-            last_log = time.time()
-            last_emit = time.time()
+            last_percentage = -1
+            last_emit_time = time.time()
             with open(archive_path, 'rb') as f:
                 while not self._cancel_transfer.is_set():
-                    if time.time() - last_log >= 10:
-                        percent = (sent / size * 100) if size else 0
-                        logging.info(
-                            "Küldés folyamatban: %.1f%%",
-                            percent,
-                        )
-                        last_log = time.time()
                     chunk = f.read(FILE_CHUNK_SIZE)
                     if not chunk:
                         break
                     if not self._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
                         raise IOError('send failed')
                     sent += len(chunk)
-                    if time.time() - last_emit >= PROGRESS_UPDATE_INTERVAL:
-                        logging.debug(
-                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                            'sending_archive',
-                            name,
-                            sent,
-                            size,
-                        )
-                        self.file_progress_update.emit('sending_archive', name, sent, size)
-                        last_emit = time.time()
+                    current_percentage = int((sent / size) * 100) if size > 0 else 0
+                    if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
+                        label = f"{name}: {sent/1024/1024:.1f}MB / {size/1024/1024:.1f}MB"
+                        self.update_progress_display.emit(current_percentage, label)
+                        last_percentage = current_percentage
+                        last_emit_time = time.time()
             if self._cancel_transfer.is_set():
                 self._send_message(sock, {'type': 'transfer_canceled'})
                 return
-            # Emit final 100% progress before signaling completion
-            self.file_progress_update.emit('sending_archive', name, size, size)
+            final_label = f"{name}: Kész! ({size/1024/1024:.1f}MB)"
+            self.update_progress_display.emit(100, final_label)
             self._send_message(sock, {'type': 'file_end'})
             logging.debug(
-                "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                'sending_archive',
+                "WORKER EMITTING update_progress_display: %s %d/%d",
                 name,
                 size,
                 size,
@@ -594,39 +533,29 @@ class KVMWorker(QObject):
                 prev_to = sock.gettimeout()
                 sock.settimeout(TRANSFER_TIMEOUT)
                 sent = 0
-                last_log = time.time()
-                last_emit = time.time()
+                last_percentage = -1
+                last_emit_time = time.time()
                 try:
                     with open(archive, 'rb') as f:
                         while not self._cancel_transfer.is_set():
-                            if time.time() - last_log >= 10:
-                                percent = (sent / size * 100) if size else 0
-                                logging.info(
-                                    "Küldés folyamatban: %.1f%%",
-                                    percent,
-                                )
-                                last_log = time.time()
                             chunk = f.read(FILE_CHUNK_SIZE)
                             if not chunk:
                                 break
                             if not self._send_message(sock, {'type': 'upload_file_chunk', 'data': chunk}):
                                 raise IOError('send failed')
                             sent += len(chunk)
-                            if time.time() - last_emit >= PROGRESS_UPDATE_INTERVAL:
-                                self.file_progress_update.emit('sending_archive', os.path.basename(archive), sent, size)
-                                last_emit = time.time()
+                            current_percentage = int((sent / size) * 100) if size > 0 else 0
+                            if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
+                                label = f"{os.path.basename(archive)}: {sent/1024/1024:.1f}MB / {size/1024/1024:.1f}MB"
+                                self.update_progress_display.emit(current_percentage, label)
+                                last_percentage = current_percentage
+                                last_emit_time = time.time()
                     if self._cancel_transfer.is_set():
                         self._send_message(sock, {'type': 'transfer_canceled'})
                         return
                     self._send_message(sock, {'type': 'upload_file_end'})
-                    logging.debug(
-                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                        'sending_archive',
-                        os.path.basename(archive),
-                        size,
-                        size,
-                    )
-                    self.file_progress_update.emit('sending_archive', os.path.basename(archive), size, size)
+                    final_label = f"{os.path.basename(archive)}: Kész! ({size/1024/1024:.1f}MB)"
+                    self.update_progress_display.emit(100, final_label)
                     logging.debug("_share_files_thread upload loop completed. cancel=%s", self._cancel_transfer.is_set())
                 except Exception as e:
                     logging.error('Upload failed: %s', e, exc_info=True)
@@ -657,10 +586,10 @@ class KVMWorker(QObject):
             try:
                 archive_name = os.path.basename(self.network_file_clipboard['archive']) if self.network_file_clipboard and self.network_file_clipboard.get('archive') else "archívum"
                 logging.info("[WORKER_DEBUG] Starting server-side paste (extraction) for: %s", archive_name)
-                self.file_progress_update.emit('extracting_archive', archive_name, 0, 1)
+                self.update_progress_display.emit(0, f"Kibontás: {archive_name}")
                 self._safe_extract_archive(self.network_file_clipboard['archive'], dest_dir)
                 logging.info("[WORKER_DEBUG] Server-side paste (extraction) COMPLETED for: %s", archive_name)
-                self.file_progress_update.emit('extracting_archive', archive_name, 1, 1)
+                self.update_progress_display.emit(100, f"{archive_name}: Feldolgozás kész!")
             except Exception as e:
                 logging.error('Extraction failed: %s', e, exc_info=True)
                 logging.error('[WORKER_DEBUG] Server-side paste (extraction) FAILED for: %s. Error: %s', archive_name, e)
@@ -1015,33 +944,20 @@ class KVMWorker(QObject):
                                     'source_id': data.get('source_id', client_name),
                                     'received': 0,
                                 }
-                                last_log = time.time()
-                                last_emit = time.time()
-                                logging.info(
-                                    "[WORKER_DEBUG] Emitting file_progress_update (initial): op=%s, name=%s, done=%d, total=%d",
-                                    'receiving_archive',
-                                    upload_info['name'],
-                                    0,
-                                    upload_info['size'],
-                                )
-                                self.file_progress_update.emit('receiving_archive', upload_info['name'], 0, upload_info['size'])
+                                last_percentage = -1
+                                last_emit_time = time.time()
+                                self.update_progress_display.emit(0, f"{upload_info['name']}: 0MB / {upload_info['size']/1024/1024:.1f}MB")
                             elif data.get('type') == 'upload_file_chunk':
                                 if upload_info:
                                     try:
                                         upload_info['file'].write(data['data'])
                                         upload_info['received'] += len(data['data'])
-                                        if time.time() - last_log >= 10:
-                                            percent = (
-                                                upload_info['received'] / upload_info['size'] * 100
-                                            ) if upload_info['size'] else 0
-                                            logging.info(
-                                                "Fogadás folyamatban: %.1f%%",
-                                                percent,
-                                            )
-                                            last_log = time.time()
-                                        if time.time() - last_emit >= PROGRESS_UPDATE_INTERVAL:
-                                            self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['received'], upload_info['size'])
-                                            last_emit = time.time()
+                                        current_percentage = int((upload_info['received'] / upload_info['size']) * 100) if upload_info['size'] > 0 else 0
+                                        if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
+                                            label = f"{upload_info['name']}: {upload_info['received']/1024/1024:.1f}MB / {upload_info['size']/1024/1024:.1f}MB"
+                                            self.update_progress_display.emit(current_percentage, label)
+                                            last_percentage = current_percentage
+                                            last_emit_time = time.time()
                                         if self._cancel_transfer.is_set():
                                             break
                                     except Exception as e:
@@ -1057,8 +973,8 @@ class KVMWorker(QObject):
                                         upload_info['name'],
                                     )
                                     upload_info['file'].close()
-                                    # Emit final progress before cleanup
-                                    self.file_progress_update.emit('receiving_archive', upload_info['name'], upload_info['size'], upload_info['size'])
+                                    final_label = f"{upload_info['name']}: Kész! ({upload_info['size']/1024/1024:.1f}MB)"
+                                    self.update_progress_display.emit(100, final_label)
                                     self._clear_network_file_clipboard()
                                     self.network_file_clipboard = {
                                         'paths': upload_info['paths'],
@@ -1774,27 +1690,20 @@ class KVMWorker(QObject):
                                     'received': 0,
                                     'source_id': data.get('source_id', self.device_name),
                                 }
-                                logging.debug(
-                                    "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                                    'receiving_archive',
-                                    incoming_info['name'],
-                                    0,
-                                    incoming_info['size'],
-                                )
-                                self.file_progress_update.emit('receiving_archive', incoming_info['name'], 0, incoming_info['size'])
+                                last_percentage = -1
+                                last_emit_time = time.time()
+                                self.update_progress_display.emit(0, f"{incoming_info['name']}: 0MB / {incoming_info['size']/1024/1024:.1f}MB")
                             elif event_type == 'file_chunk':
                                 if incoming_info:
                                     try:
                                         incoming_info['file'].write(data['data'])
                                         incoming_info['received'] += len(data['data'])
-                                        logging.debug(
-                                            "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                                            'receiving_archive',
-                                            incoming_info['name'],
-                                            incoming_info['received'],
-                                            incoming_info['size'],
-                                        )
-                                        self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['received'], incoming_info['size'])
+                                        current_percentage = int((incoming_info['received'] / incoming_info['size']) * 100) if incoming_info['size'] > 0 else 0
+                                        if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
+                                            label = f"{incoming_info['name']}: {incoming_info['received']/1024/1024:.1f}MB / {incoming_info['size']/1024/1024:.1f}MB"
+                                            self.update_progress_display.emit(current_percentage, label)
+                                            last_percentage = current_percentage
+                                            last_emit_time = time.time()
                                         if self._cancel_transfer.is_set():
                                             break
                                     except Exception as e:
@@ -1811,14 +1720,8 @@ class KVMWorker(QObject):
                                         os.remove(incoming_info['path'])
                                     self._send_message(s, {'type': 'paste_success', 'source_id': incoming_info.get('source_id')})
                                     s.settimeout(None)
-                                    logging.debug(
-                                        "WORKER EMITTING file_progress_update: op=%s, name=%s, done=%d, total=%d",
-                                        'receiving_archive',
-                                        incoming_info['name'],
-                                        incoming_info['size'],
-                                        incoming_info['size'],
-                                    )
-                                    self.file_progress_update.emit('receiving_archive', incoming_info['name'], incoming_info['size'], incoming_info['size'])
+                                    final_label = f"{incoming_info['name']}: Kész! ({incoming_info['size']/1024/1024:.1f}MB)"
+                                    self.update_progress_display.emit(100, final_label)
                                     incoming_info = None
                                     self._cancel_transfer.clear()
                                     logging.debug("Download finished, cancel flag cleared")
