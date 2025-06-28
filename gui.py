@@ -33,6 +33,8 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 from worker import KVMWorker
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
 
+MB = 1024 * 1024
+
 
 def set_autostart(enabled: bool) -> None:
     """Enable or disable autostart depending on the current platform."""
@@ -378,9 +380,9 @@ class MainWindow(QMainWindow):
         if operation in ("archiving_large_file", "archiving_large_file_working"):
             self.progress_dialog.setWindowTitle("Tömörítés...")
             if operation == "archiving_large_file":
-                maximum = total if total > 0 else 1
-                mb_done = done / 1024 / 1024
-                mb_total = total / 1024 / 1024
+                maximum = max(1, total // MB)
+                mb_done = done / MB
+                mb_total = total / MB
                 label = f"{name}: {mb_done:.1f}MB / {mb_total:.1f}MB"
                 logging.debug(
                     "GUI: Setting for op '%s': Title='%s', Label='%s', Max=%d, Value=%d",
@@ -388,10 +390,10 @@ class MainWindow(QMainWindow):
                     "Tömörítés...",
                     label,
                     maximum,
-                    done,
+                    done // MB,
                 )
                 self.progress_dialog.setMaximum(maximum)
-                self.progress_dialog.setValue(done)
+                self.progress_dialog.setValue(done // MB)
                 self.progress_dialog.setLabelText(label)
             else:
                 label = f"Tömörítés (nagy fájl): {name} - Folyamatban..."
@@ -480,10 +482,10 @@ class MainWindow(QMainWindow):
                 self.progress_dialog.labelText(),
             )
             self.progress_dialog.setWindowTitle(desired_title)
-            maximum = total if total > 0 else 1
-            value = min(done, maximum)
-            current_mb = done / 1024 / 1024
-            total_mb = total / 1024 / 1024
+            maximum = max(1, total // MB)
+            value = min(done // MB, maximum)
+            current_mb = done / MB
+            total_mb = total / MB
             label_text = f"{name}: {current_mb:.1f}MB / {total_mb:.1f}MB"
             logging.info(
                 "[GUI_DEBUG] update_progress (%s): Setting dialog. Title='%s', Label='%s', Max=%d, Value=%d",
