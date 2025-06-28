@@ -1607,6 +1607,8 @@ class KVMWorker(QObject):
                 time.sleep(0.5)
                 continue
 
+            hb_thread = None  # Ensure heartbeat thread variable is always defined
+
             logging.debug(
                 "connect_to_server attempting to connect to %s cancel=%s",
                 ip,
