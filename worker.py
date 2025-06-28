@@ -794,44 +794,81 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        hotkey_desktop_l = {VK_LSHIFT, VK_NUMPAD0}
-        hotkey_desktop_r = {VK_RSHIFT, VK_NUMPAD0}
-        hotkey_laptop_l = {VK_LSHIFT, VK_NUMPAD1}
-        hotkey_laptop_r = {VK_RSHIFT, VK_NUMPAD1}
-        hotkey_elitdesk_l = {VK_LSHIFT, VK_NUMPAD2}
-        hotkey_elitdesk_r = {VK_RSHIFT, VK_NUMPAD2}
-        current_pressed_ids = set()
-        pending_client = None
+        # Definitions for NumLock OFF state based on diagnostic results
+        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
+        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
+        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
+        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
+        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
+        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
 
-        def get_id(key):
-            try:
-                return key.vk
-            except AttributeError:
-                return None
+        # Definitions for NumLock ON state (fallback using VK codes)
+        hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
+        hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
+        hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
+        hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
+        hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
+        hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
+
+        current_pressed_vk_codes = set()
+        current_pressed_special_keys = set()
+        pending_client = None
 
         def on_press(key):
             nonlocal pending_client
-            key_id = get_id(key)
-            if key_id is not None:
-                current_pressed_ids.add(key_id)
-            logging.debug(f"Key pressed: {key} (id={key_id}). Currently pressed: {current_pressed_ids}")
-            if hotkey_desktop_l.issubset(current_pressed_ids) or hotkey_desktop_r.issubset(current_pressed_ids):
+            try:
+                current_pressed_vk_codes.add(key.vk)
+            except AttributeError:
+                current_pressed_special_keys.add(key)
+
+            logging.debug(
+                f"Key pressed: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
+            )
+
+            if (
+                hotkey_desktop_l_numoff.issubset(current_pressed_special_keys)
+                or hotkey_desktop_r_numoff.issubset(current_pressed_special_keys)
+            ) or (
+                hotkey_desktop_l_numon.issubset(current_pressed_vk_codes)
+                or hotkey_desktop_r_numon.issubset(current_pressed_vk_codes)
+            ):
                 logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
                 pending_client = 'desktop'
-            elif hotkey_laptop_l.issubset(current_pressed_ids) or hotkey_laptop_r.issubset(current_pressed_ids):
+            elif (
+                hotkey_laptop_l_numoff.issubset(current_pressed_special_keys)
+                or hotkey_laptop_r_numoff.issubset(current_pressed_special_keys)
+            ) or (
+                hotkey_laptop_l_numon.issubset(current_pressed_vk_codes)
+                or hotkey_laptop_r_numon.issubset(current_pressed_vk_codes)
+            ):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'laptop'
-            elif hotkey_elitdesk_l.issubset(current_pressed_ids) or hotkey_elitdesk_r.issubset(current_pressed_ids):
+            elif (
+                hotkey_elitdesk_l_numoff.issubset(
+                    current_pressed_special_keys.union(current_pressed_vk_codes)
+                )
+                or hotkey_elitdesk_r_numoff.issubset(
+                    current_pressed_special_keys.union(current_pressed_vk_codes)
+                )
+            ) or (
+                hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes)
+                or hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes)
+            ):
                 logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'elitedesk'
 
         def on_release(key):
             nonlocal pending_client
-            key_id = get_id(key)
-            if key_id is not None:
-                current_pressed_ids.discard(key_id)
-            logging.debug(f"Key released: {key} (id={key_id}). Remaining pressed: {current_pressed_ids}")
-            if pending_client and not current_pressed_ids:
+            try:
+                current_pressed_vk_codes.discard(key.vk)
+            except AttributeError:
+                current_pressed_special_keys.discard(key)
+
+            logging.debug(
+                f"Key released: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
+            )
+
+            if pending_client and not current_pressed_vk_codes and not current_pressed_special_keys:
                 logging.info(f"Hotkey action executed: {pending_client}")
                 if pending_client == 'desktop':
                     self.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
@@ -842,7 +879,6 @@ class KVMWorker(QObject):
                         release_keys=False,
                     )
                 pending_client = None
-                current_pressed_ids.clear()
         
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
@@ -1554,25 +1590,31 @@ class KVMWorker(QObject):
                         except Exception:
                             logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
 
-                    hotkey_cmd_l = {VK_LSHIFT, VK_F12}
-                    hotkey_cmd_r = {VK_RSHIFT, VK_F12}
-                    pressed_ids = set()
+                    hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
+                    hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
 
-                    def get_id(key):
-                        return key.vk if hasattr(key, 'vk') and key.vk is not None else key
+                    client_pressed_special_keys = set()
+                    client_pressed_vk_codes = set()
 
                     def hk_press(key):
-                        kid = get_id(key)
-                        pressed_ids.add(kid)
-                        logging.debug(f"Client hotkey key pressed: {key} (id={kid}). Pressed: {pressed_ids}")
-                        if hotkey_cmd_l.issubset(pressed_ids) or hotkey_cmd_r.issubset(pressed_ids):
+                        try:
+                            client_pressed_vk_codes.add(key.vk)
+                        except AttributeError:
+                            client_pressed_special_keys.add(key)
+
+                        combined_pressed = client_pressed_special_keys.union(
+                            {keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes}
+                        )
+
+                        if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
                             logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
                             send_command('switch_elitedesk')
 
                     def hk_release(key):
-                        kid = get_id(key)
-                        pressed_ids.discard(kid)
-                        logging.debug(f"Client hotkey key released: {key} (id={kid}). Remaining: {pressed_ids}")
+                        try:
+                            client_pressed_vk_codes.discard(key.vk)
+                        except AttributeError:
+                            client_pressed_special_keys.discard(key)
 
                     hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
                     hk_listener.start()
