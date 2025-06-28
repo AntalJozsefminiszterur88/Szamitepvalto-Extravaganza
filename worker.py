@@ -25,6 +25,7 @@ from config import (
     APP_NAME,
     ORG_NAME,
     BRAND_NAME,
+    TEMP_DIR_PARTS,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -180,7 +181,9 @@ class KVMWorker(QObject):
         """
         base_path = self.settings.get('temp_path') or tempfile.gettempdir()
 
-        app_temp_path = os.path.join(base_path, BRAND_NAME, APP_NAME)
+        # Construct the root path for all temporary files using the configured
+        # drive and the constant directory structure.
+        app_temp_path = os.path.join(base_path, *TEMP_DIR_PARTS)
 
         try:
             os.makedirs(app_temp_path, exist_ok=True)
