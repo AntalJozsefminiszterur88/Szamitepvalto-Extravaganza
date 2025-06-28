@@ -915,7 +915,7 @@ class KVMWorker(QObject):
 
     def monitor_client(self, sock, addr):
         """Monitor a single client connection, handle commands and remove it on disconnect."""
-        sock.settimeout(1.0)
+        sock.settimeout(30.0)
         buffer = b''
 
         def recv_all(s, n):
@@ -1420,15 +1420,14 @@ class KVMWorker(QObject):
                         current_vks.discard(vk)
 
                 if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD0 in current_vks):
-                    logging.debug(f"Hotkey detected for toggle_kvm_active with current_vks={current_vks}")
-                    # send key releases before disabling streaming so the client doesn't
-                    # get stuck with modifiers held down
+                    logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
+                    # Send key releases to the client before disabling streaming
                     for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
                     current_vks.clear()
-                    self.toggle_kvm_active(self.switch_monitor)
+                    self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
                     return
                 if ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD1 in current_vks):
                     logging.debug(f"Hotkey detected for laptop with current_vks={current_vks}")
@@ -1785,7 +1784,7 @@ class KVMWorker(QObject):
             except Exception as e:
                 if self._running:
                     logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-                    self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás...")
+                    self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás 5 mp múlva...")
 
             finally:
                 logging.info("Connection to server closed")
@@ -1813,5 +1812,7 @@ class KVMWorker(QObject):
                 incoming_info = None
                 self._cancel_transfer.clear()
                 self.server_socket = None
-                time.sleep(1)
+                if self._running:
+                    logging.info("Újracsatlakozási kísérlet 5 másodperc múlva...")
+                    time.sleep(5)
                 logging.debug("connect_to_server loop ended")
