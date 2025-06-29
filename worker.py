@@ -23,6 +23,7 @@ from PySide6.QtCore import QObject, Signal, QSettings
 from hotkey_manager import HotkeyManager
 from input_streamer import InputStreamer
 from file_sender import FileSender
+from input_receiver import InputReceiver
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
@@ -69,7 +70,7 @@ class KVMWorker(QObject):
         'switch_monitor', 'local_ip', 'server_ip',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'network_file_clipboard', '_cancel_transfer', 'last_server_ip',
-        'hotkey_manager', 'file_sender'
+        'hotkey_manager', 'file_sender', 'input_receiver'
     )
 
     finished = Signal()
@@ -92,6 +93,7 @@ class KVMWorker(QObject):
         self.zeroconf = Zeroconf()
         self.input_streamer = InputStreamer(self)
         self.file_sender = FileSender(self)
+        self.input_receiver = InputReceiver()
         self.switch_monitor = True
         self.local_ip = get_local_ip()
         self.server_ip = None
@@ -902,14 +904,6 @@ class KVMWorker(QObject):
             time.sleep(1)
 
     def connect_to_server(self, ip, port):
-        mouse_controller = mouse.Controller()
-        keyboard_controller = keyboard.Controller()
-        pressed_keys = set()
-        button_map = {
-            'left': mouse.Button.left,
-            'right': mouse.Button.right,
-            'middle': mouse.Button.middle,
-        }
         hk_listener = None
 
         hb_thread = None  # Ensure heartbeat thread variable is always defined
@@ -1031,31 +1025,8 @@ class KVMWorker(QObject):
                             data = msgpack.unpackb(payload, raw=False)
                             last_event_time = time.time()
                             event_type = data.get('type')
-                            if event_type == 'move_relative':
-                                mouse_controller.move(data['dx'], data['dy'])
-                            elif event_type == 'click':
-                                b = button_map.get(data['button'])
-                                if b:
-                                    (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
-                            elif event_type == 'scroll':
-                                mouse_controller.scroll(data['dx'], data['dy'])
-                            elif event_type == 'key':
-                                k_info = data['key']
-                                if data['key_type'] == 'char':
-                                    k_press = k_info
-                                elif data['key_type'] == 'special':
-                                    k_press = getattr(keyboard.Key, k_info, None)
-                                elif data['key_type'] == 'vk':
-                                    k_press = keyboard.KeyCode.from_vk(int(k_info))
-                                else:
-                                    k_press = None
-                                if k_press:
-                                    if data['pressed']:
-                                        keyboard_controller.press(k_press)
-                                        pressed_keys.add(k_press)
-                                    else:
-                                        keyboard_controller.release(k_press)
-                                        pressed_keys.discard(k_press)
+                            if event_type in ('move_relative', 'click', 'scroll', 'key'):
+                                self.input_receiver.process_event(data)
                             elif event_type == 'clipboard_text':
                                 text = data.get('text', '')
                                 if text != self.last_clipboard:
@@ -1167,11 +1138,7 @@ class KVMWorker(QObject):
                     self.clipboard_thread.join(timeout=0.1)
                 except Exception:
                     pass
-            for k in list(pressed_keys):
-                try:
-                    keyboard_controller.release(k)
-                except Exception:
-                    pass
+            self.input_receiver.release_pressed_keys()
             if hk_listener is not None:
                 try:
                     hk_listener.stop()
