@@ -107,18 +107,18 @@ class InputStreamer:
         self.current_vks = set()
         self.current_special_keys = set()
 
-        self.sender_thread = threading.Thread(target=self.sender, daemon=True)
+        self.sender_thread = threading.Thread(target=self._sender, daemon=True)
         self.sender_thread.start()
 
         self.m_listener = mouse.Listener(
-            on_move=self.on_move,
-            on_click=self.on_click,
-            on_scroll=self.on_scroll,
+            on_move=self._on_move,
+            on_click=self._on_click,
+            on_scroll=self._on_scroll,
             suppress=True,
         )
         self.k_listener = keyboard.Listener(
-            on_press=lambda k: self.on_key(k, True),
-            on_release=lambda k: self.on_key(k, False),
+            on_press=lambda k: self._on_key(k, True),
+            on_release=lambda k: self._on_key(k, False),
             suppress=True,
         )
 
@@ -129,7 +129,7 @@ class InputStreamer:
             time.sleep(STREAM_LOOP_DELAY)
 
         for ktype, kval in list(self.pressed_keys):
-            self.send_event({'type': 'key', 'key_type': ktype, 'key': kval, 'pressed': False})
+            self._send_event({'type': 'key', 'key_type': ktype, 'key': kval, 'pressed': False})
         self.pressed_keys.clear()
 
         if self.m_listener:
@@ -155,7 +155,7 @@ class InputStreamer:
 
         logging.info("Streaming listenerek leálltak.")
 
-    def sender(self):
+    def _sender(self):
         worker = self.worker
         while worker.kvm_active and worker._running:
             try:
@@ -230,7 +230,7 @@ class InputStreamer:
                 worker.deactivate_kvm(reason="all clients disconnected")
                 break
 
-    def send_event(self, data):
+    def _send_event(self, data):
         worker = self.worker
         if not worker.kvm_active:
             logging.warning(
@@ -263,35 +263,35 @@ class InputStreamer:
             worker.deactivate_kvm(reason="queue error")
             return False
 
-    def on_move(self, x, y):
+    def _on_move(self, x, y):
         if self.is_warping:
             self.is_warping = False
             return
         dx = x - self.last_pos['x']
         dy = y - self.last_pos['y']
         if dx != 0 or dy != 0:
-            self.send_event({'type': 'move_relative', 'dx': dx, 'dy': dy})
+            self._send_event({'type': 'move_relative', 'dx': dx, 'dy': dy})
         self.is_warping = True
         self.host_mouse_controller.position = (self.center_x, self.center_y)
         self.last_pos['x'], self.last_pos['y'] = self.center_x, self.center_y
 
-    def on_click(self, x, y, b, p):
-        self.send_event({'type': 'click', 'button': b.name, 'pressed': p})
+    def _on_click(self, x, y, b, p):
+        self._send_event({'type': 'click', 'button': b.name, 'pressed': p})
 
-    def on_scroll(self, x, y, dx, dy):
-        self.send_event({'type': 'scroll', 'dx': dx, 'dy': dy})
+    def _on_scroll(self, x, y, dx, dy):
+        self._send_event({'type': 'scroll', 'dx': dx, 'dy': dy})
 
-    def get_vk(self, key):
+    def _get_vk(self, key):
         if hasattr(key, 'vk') and key.vk is not None:
             return key.vk
         if hasattr(key, 'value') and hasattr(key.value, 'vk'):
             return key.value.vk
         return None
 
-    def on_key(self, k, p):
+    def _on_key(self, k, p):
         worker = self.worker
         try:
-            vk = self.get_vk(k)
+            vk = self._get_vk(k)
             if vk is not None:
                 if p:
                     self.current_vks.add(vk)
@@ -314,7 +314,7 @@ class InputStreamer:
                 logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
                 for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
                     if vk_code in self.current_vks:
-                        self.send_event({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                        self._send_event({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                         self.pressed_keys.discard(("vk", vk_code))
                 self.current_vks.clear()
                 worker.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
@@ -330,7 +330,7 @@ class InputStreamer:
                 logging.debug(f"Hotkey detected for laptop with current_vks={self.current_vks}")
                 for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
                     if vk_code in self.current_vks:
-                        self.send_event({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                        self._send_event({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                         self.pressed_keys.discard(("vk", vk_code))
                 self.current_vks.clear()
                 worker.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
@@ -346,7 +346,7 @@ class InputStreamer:
                 logging.debug(f"Hotkey detected for elitedesk with current_vks={self.current_vks}")
                 for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
                     if vk_code in self.current_vks:
-                        self.send_event({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                        self._send_event({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                         self.pressed_keys.discard(("vk", vk_code))
                 self.current_vks.clear()
                 worker.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
@@ -371,7 +371,7 @@ class InputStreamer:
             else:
                 self.pressed_keys.discard(key_id)
 
-            if not self.send_event({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
+            if not self._send_event({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
                 return False
         except Exception as e:
             logging.error(f"Hiba az on_key függvényben: {e}", exc_info=True)
