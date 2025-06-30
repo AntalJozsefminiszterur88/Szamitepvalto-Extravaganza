@@ -174,7 +174,10 @@ class KVMWorker(QObject):
         def recvall(s, n):
             data = b''
             while len(data) < n:
-                chunk = s.recv(n - len(data))
+                try:
+                    chunk = s.recv(n - len(data))
+                except OSError:
+                    return None
                 if not chunk:
                     return None
                 data += chunk
@@ -247,7 +250,10 @@ class KVMWorker(QObject):
         def recvall(s, n):
             data = b''
             while len(data) < n:
-                chunk = s.recv(n - len(data))
+                try:
+                    chunk = s.recv(n - len(data))
+                except OSError:
+                    return None
                 if not chunk:
                     return None
                 data += chunk
@@ -271,7 +277,7 @@ class KVMWorker(QObject):
         last_emit = time.time()
         try:
             while self._running:
-                raw = sock.recv(4)
+                raw = recvall(sock, 4)
                 if not raw:
                     break
                 msg_len = struct.unpack('!I', raw)[0]
