@@ -59,6 +59,8 @@ class KVMServiceListener:
         if info:
             ip = socket.inet_ntoa(info.addresses[0])
             logging.warning("Adó szolgáltatás eltűnt: %s", ip)
+            if ip == self.worker.last_server_ip:
+                self.worker._start_reconnect_loop()
         else:
             logging.warning("Adó szolgáltatás eltűnt")
-
+            self.worker._start_reconnect_loop()

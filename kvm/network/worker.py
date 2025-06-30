@@ -68,6 +68,7 @@ class KVMWorker(QObject):
         self.network_file_clipboard = None
         self._cancel_transfer = threading.Event()
         self.switch_monitor = True
+        self._reconnect_thread = None
         set_worker_reference(self)
 
     # ------------------------------------------------------------------
@@ -128,9 +129,27 @@ class KVMWorker(QObject):
     def run_client(self):
         listener = KVMServiceListener(self)
         ServiceBrowser(self.zeroconf, SERVICE_TYPE, listener)
+        if self.last_server_ip:
+            self._start_reconnect_loop()
         self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
         while self._running:
             time.sleep(1)
+
+    # ------------------------------------------------------------------
+    def _start_reconnect_loop(self):
+        if self._reconnect_thread and self._reconnect_thread.is_alive():
+            return
+        self._reconnect_thread = threading.Thread(target=self._reconnect_loop, daemon=True)
+        self._reconnect_thread.start()
+
+    def _reconnect_loop(self):
+        while self._running and not self.server_socket and self.last_server_ip:
+            self.status_update.emit(f"Újrakapcsolódás {self.last_server_ip}...")
+            self.connect_to_server(self.last_server_ip, self.settings['port'])
+            for _ in range(5):
+                if not self._running or self.server_socket:
+                    break
+                time.sleep(1)
 
     # ------------------------------------------------------------------
     def connect_to_server(self, ip, port):
@@ -143,6 +162,8 @@ class KVMWorker(QObject):
         except Exception as e:
             logging.error("Connection failed: %s", e, exc_info=True)
             self.status_update.emit(f"Kapcsolódás sikertelen: {e}")
+            if self._running:
+                self._start_reconnect_loop()
             return
 
         self.server_socket = s
@@ -169,6 +190,8 @@ class KVMWorker(QObject):
                 pass
             self.server_socket = None
             self.status_update.emit("Kapcsolat megszűnt")
+            if self._running:
+                self._start_reconnect_loop()
 
     # ------------------------------------------------------------------
     def _client_recv_loop(self, sock):
