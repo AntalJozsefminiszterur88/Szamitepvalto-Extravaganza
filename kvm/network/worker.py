@@ -7,6 +7,7 @@ import threading
 import time
 import tempfile
 import zipfile
+import shutil
 
 import msgpack
 import pyperclip
