@@ -475,6 +475,7 @@ class KVMWorker(QObject):
             return
         self.switch_monitor = switch_monitor
         if not self.kvm_active:
+            self.kvm_active = True
             self.input_streamer.start()
         self.status_update.emit(f'Irányítás átvéve: {client_name}')
 
@@ -492,3 +493,18 @@ class KVMWorker(QObject):
         if reason:
             logging.info("KVM deactivated: %s", reason)
         self.status_update.emit('Irányítás átadva a hosztnak')
+
+    # ------------------------------------------------------------------
+    def handle_client_disconnection(self, sock):
+        """Clean up after an unexpected client disconnect."""
+        try:
+            sock.close()
+        except Exception:
+            pass
+        if sock in self.client_sockets:
+            self.client_sockets.remove(sock)
+        name = self.client_infos.pop(sock, 'ismeretlen kliens')
+        if sock == self.active_client:
+            self.deactivate_kvm(switch_monitor=self.switch_monitor, reason='client_disconnect')
+            self.active_client = None
+        self.status_update.emit(f"Kliens bontva: {name}")
