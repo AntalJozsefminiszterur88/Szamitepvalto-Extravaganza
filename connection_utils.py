@@ -416,6 +416,8 @@ class ConnectionMixin:
                 self.deactivate_kvm(reason="all clients disconnected")
             logging.debug("monitor_client exit for %s", client_name)
     def run_client(self):
+        """Run the client mode with persistent discovery and reconnect logic."""
+
         class ServiceListener:
             def __init__(self, worker):
                 self.worker = worker
@@ -426,37 +428,44 @@ class ConnectionMixin:
                     ip = socket.inet_ntoa(info.addresses[0])
                     if ip == self.worker.local_ip:
                         return  # ignore our own service
-                    self.worker.server_ip = ip
-                    self.worker.last_server_ip = ip  # remember last found host
+                    self.worker.last_server_ip = ip
+                    settings_store = QSettings(ORG_NAME, APP_NAME)
+                    settings_store.setValue('network/last_server_ip', ip)
                     logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
                     self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
-                # Connection thread runs continuously, just update the server IP
+
             def update_service(self, zc, type, name):
                 pass
+
             def remove_service(self, zc, type, name):
-                self.worker.server_ip = None
-                self.worker.status_update.emit("Az Adó szolgáltatás eltűnt, újra keresem...")
                 logging.warning("Adó szolgáltatás eltűnt.")
 
-        settings_store = QSettings(ORG_NAME, APP_NAME)
+        # Start Zeroconf discovery
+        ServiceBrowser(self.zeroconf, SERVICE_TYPE, ServiceListener(self))
+        self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
 
-        # Start connection thread immediately using stored last IP if available
-        if self.last_server_ip and not self.server_ip:
-            self.server_ip = self.last_server_ip
+        # Start background reconnect loop
         if not self.connection_thread:
             self.connection_thread = threading.Thread(
-                target=self.connect_to_server,
+                target=self._reconnect_loop,
                 daemon=True,
-                name="ConnectThread",
+                name="ReconnectThread",
             )
             self.connection_thread.start()
 
-        browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, ServiceListener(self))
-        self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
+        # Keep the method alive
         while self._running:
             time.sleep(0.5)
 
-    def connect_to_server(self):
+    def _reconnect_loop(self):
+        """Background task that keeps the server connection alive."""
+        while self._running:
+            if not self.server_socket and self.last_server_ip:
+                self.connect_to_server(self.last_server_ip, self.settings['port'])
+            time.sleep(2)
+
+    def connect_to_server(self, ip: str, port: int) -> None:
+        """Attempt a single connection to the specified server."""
         mouse_controller = mouse.Controller()
         keyboard_controller = keyboard.Controller()
         pressed_keys = set()
@@ -466,293 +475,283 @@ class ConnectionMixin:
             'middle': mouse.Button.middle,
         }
         hk_listener = None
+        hb_thread = None
 
-        while self._running:
-            ip = self.server_ip or self.last_server_ip
-            if not ip:
-                time.sleep(0.5)
-                continue
+        logging.debug(
+            "connect_to_server attempting to connect to %s cancel=%s",
+            ip,
+            self._cancel_transfer.is_set(),
+        )
 
-            hb_thread = None  # Ensure heartbeat thread variable is always defined
-
-            logging.debug(
-                "connect_to_server attempting to connect to %s cancel=%s",
-                ip,
-                self._cancel_transfer.is_set(),
-            )
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.settimeout(5.0)
+            logging.info(f"Connecting to {ip}:{port}")
+            s.connect((ip, port))
+            s.settimeout(None)
+            self.server_socket = s
+            self.server_ip = ip
+            settings_store = QSettings(ORG_NAME, APP_NAME)
+            settings_store.setValue('network/last_server_ip', ip)
+            self.last_server_ip = ip
+            incoming_info = None
+            self._cancel_transfer.clear()
+            logging.debug("Connected to server, cancel flag cleared")
+            logging.debug("Cancel flag state at connect: %s", self._cancel_transfer.is_set())
 
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    s.settimeout(5.0)
-                    logging.info(f"Connecting to {ip}:{self.settings['port']}")
-                    s.connect((ip, self.settings['port']))
-                    s.settimeout(None)
-                    self.server_socket = s
-                    settings_store = QSettings(ORG_NAME, APP_NAME)
-                    settings_store.setValue('network/last_server_ip', ip)
-                    self.last_server_ip = ip
-                    incoming_info = None
-                    self._cancel_transfer.clear()
-                    logging.debug("Connected to server, cancel flag cleared")
-                    logging.debug("Cancel flag state at connect: %s", self._cancel_transfer.is_set())
-
-                    try:
-                        hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
-                        s.sendall(struct.pack('!I', len(hello)) + hello)
-                        logging.debug("Handshake sent to server")
-                    except Exception as e:
-                        logging.error(f"Failed to send handshake: {e}")
-
-                    self.clipboard_thread = threading.Thread(
-                        target=self._clipboard_loop_client, args=(s,), daemon=True, name="ClipboardCli"
-                    )
-                    self.clipboard_thread.start()
-
-                    logging.info("TCP kapcsolat sikeres.")
-                    self.status_update.emit("Csatlakozva. Irányítás átvéve.")
-
-                    def send_command(cmd):
-                        try:
-                            packed = msgpack.packb({'command': cmd}, use_bin_type=True)
-                            s.sendall(struct.pack('!I', len(packed)) + packed)
-                            logging.info(f"Command sent to server: {cmd}")
-                        except Exception:
-                            logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
-
-                    hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
-                    hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
-
-                    client_pressed_special_keys = set()
-                    client_pressed_vk_codes = set()
-
-                    def hk_press(key):
-                        try:
-                            client_pressed_vk_codes.add(key.vk)
-                        except AttributeError:
-                            client_pressed_special_keys.add(key)
-
-                        combined_pressed = client_pressed_special_keys.union(
-                            {keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes}
-                        )
-
-                        if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
-                            logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
-                            send_command('switch_elitedesk')
-
-                    def hk_release(key):
-                        try:
-                            client_pressed_vk_codes.discard(key.vk)
-                        except AttributeError:
-                            client_pressed_special_keys.discard(key)
-
-                    hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
-                    hk_listener.start()
-
-                    last_event_time = time.time()
-                    last_warning = 0
-                    hb_thread = None
-
-                    def heartbeat():
-                        nonlocal last_warning
-                        while self._running and self.server_ip == ip:
-                            if time.time() - last_event_time > 2:
-                                if time.time() - last_warning > 2:
-                                    logging.warning("No input events received for over 2 seconds")
-                                    last_warning = time.time()
-                            time.sleep(1)
-
-                    hb_thread = threading.Thread(target=heartbeat, daemon=True, name="HeartbeatThread")
-                    hb_thread.start()
-
-                    def recv_all(sock, n):
-                        data = b''
-                        while len(data) < n:
-                            chunk = sock.recv(n - len(data))
-                            if not chunk:
-                                return None
-                            data += chunk
-                        return data
-
-                    while self._running and self.server_ip == ip:
-                        logging.debug(
-                            "connect_to_server recv loop. cancel=%s received=%d",
-                            self._cancel_transfer.is_set(),
-                            incoming_info['received'] if incoming_info else 0,
-                        )
-                        raw_len = recv_all(s, 4)
-                        if not raw_len:
-                            break
-                        msg_len = struct.unpack('!I', raw_len)[0]
-                        payload = recv_all(s, msg_len)
-                        if payload is None:
-                            break
-                        try:
-                            data = msgpack.unpackb(payload, raw=False)
-                            last_event_time = time.time()
-                            event_type = data.get('type')
-                            if event_type == 'move_relative':
-                                mouse_controller.move(data['dx'], data['dy'])
-                            elif event_type == 'click':
-                                b = button_map.get(data['button'])
-                                if b:
-                                    (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
-                            elif event_type == 'scroll':
-                                mouse_controller.scroll(data['dx'], data['dy'])
-                            elif event_type == 'key':
-                                k_info = data['key']
-                                if data['key_type'] == 'char':
-                                    k_press = k_info
-                                elif data['key_type'] == 'special':
-                                    k_press = getattr(keyboard.Key, k_info, None)
-                                elif data['key_type'] == 'vk':
-                                    k_press = keyboard.KeyCode.from_vk(int(k_info))
-                                else:
-                                    k_press = None
-                                if k_press:
-                                    if data['pressed']:
-                                        keyboard_controller.press(k_press)
-                                        pressed_keys.add(k_press)
-                                    else:
-                                        keyboard_controller.release(k_press)
-                                        pressed_keys.discard(k_press)
-                            elif event_type == 'clipboard_text':
-                                text = data.get('text', '')
-                                if text != self.last_clipboard:
-                                    self._set_clipboard(text)
-                            elif event_type == 'file_metadata':
-                                temp_dir_for_download = self._get_temp_dir()
-                                incoming_tmp = os.path.join(temp_dir_for_download, data['name'])
-                                self._cancel_transfer.clear()
-                                logging.debug("Receiving file, cancel flag cleared")
-                                try:
-                                    incoming_file = open(incoming_tmp, 'wb')
-                                except Exception as e:
-                                    logging.error('Failed to open receive file: %s', e, exc_info=True)
-                                    self.file_transfer_error.emit(str(e))
-                                    break
-                                s.settimeout(TRANSFER_TIMEOUT)
-                                incoming_info = {
-                                    'path': incoming_tmp,
-                                    'dest': data['dest'],
-                                    'size': data['size'],
-                                    'name': data['name'],
-                                    'file': incoming_file,
-                                    'received': 0,
-                                    'source_id': data.get('source_id', self.device_name),
-                                    'temp_dir': temp_dir_for_download,
-                                    'start_time': time.time(),
-                                }
-                                last_percentage = -1
-                                last_emit_time = time.time()
-                                self.update_progress_display.emit(0, f"{incoming_info['name']}: 0MB / {incoming_info['size']/1024/1024:.1f}MB")
-                            elif event_type == 'file_chunk':
-                                if incoming_info:
-                                    try:
-                                        incoming_info['file'].write(data['data'])
-                                        incoming_info['received'] += len(data['data'])
-                                        current_percentage = int((incoming_info['received'] / incoming_info['size']) * 100) if incoming_info['size'] > 0 else 0
-                                        if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
-                                            elapsed_time = time.time() - incoming_info['start_time']
-                                            speed_mbps = (incoming_info['received'] / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
-                                            remaining_bytes = incoming_info['size'] - incoming_info['received']
-                                            etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
-                                            etr_str = time.strftime('%M:%S', time.gmtime(etr_seconds)) if etr_seconds < 3600 else time.strftime('%H:%M:%S', time.gmtime(etr_seconds))
-
-                                            label = f"{incoming_info['name']}: {incoming_info['received']/1024/1024:.1f}MB / {incoming_info['size']/1024/1024:.1f}MB\n"
-                                            label += f"Sebesség: {speed_mbps:.1f} MB/s | Hátralévő idő: {etr_str}"
-                                            self.update_progress_display.emit(current_percentage, label)
-                                            last_percentage = current_percentage
-                                            last_emit_time = time.time()
-                                        if self._cancel_transfer.is_set():
-                                            break
-                                    except Exception as e:
-                                        logging.error('Receive error: %s', e, exc_info=True)
-                                        self.file_transfer_error.emit(str(e))
-                                        self._cancel_transfer.set()
-                                        break
-                            elif event_type == 'file_end':
-                                if incoming_info:
-                                    incoming_info['file'].close()
-                                    try:
-                                        self._safe_extract_archive(incoming_info['path'], incoming_info['dest'])
-                                    finally:
-                                        shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
-                                    self._send_message(s, {'type': 'paste_success', 'source_id': incoming_info.get('source_id')})
-                                    s.settimeout(None)
-                                    final_label = f"{incoming_info['name']}: Kész! ({incoming_info['size']/1024/1024:.1f}MB)"
-                                    self.update_progress_display.emit(100, final_label)
-                                    incoming_info = None
-                                    self._cancel_transfer.clear()
-                                    logging.debug("Download finished, cancel flag cleared")
-                            elif event_type == 'delete_source':
-                                for pth in data.get('paths', []):
-                                    try:
-                                        if os.path.isdir(pth):
-                                            shutil.rmtree(pth)
-                                        else:
-                                            os.remove(pth)
-                                    except Exception as e:
-                                        logging.error('Failed to delete %s: %s', pth, e)
-                        except Exception:
-                            logging.warning("Hibás adatcsomag")
-
-                        if self._cancel_transfer.is_set():
-                            if incoming_info:
-                                try:
-                                    incoming_info['file'].close()
-                                except Exception:
-                                    pass
-                                if incoming_info.get('temp_dir'):
-                                    shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
-                                incoming_info = None
-                            s.settimeout(None)
-                            self._cancel_transfer.clear()
-                            logging.debug("Download canceled or finished, cancel flag cleared")
-
+                hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
+                s.sendall(struct.pack('!I', len(hello)) + hello)
+                logging.debug("Handshake sent to server")
             except Exception as e:
-                if self._running:
-                    logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-                    self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás 5 mp múlva...")
+                logging.error(f"Failed to send handshake: {e}")
 
-            finally:
-                logging.info("Connection to server closed")
-                if hb_thread is not None:
-                    try:
-                        hb_thread.join(timeout=0.1)
-                    except Exception:
-                        pass
-                if self.clipboard_thread is not None:
-                    try:
-                        self.clipboard_thread.join(timeout=0.1)
-                    except Exception:
-                        pass
-                for k in list(pressed_keys):
-                    try:
-                        keyboard_controller.release(k)
-                    except Exception:
-                        pass
-                if hk_listener is not None:
-                    try:
-                        hk_listener.stop()
-                    except Exception:
-                        pass
-                self.release_hotkey_keys()
-                if incoming_info and incoming_info.get('temp_dir'):
-                    logging.warning(
-                        "Cleaning up incomplete download directory: %s",
-                        incoming_info['temp_dir'],
-                    )
-                    try:
-                        incoming_info['file'].close()
-                    except Exception:
-                        pass
-                    shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
-                incoming_info = None
-                self._cancel_transfer.clear()
-                self.server_socket = None
-                if self._running:
-                    logging.info("Újracsatlakozási kísérlet 5 másodperc múlva...")
-                    time.sleep(5)
-                logging.debug("connect_to_server loop ended")
+            self.clipboard_thread = threading.Thread(
+                target=self._clipboard_loop_client, args=(s,), daemon=True, name="ClipboardCli"
+            )
+            self.clipboard_thread.start()
+
+            logging.info("TCP kapcsolat sikeres.")
+            self.status_update.emit("Csatlakozva. Irányítás átvéve.")
+
+            def send_command(cmd):
+                try:
+                    packed = msgpack.packb({'command': cmd}, use_bin_type=True)
+                    s.sendall(struct.pack('!I', len(packed)) + packed)
+                    logging.info(f"Command sent to server: {cmd}")
+                except Exception:
+                    logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
+
+            hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
+            hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
+
+            client_pressed_special_keys = set()
+            client_pressed_vk_codes = set()
+
+            def hk_press(key):
+                try:
+                    client_pressed_vk_codes.add(key.vk)
+                except AttributeError:
+                    client_pressed_special_keys.add(key)
+
+                combined_pressed = client_pressed_special_keys.union(
+                    {keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes}
+                )
+
+                if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
+                    logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
+                    send_command('switch_elitedesk')
+
+            def hk_release(key):
+                try:
+                    client_pressed_vk_codes.discard(key.vk)
+                except AttributeError:
+                    client_pressed_special_keys.discard(key)
+
+            hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
+            hk_listener.start()
+
+            last_event_time = time.time()
+            last_warning = 0
+
+            def heartbeat():
+                nonlocal last_warning
+                while self._running and self.server_socket is s:
+                    if time.time() - last_event_time > 2:
+                        if time.time() - last_warning > 2:
+                            logging.warning("No input events received for over 2 seconds")
+                            last_warning = time.time()
+                    time.sleep(1)
+
+            hb_thread = threading.Thread(target=heartbeat, daemon=True, name="HeartbeatThread")
+            hb_thread.start()
+
+            def recv_all(sock, n):
+                data = b''
+                while len(data) < n:
+                    chunk = sock.recv(n - len(data))
+                    if not chunk:
+                        return None
+                    data += chunk
+                return data
+
+            while self._running and self.server_socket is s:
+                logging.debug(
+                    "connect_to_server recv loop. cancel=%s received=%d",
+                    self._cancel_transfer.is_set(),
+                    incoming_info['received'] if incoming_info else 0,
+                )
+                raw_len = recv_all(s, 4)
+                if not raw_len:
+                    break
+                msg_len = struct.unpack('!I', raw_len)[0]
+                payload = recv_all(s, msg_len)
+                if payload is None:
+                    break
+                try:
+                    data = msgpack.unpackb(payload, raw=False)
+                    last_event_time = time.time()
+                    event_type = data.get('type')
+                    if event_type == 'move_relative':
+                        mouse_controller.move(data['dx'], data['dy'])
+                    elif event_type == 'click':
+                        b = button_map.get(data['button'])
+                        if b:
+                            (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
+                    elif event_type == 'scroll':
+                        mouse_controller.scroll(data['dx'], data['dy'])
+                    elif event_type == 'key':
+                        k_info = data['key']
+                        if data['key_type'] == 'char':
+                            k_press = k_info
+                        elif data['key_type'] == 'special':
+                            k_press = getattr(keyboard.Key, k_info, None)
+                        elif data['key_type'] == 'vk':
+                            k_press = keyboard.KeyCode.from_vk(int(k_info))
+                        else:
+                            k_press = None
+                        if k_press:
+                            if data['pressed']:
+                                keyboard_controller.press(k_press)
+                                pressed_keys.add(k_press)
+                            else:
+                                keyboard_controller.release(k_press)
+                                pressed_keys.discard(k_press)
+                    elif event_type == 'clipboard_text':
+                        text = data.get('text', '')
+                        if text != self.last_clipboard:
+                            self._set_clipboard(text)
+                    elif event_type == 'file_metadata':
+                        temp_dir_for_download = self._get_temp_dir()
+                        incoming_tmp = os.path.join(temp_dir_for_download, data['name'])
+                        self._cancel_transfer.clear()
+                        logging.debug("Receiving file, cancel flag cleared")
+                        try:
+                            incoming_file = open(incoming_tmp, 'wb')
+                        except Exception as e:
+                            logging.error('Failed to open receive file: %s', e, exc_info=True)
+                            self.file_transfer_error.emit(str(e))
+                            break
+                        s.settimeout(TRANSFER_TIMEOUT)
+                        incoming_info = {
+                            'path': incoming_tmp,
+                            'dest': data['dest'],
+                            'size': data['size'],
+                            'name': data['name'],
+                            'file': incoming_file,
+                            'received': 0,
+                            'source_id': data.get('source_id', self.device_name),
+                            'temp_dir': temp_dir_for_download,
+                            'start_time': time.time(),
+                        }
+                        last_percentage = -1
+                        last_emit_time = time.time()
+                        self.update_progress_display.emit(0, f"{incoming_info['name']}: 0MB / {incoming_info['size']/1024/1024:.1f}MB")
+                    elif event_type == 'file_chunk':
+                        if incoming_info:
+                            try:
+                                incoming_info['file'].write(data['data'])
+                                incoming_info['received'] += len(data['data'])
+                                current_percentage = int((incoming_info['received'] / incoming_info['size']) * 100) if incoming_info['size'] > 0 else 0
+                                if current_percentage > last_percentage or time.time() - last_emit_time > PROGRESS_UPDATE_INTERVAL:
+                                    elapsed_time = time.time() - incoming_info['start_time']
+                                    speed_mbps = (incoming_info['received'] / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
+                                    remaining_bytes = incoming_info['size'] - incoming_info['received']
+                                    etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
+                                    etr_str = time.strftime('%M:%S', time.gmtime(etr_seconds)) if etr_seconds < 3600 else time.strftime('%H:%M:%S', time.gmtime(etr_seconds))
+
+                                    label = f"{incoming_info['name']}: {incoming_info['received']/1024/1024:.1f}MB / {incoming_info['size']/1024/1024:.1f}MB\n"
+                                    label += f"Sebesség: {speed_mbps:.1f} MB/s | Hátralévő idő: {etr_str}"
+                                    self.update_progress_display.emit(current_percentage, label)
+                                    last_percentage = current_percentage
+                                    last_emit_time = time.time()
+                                if self._cancel_transfer.is_set():
+                                    break
+                            except Exception as e:
+                                logging.error('Receive error: %s', e, exc_info=True)
+                                self.file_transfer_error.emit(str(e))
+                                self._cancel_transfer.set()
+                                break
+                    elif event_type == 'file_end':
+                        if incoming_info:
+                            incoming_info['file'].close()
+                            try:
+                                self._safe_extract_archive(incoming_info['path'], incoming_info['dest'])
+                            finally:
+                                shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
+                            self._send_message(s, {'type': 'paste_success', 'source_id': incoming_info.get('source_id')})
+                            s.settimeout(None)
+                            final_label = f"{incoming_info['name']}: Kész! ({incoming_info['size']/1024/1024:.1f}MB)"
+                            self.update_progress_display.emit(100, final_label)
+                            incoming_info = None
+                            self._cancel_transfer.clear()
+                            logging.debug("Download finished, cancel flag cleared")
+                    elif event_type == 'delete_source':
+                        for pth in data.get('paths', []):
+                            try:
+                                if os.path.isdir(pth):
+                                    shutil.rmtree(pth)
+                                else:
+                                    os.remove(pth)
+                            except Exception as e:
+                                logging.error('Failed to delete %s: %s', pth, e)
+                except Exception:
+                    logging.warning("Hibás adatcsomag")
+
+                if self._cancel_transfer.is_set():
+                    if incoming_info:
+                        try:
+                            incoming_info['file'].close()
+                        except Exception:
+                            pass
+                        if incoming_info.get('temp_dir'):
+                            shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
+                        incoming_info = None
+                    s.settimeout(None)
+                    self._cancel_transfer.clear()
+                    logging.debug("Download canceled or finished, cancel flag cleared")
+
+        except Exception as e:
+            if self._running:
+                logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
+                self.status_update.emit(f"Kapcsolat sikertelen: {e}")
+
+        finally:
+            logging.info("Connection to server closed")
+            if hb_thread is not None:
+                try:
+                    hb_thread.join(timeout=0.1)
+                except Exception:
+                    pass
+            if self.clipboard_thread is not None:
+                try:
+                    self.clipboard_thread.join(timeout=0.1)
+                except Exception:
+                    pass
+            for k in list(pressed_keys):
+                try:
+                    keyboard_controller.release(k)
+                except Exception:
+                    pass
+            if hk_listener is not None:
+                try:
+                    hk_listener.stop()
+                except Exception:
+                    pass
+            self.release_hotkey_keys()
+            if incoming_info and incoming_info.get('temp_dir'):
+                logging.warning(
+                    "Cleaning up incomplete download directory: %s",
+                    incoming_info['temp_dir'],
+                )
+                try:
+                    incoming_info['file'].close()
+                except Exception:
+                    pass
+                shutil.rmtree(incoming_info['temp_dir'], ignore_errors=True)
+            incoming_info = None
+            self._cancel_transfer.clear()
+            self.server_socket = None
+            logging.debug("connect_to_server loop ended")
 
