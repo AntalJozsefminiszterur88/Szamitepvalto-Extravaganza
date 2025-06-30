@@ -163,10 +163,18 @@ class InputStreamer:
             else:
                 self.special_keys.discard(key)
 
-        # streaming hotkey to return control
-        if ((VK_NUMPAD0 in self.vk_codes and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes))
-                or {keyboard.Key.shift, keyboard.Key.insert}.issubset(self.special_keys)
-                or {keyboard.Key.shift_r, keyboard.Key.insert}.issubset(self.special_keys)):
+        logging.debug(
+            f"InputStreamer Key: {key} pressed={pressed} VKs={self.vk_codes} Specials={self.special_keys}"
+        )
+
+        if (
+            {keyboard.Key.shift, keyboard.Key.insert}.issubset(self.special_keys)
+            or {keyboard.Key.shift_r, keyboard.Key.insert}.issubset(self.special_keys)
+            or (
+                VK_NUMPAD0 in self.vk_codes
+                and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes)
+            )
+        ):
             logging.info("Streaming hotkey detected - returning to host")
             for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
                 if vk_code in self.vk_codes:
@@ -174,6 +182,40 @@ class InputStreamer:
                     self.pressed_keys.discard(('vk', vk_code))
             self.vk_codes.clear()
             self.worker.deactivate_kvm(switch_monitor=True, reason='stream hotkey')
+            return
+
+        if (
+            {keyboard.Key.shift, keyboard.Key.end}.issubset(self.special_keys)
+            or {keyboard.Key.shift_r, keyboard.Key.end}.issubset(self.special_keys)
+            or (
+                VK_NUMPAD1 in self.vk_codes
+                and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes)
+            )
+        ):
+            logging.info("Streaming hotkey detected - switch to laptop")
+            for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
+                if vk_code in self.vk_codes:
+                    self._send_event({'type': 'key', 'key_type': 'vk', 'key': vk_code, 'pressed': False})
+                    self.pressed_keys.discard(('vk', vk_code))
+            self.vk_codes.clear()
+            self.worker.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+            return
+
+        if (
+            {keyboard.Key.shift, keyboard.Key.down}.issubset(self.special_keys)
+            or {keyboard.Key.shift_r, keyboard.Key.down}.issubset(self.special_keys)
+            or (
+                VK_NUMPAD2 in self.vk_codes
+                and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes)
+            )
+        ):
+            logging.info("Streaming hotkey detected - switch to elitedesk")
+            for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
+                if vk_code in self.vk_codes:
+                    self._send_event({'type': 'key', 'key_type': 'vk', 'key': vk_code, 'pressed': False})
+                    self.pressed_keys.discard(('vk', vk_code))
+            self.vk_codes.clear()
+            self.worker.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
             return
 
         if pressed:
