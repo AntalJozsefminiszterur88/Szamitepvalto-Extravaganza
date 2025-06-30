@@ -96,7 +96,8 @@ class InputStreamer:
         self.thread.start()
 
     def stop(self):
-        self.worker.kvm_active = False
+        with self.worker.state_lock:
+            self.worker.kvm_active = False
         if self.k_listener:
             try:
                 self.k_listener.stop()
@@ -122,7 +123,8 @@ class InputStreamer:
 
     # ------------------------------------------------------------------
     def _run(self):
-        self.worker.kvm_active = True
+        with self.worker.state_lock:
+            self.worker.kvm_active = True
         self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
         self.sender_thread.start()
 
@@ -179,12 +181,13 @@ class InputStreamer:
                 break
             packed = msgpack.packb(event, use_bin_type=True)
             target_socks = []
-            if self.worker.settings['role'] == 'ado':
-                if self.worker.active_client:
-                    target_socks = [self.worker.active_client]
-            else:
-                if self.worker.server_socket:
-                    target_socks = [self.worker.server_socket]
+            with self.worker.state_lock:
+                if self.worker.settings['role'] == 'ado':
+                    if self.worker.active_client:
+                        target_socks = [self.worker.active_client]
+                else:
+                    if self.worker.server_socket:
+                        target_socks = [self.worker.server_socket]
             for sock in list(target_socks):
                 try:
                     sock.sendall(struct.pack('!I', len(packed)) + packed)

@@ -2,28 +2,25 @@ import threading
 import socket
 import logging
 
-_worker_ref = None
 
-
-def set_worker_reference(worker):
-    global _worker_ref
-    _worker_ref = worker
-
-
-def accept_connections(server_socket):
+def accept_connections(worker, server_socket):
     """Accept connections and spawn monitoring threads."""
-    while _worker_ref and _worker_ref._running:
+    while worker and worker._running:
         try:
             client_sock, addr = server_socket.accept()
         except OSError:
             break
         client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        _worker_ref.client_sockets.append(client_sock)
-        if _worker_ref.active_client is None:
-            _worker_ref.active_client = client_sock
+        with worker.state_lock:
+            worker.client_sockets.append(client_sock)
+            if worker.active_client is None:
+                worker.active_client = client_sock
         logging.info("Kliens csatlakozva: %s", addr)
-        _worker_ref.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
-        th = threading.Thread(target=_worker_ref.monitor_client, args=(client_sock, addr), daemon=True)
+        worker.status_update.emit(
+            f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
+        th = threading.Thread(
+            target=worker.monitor_client, args=(client_sock, addr), daemon=True
+        )
         th.start()
 
 
@@ -47,7 +44,7 @@ class KVMServiceListener:
             return
         logging.info("Adó szolgáltatás megtalálva: %s:%s", ip, port)
         self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
-        t = threading.Thread(target=_worker_ref.connect_to_server, args=(ip, port), daemon=True)
+        t = threading.Thread(target=self.worker.connect_to_server, args=(ip, port), daemon=True)
         self._threads[ip] = t
         t.start()
 

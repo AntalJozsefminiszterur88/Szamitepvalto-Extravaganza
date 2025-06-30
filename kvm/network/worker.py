@@ -16,7 +16,7 @@ from zeroconf import Zeroconf, ServiceInfo, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
 
-from .networking import accept_connections, KVMServiceListener, set_worker_reference
+from .networking import accept_connections, KVMServiceListener
 from ..input.input_streamer import InputStreamer
 from ..input.input_receiver import InputReceiver
 from ..input.hotkey_manager import HotkeyManager
@@ -69,7 +69,7 @@ class KVMWorker(QObject):
         self._cancel_transfer = threading.Event()
         self.switch_monitor = True
         self._reconnect_thread = None
-        set_worker_reference(self)
+        self.state_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     def stop(self):
@@ -110,7 +110,9 @@ class KVMWorker(QObject):
         self.status_update.emit("Adó üzemmód: várakozás kliensekre")
 
         self.hotkey_manager.start()
-        accept_thread = threading.Thread(target=accept_connections, args=(self.server_socket,), daemon=True)
+        accept_thread = threading.Thread(
+            target=accept_connections, args=(self, self.server_socket), daemon=True
+        )
         accept_thread.start()
 
         while self._running:
@@ -153,7 +155,9 @@ class KVMWorker(QObject):
         # thread can remain alive and will automatically retry should the
         # connection drop at any time.
         while self._running:
-            if not self.server_socket and self.last_server_ip:
+            with self.state_lock:
+                need_connect = self.server_socket is None and self.last_server_ip
+            if need_connect:
                 self.status_update.emit(
                     f"Újrakapcsolódás {self.last_server_ip}..."
                 )
@@ -161,8 +165,9 @@ class KVMWorker(QObject):
             for _ in range(5):
                 if not self._running:
                     break
-                if self.server_socket:
-                    break
+                with self.state_lock:
+                    if self.server_socket:
+                        break
                 time.sleep(1)
 
     # ------------------------------------------------------------------
@@ -180,7 +185,8 @@ class KVMWorker(QObject):
                 self._start_reconnect_loop()
             return
 
-        self.server_socket = s
+        with self.state_lock:
+            self.server_socket = s
         QSettings(ORG_NAME, APP_NAME).setValue('network/last_server_ip', ip)
         self.last_server_ip = ip
         self._send_message(s, {'device_name': self.device_name})
@@ -202,7 +208,8 @@ class KVMWorker(QObject):
                 s.close()
             except Exception:
                 pass
-            self.server_socket = None
+            with self.state_lock:
+                self.server_socket = None
             self.status_update.emit("Kapcsolat megszűnt")
             if self._running:
                 self._start_reconnect_loop()
@@ -308,7 +315,8 @@ class KVMWorker(QObject):
                     client_name = hello.get('device_name', client_name)
         except Exception:
             pass
-        self.client_infos[sock] = client_name
+        with self.state_lock:
+            self.client_infos[sock] = client_name
         self.status_update.emit(f"Kliens csatlakozva: {client_name}")
 
         incoming = None
@@ -374,17 +382,7 @@ class KVMWorker(QObject):
             if incoming:
                 incoming['file'].close()
                 shutil.rmtree(incoming.get('temp_dir', ''), ignore_errors=True)
-            try:
-                sock.close()
-            except Exception:
-                pass
-            if sock in self.client_sockets:
-                self.client_sockets.remove(sock)
-            if sock in self.client_infos:
-                del self.client_infos[sock]
-            if sock == self.active_client:
-                self.active_client = None
-            self.status_update.emit(f"Kliens bontva: {client_name}")
+            self.handle_client_disconnection(sock)
 
     # ------------------------------------------------------------------
     def _send_message(self, sock, data):
@@ -511,24 +509,31 @@ class KVMWorker(QObject):
     def toggle_client_control(self, client_name, switch_monitor=True, release_keys=True):
         if self.settings['role'] != 'ado':
             return
-        for sock, name in self.client_infos.items():
-            if name == client_name:
-                self.active_client = sock
-                break
-        else:
+        with self.state_lock:
+            for sock, name in self.client_infos.items():
+                if name == client_name:
+                    self.active_client = sock
+                    break
+            else:
+                sock = None
+        if sock is None:
             self.status_update.emit(f'Nincs ilyen kliens: {client_name}')
             return
         self.switch_monitor = switch_monitor
-        if not self.kvm_active:
+        with self.state_lock:
+            start_stream = not self.kvm_active
             self.kvm_active = True
+        if start_stream:
             self.input_streamer.start()
         self.status_update.emit(f'Irányítás átvéve: {client_name}')
 
     def deactivate_kvm(self, switch_monitor=True, reason=''):
-        if not self.kvm_active:
-            return
+        with self.state_lock:
+            if not self.kvm_active:
+                return
+            self.kvm_active = False
         self.input_streamer.stop()
-        self.kvm_active = False
+        self.input_receiver.release_pressed_keys()
         if switch_monitor:
             try:
                 with list(get_monitors())[0] as mon:
@@ -546,10 +551,15 @@ class KVMWorker(QObject):
             sock.close()
         except Exception:
             pass
-        if sock in self.client_sockets:
-            self.client_sockets.remove(sock)
-        name = self.client_infos.pop(sock, 'ismeretlen kliens')
-        if sock == self.active_client:
-            self.deactivate_kvm(switch_monitor=self.switch_monitor, reason='client_disconnect')
-            self.active_client = None
+        with self.state_lock:
+            if sock in self.client_sockets:
+                self.client_sockets.remove(sock)
+            name = self.client_infos.pop(sock, 'ismeretlen kliens')
+            was_active = sock == self.active_client
+            if was_active:
+                self.active_client = None
+        if was_active:
+            self.deactivate_kvm(
+                switch_monitor=self.switch_monitor, reason='client_disconnect'
+            )
         self.status_update.emit(f"Kliens bontva: {name}")
