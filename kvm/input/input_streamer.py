@@ -60,6 +60,9 @@ class InputStreamer:
         self.vk_codes.clear()
         self.special_keys.clear()
         self.pressed_keys.clear()
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join()
+        self.thread = None
 
     # ------------------------------------------------------------------
     def _run(self):
