@@ -40,4 +40,4 @@ def resource_path(relative_path: str) -> str:
 
 
 # Program icon path
-ICON_PATH = resource_path("keyboard_mouse_switch_icon.ico")
+ICON_PATH = resource_path(os.path.join("..", "keyboard_mouse_switch_icon.ico"))

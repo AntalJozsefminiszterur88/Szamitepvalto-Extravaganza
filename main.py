@@ -8,8 +8,8 @@ import ctypes
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
-from gui import MainWindow
-from config import ICON_PATH, APP_NAME, ORG_NAME
+from kvm.gui.gui import MainWindow
+from kvm.config import ICON_PATH, APP_NAME, ORG_NAME
 
 # A naplózást itt, a legfelső szinten állítjuk be.
 logging.basicConfig(

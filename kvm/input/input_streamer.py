@@ -10,7 +10,7 @@ import msgpack
 from pynput import mouse, keyboard
 from monitorcontrol import get_monitors
 
-from config import VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_LSHIFT, VK_RSHIFT
+from ..config import VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_LSHIFT, VK_RSHIFT
 
 STREAM_LOOP_DELAY = 0.05
 SEND_QUEUE_MAXSIZE = 200

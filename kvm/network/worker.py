@@ -17,14 +17,14 @@ import msgpack
 import pyperclip
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
-from networking import accept_connections, KVMServiceListener, set_worker_reference
+from .networking import accept_connections, KVMServiceListener, set_worker_reference
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
-from hotkey_manager import HotkeyManager
-from input_streamer import InputStreamer
-from file_sender import FileSender
-from input_receiver import InputReceiver
-from config import (
+from ..input.hotkey_manager import HotkeyManager
+from ..input.input_streamer import InputStreamer
+from .file_sender import FileSender
+from ..input.input_receiver import InputReceiver
+from ..config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
     APP_NAME,
