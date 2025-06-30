@@ -1,85 +1,107 @@
 import logging
 from pynput import keyboard
-
 from ..config import VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2
 
 
 class HotkeyManager:
-    """Listen for global hotkeys that toggle client control."""
+    """Manages global hotkeys for app control using the robust two-set detection method."""
 
     def __init__(self, worker):
         self.worker = worker
         self.listener = None
-        self.vk_codes = set()
-        self.special_keys = set()
-        self.pending_target = None
 
-        # combinations when NumLock is off (using special keys)
-        self._combo_desktop_special = {keyboard.Key.shift, keyboard.Key.insert}
-        self._combo_laptop_special = {keyboard.Key.shift, keyboard.Key.end}
-        self._combo_elitedesk_special = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_NUMPAD2)}
+        # --- Define hotkeys for BOTH NumLock states ---
 
-        # combinations when NumLock is on (using vk codes)
-        self._combo_desktop_vk = {VK_LSHIFT, VK_NUMPAD0}
-        self._combo_laptop_vk = {VK_LSHIFT, VK_NUMPAD1}
-        self._combo_elitedesk_vk = {VK_LSHIFT, VK_NUMPAD2}
+        # NumLock OFF state (uses pynput Key objects for Numpad keys)
+        self.hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
+        self.hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
+        self.hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
+        self.hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
+        self.hotkey_elitdesk_l_numoff = {keyboard.Key.shift, keyboard.Key.down}  # Common for Numpad 2
+        self.hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, keyboard.Key.down}
 
-    # ------------------------------------------------------------------
+        # NumLock ON state (uses VK codes for Numpad keys)
+        self.hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
+        self.hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
+        self.hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
+        self.hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
+        self.hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
+        self.hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
+
+        # --- State tracking with two separate sets ---
+        self.current_pressed_vk_codes = set()
+        self.current_pressed_special_keys = set()
+        self.pending_client = None
+
     def _on_press(self, key):
         try:
-            self.vk_codes.add(key.vk)
+            # Try to get a VK code first
+            self.current_pressed_vk_codes.add(key.vk)
         except AttributeError:
-            self.special_keys.add(key)
+            # If no VK code, it's a special key; store the object
+            self.current_pressed_special_keys.add(key)
 
-        if (self._combo_desktop_special.issubset(self.special_keys)
-                or self._combo_desktop_vk.issubset(self.vk_codes)
-                or {keyboard.Key.shift_r, keyboard.Key.insert}.issubset(self.special_keys)
-                or {VK_RSHIFT, VK_NUMPAD0}.issubset(self.vk_codes)):
-            logging.info("Desktop hotkey detected")
-            self.pending_target = "desktop"
-        elif (self._combo_laptop_special.issubset(self.special_keys)
-              or self._combo_laptop_vk.issubset(self.vk_codes)
-              or {keyboard.Key.shift_r, keyboard.Key.end}.issubset(self.special_keys)
-              or {VK_RSHIFT, VK_NUMPAD1}.issubset(self.vk_codes)):
-            logging.info("Laptop hotkey detected")
-            self.pending_target = "laptop"
-        elif (self._combo_elitedesk_special.issubset(self.special_keys | {
-                keyboard.Key.shift_r})
-              or self._combo_elitedesk_vk.issubset(self.vk_codes)
-              or {VK_RSHIFT, VK_NUMPAD2}.issubset(self.vk_codes)):
-            logging.info("Elitedesk hotkey detected")
-            self.pending_target = "elitedesk"
+        logging.debug(
+            "HotkeyManager Press: VKs=%s, Specials=%s",
+            self.current_pressed_vk_codes,
+            self.current_pressed_special_keys,
+        )
+
+        # --- Check both NumLock ON and OFF hotkeys ---
+        if (
+            self.hotkey_desktop_l_numoff.issubset(self.current_pressed_special_keys)
+            or self.hotkey_desktop_r_numoff.issubset(self.current_pressed_special_keys)
+            or self.hotkey_desktop_l_numon.issubset(self.current_pressed_vk_codes)
+            or self.hotkey_desktop_r_numon.issubset(self.current_pressed_vk_codes)
+        ):
+            self.pending_client = "desktop"
+        elif (
+            self.hotkey_laptop_l_numoff.issubset(self.current_pressed_special_keys)
+            or self.hotkey_laptop_r_numoff.issubset(self.current_pressed_special_keys)
+            or self.hotkey_laptop_l_numon.issubset(self.current_pressed_vk_codes)
+            or self.hotkey_laptop_r_numon.issubset(self.current_pressed_vk_codes)
+        ):
+            self.pending_client = "laptop"
+        elif (
+            self.hotkey_elitdesk_l_numoff.issubset(self.current_pressed_special_keys)
+            or self.hotkey_elitdesk_r_numoff.issubset(self.current_pressed_special_keys)
+            or self.hotkey_elitdesk_l_numon.issubset(self.current_pressed_vk_codes)
+            or self.hotkey_elitdesk_r_numon.issubset(self.current_pressed_vk_codes)
+        ):
+            self.pending_client = "elitedesk"
 
     def _on_release(self, key):
         try:
-            self.vk_codes.discard(key.vk)
+            self.current_pressed_vk_codes.discard(key.vk)
         except AttributeError:
-            self.special_keys.discard(key)
+            self.current_pressed_special_keys.discard(key)
 
-        if self.pending_target and not self.vk_codes and not self.special_keys:
-            if self.pending_target == "desktop":
+        logging.debug(
+            "HotkeyManager Release: VKs=%s, Specials=%s",
+            self.current_pressed_vk_codes,
+            self.current_pressed_special_keys,
+        )
+
+        if self.pending_client and not self.current_pressed_vk_codes and not self.current_pressed_special_keys:
+            logging.info(f"Hotkey action executed: {self.pending_client}")
+            if self.pending_client == "desktop":
                 self.worker.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
             else:
                 self.worker.toggle_client_control(
-                    self.pending_target,
-                    switch_monitor=(self.pending_target == "elitedesk"),
-                    release_keys=False,
+                    self.pending_client,
+                    switch_monitor=(self.pending_client == "elitedesk"),
+                    release_keys=False
                 )
-            self.pending_target = None
+            self.pending_client = None
 
-    # ------------------------------------------------------------------
     def start(self):
-        if not self.listener:
+        if self.listener is None:
             self.listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
             self.listener.start()
-            logging.info("Global hotkey listener started")
+            logging.info("HotkeyManager started.")
 
     def stop(self):
         if self.listener:
-            try:
-                self.listener.stop()
-            finally:
-                self.listener = None
-                self.vk_codes.clear()
-                self.special_keys.clear()
-                self.pending_target = None
+            self.listener.stop()
+            self.listener = None
+            logging.info("HotkeyManager stopped.")
