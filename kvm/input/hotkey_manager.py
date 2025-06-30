@@ -1,7 +1,7 @@
 import logging
 from pynput import keyboard
 
-from config import (
+from ..config import (
     VK_LSHIFT,
     VK_RSHIFT,
     VK_NUMPAD0,
