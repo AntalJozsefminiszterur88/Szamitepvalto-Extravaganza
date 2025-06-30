@@ -1,237 +1,136 @@
 import logging
 import queue
 import struct
+import socket
 import threading
 import time
+import tkinter
 
 import msgpack
 from pynput import keyboard, mouse
-from monitorcontrol import get_monitors
 
 from ..config import VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2
 
+# Constants for the streamer
 STREAM_LOOP_DELAY = 0.05
-
+SEND_QUEUE_MAXSIZE = 200
 
 class InputStreamer:
-    """Capture local input and forward to the remote side."""
+    """
+    Captures and sends input events during an active KVM session using a robust
+    queue-based sender and mouse warping logic.
+    """
 
     def __init__(self, worker):
         self.worker = worker
-        self.thread = None
-        self.sender_thread = None
-        self.send_queue = queue.Queue()
-        self.k_listener = None
         self.m_listener = None
-        self.vk_codes = set()
-        self.special_keys = set()
-        self.pressed_keys = set()
-        self.last_pos = None
-        self.center_x = 0
-        self.center_y = 0
-        self.host_mouse = mouse.Controller()
+        self.k_listener = None
+        self.sender_thread = None
+        self.send_queue = None
+        
+        self.host_mouse_controller = None
+        self.center_x, self.center_y = 800, 600
+        self.last_pos = {'x': 0, 'y': 0}
         self.is_warping = False
 
-    # ------------------------------------------------------------------
+        self.pressed_keys_for_release = set()
+        self.current_vks = set()
+        self.current_special_keys = set()
+        
     def start(self):
-        if self.thread and self.thread.is_alive():
+        if self.k_listener and self.k_listener.is_alive():
             return
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
 
-    def stop(self):
-        self.worker.kvm_active = False
-        if self.k_listener:
-            try:
-                self.k_listener.stop()
-            except Exception:
-                pass
-            self.k_listener = None
-        if self.m_listener:
-            try:
-                self.m_listener.stop()
-            except Exception:
-                pass
-            self.m_listener = None
-        if self.sender_thread:
-            self.send_queue.put(None)
-            self.sender_thread.join()
-            self.sender_thread = None
-        self.vk_codes.clear()
-        self.special_keys.clear()
-        self.pressed_keys.clear()
+        logging.info("Input streamer starting...")
+        
+        # --- Initialize state for a new session ---
+        self.send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
+        self.pressed_keys_for_release.clear()
+        self.current_vks.clear()
+        self.current_special_keys.clear()
 
-    # ------------------------------------------------------------------
-    def _run(self):
-        self.worker.kvm_active = True
-        self.sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
-        self.sender_thread.start()
-
-        # switch monitor if requested
-        if self.worker.switch_monitor:
-            try:
-                with list(get_monitors())[0] as mon:
-                    mon.set_input_source(self.worker.settings['monitor_codes']['client'])
-            except Exception as e:
-                logging.error("Monitor switch failed: %s", e)
-                self.worker.status_update.emit(f"Monitor hiba: {e}")
-
+        # --- Setup Mouse Warping ---
+        self.host_mouse_controller = mouse.Controller()
         try:
-            import tkinter
             root = tkinter.Tk()
             root.withdraw()
             self.center_x = root.winfo_screenwidth() // 2
             self.center_y = root.winfo_screenheight() // 2
             root.destroy()
         except Exception:
-            self.center_x, self.center_y = 800, 600
+            logging.warning("Could not get screen dimensions for mouse warping, using defaults.")
 
-        self.host_mouse.position = (self.center_x, self.center_y)
+        self.host_mouse_controller.position = (self.center_x, self.center_y)
         self.last_pos = {'x': self.center_x, 'y': self.center_y}
         self.is_warping = False
 
+        # --- Start Listeners and Sender Thread ---
+        self.sender_thread = threading.Thread(target=self._sender, daemon=True, name="SenderThread")
+        self.sender_thread.start()
+        
         self.m_listener = mouse.Listener(
-            on_move=self._on_move,
-            on_click=self._on_click,
-            on_scroll=self._on_scroll,
-            suppress=True,
+            on_move=self._on_move, on_click=self._on_click, on_scroll=self._on_scroll, suppress=True
         )
         self.k_listener = keyboard.Listener(
-            on_press=lambda k: self._on_key(k, True),
-            on_release=lambda k: self._on_key(k, False),
-            suppress=True,
+            on_press=lambda k: self._on_key(k, True), on_release=lambda k: self._on_key(k, False), suppress=True
         )
         self.m_listener.start()
         self.k_listener.start()
+        logging.info("Input streamer running.")
 
-        while self.worker.kvm_active and self.worker._running:
-            time.sleep(STREAM_LOOP_DELAY)
+    def stop(self):
+        if not self.k_listener: return
 
-        self.stop()
+        logging.info("Input streamer stopping...")
+        if self.m_listener: self.m_listener.stop()
+        if self.k_listener: self.k_listener.stop()
+        
+        # Signal sender thread to exit
+        if self.send_queue: self.send_queue.put(None)
 
-    # ------------------------------------------------------------------
-    def _sender_loop(self):
-        while self.worker.kvm_active and self.worker._running:
+        # Release any keys held down on the client
+        for ktype, kval in list(self.pressed_keys_for_release):
+            self._send_event({'type': 'key', 'key_type': ktype, 'key': kval, 'pressed': False})
+        
+        # Wait briefly for sender to process final release messages
+        if self.sender_thread: self.sender_thread.join(timeout=0.2)
+        
+        self.m_listener = None
+        self.k_listener = None
+        self.sender_thread = None
+
+    def _sender(self):
+        """Dedicated thread to send events from the queue to the active client."""
+        while self.worker.kvm_active:
             try:
-                event = self.send_queue.get(timeout=0.1)
+                event_data = self.send_queue.get(timeout=1.0)
+                if event_data is None: # Shutdown signal
+                    break
+                
+                packed_data = msgpack.packb(event_data, use_bin_type=True)
+                
+                # Send to the currently active client
+                active_sock = self.worker.active_client
+                if active_sock:
+                    try:
+                        active_sock.sendall(struct.pack('!I', len(packed_data)) + packed_data)
+                    except (socket.error, BrokenPipeError) as e:
+                        logging.warning(f"Connection to active client lost: {e}")
+                        self.worker.handle_client_disconnection(active_sock)
             except queue.Empty:
                 continue
-            if event is None:
-                break
-            packed = msgpack.packb(event, use_bin_type=True)
-            target_socks = []
-            if self.worker.settings['role'] == 'ado':
-                if self.worker.active_client:
-                    target_socks = [self.worker.active_client]
-            else:
-                if self.worker.server_socket:
-                    target_socks = [self.worker.server_socket]
-            for sock in list(target_socks):
-                try:
-                    sock.sendall(struct.pack('!I', len(packed)) + packed)
-                except Exception as e:
-                    logging.error("Failed sending event: %s", e)
+        logging.info("Sender thread has stopped.")
 
-    def _send_event(self, evt):
+    def _send_event(self, data):
+        """Puts an event dictionary into the send queue."""
+        if not self.worker.kvm_active or self.send_queue is None:
+            return
         try:
-            self.send_queue.put_nowait(evt)
+            if self.send_queue.full():
+                self.send_queue.get_nowait() # Discard oldest if full
+            self.send_queue.put_nowait(data)
         except queue.Full:
-            try:
-                self.send_queue.get_nowait()
-            except queue.Empty:
-                pass
-            self.send_queue.put_nowait(evt)
-
-    # ------------------------------------------------------------------
-    def _get_vk(self, key):
-        if hasattr(key, 'vk') and key.vk is not None:
-            return key.vk
-        if hasattr(key, 'value') and hasattr(key.value, 'vk'):
-            return key.value.vk
-        return None
-
-    def _on_key(self, key, pressed):
-        vk = self._get_vk(key)
-        if vk is not None:
-            if pressed:
-                self.vk_codes.add(vk)
-            else:
-                self.vk_codes.discard(vk)
-        if isinstance(key, keyboard.Key):
-            if pressed:
-                self.special_keys.add(key)
-            else:
-                self.special_keys.discard(key)
-
-        logging.debug(
-            f"InputStreamer Key: {key} pressed={pressed} VKs={self.vk_codes} Specials={self.special_keys}"
-        )
-
-        if (
-            {keyboard.Key.shift, keyboard.Key.insert}.issubset(self.special_keys)
-            or {keyboard.Key.shift_r, keyboard.Key.insert}.issubset(self.special_keys)
-            or (
-                VK_NUMPAD0 in self.vk_codes
-                and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes)
-            )
-        ):
-            logging.info("Streaming hotkey detected - returning to host")
-            for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
-                if vk_code in self.vk_codes:
-                    self._send_event({'type': 'key', 'key_type': 'vk', 'key': vk_code, 'pressed': False})
-                    self.pressed_keys.discard(('vk', vk_code))
-            self.vk_codes.clear()
-            self.worker.deactivate_kvm(switch_monitor=True, reason='stream hotkey')
-            return
-
-        if (
-            {keyboard.Key.shift, keyboard.Key.end}.issubset(self.special_keys)
-            or {keyboard.Key.shift_r, keyboard.Key.end}.issubset(self.special_keys)
-            or (
-                VK_NUMPAD1 in self.vk_codes
-                and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes)
-            )
-        ):
-            logging.info("Streaming hotkey detected - switch to laptop")
-            for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
-                if vk_code in self.vk_codes:
-                    self._send_event({'type': 'key', 'key_type': 'vk', 'key': vk_code, 'pressed': False})
-                    self.pressed_keys.discard(('vk', vk_code))
-            self.vk_codes.clear()
-            self.worker.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
-            return
-
-        if (
-            {keyboard.Key.shift, keyboard.Key.down}.issubset(self.special_keys)
-            or {keyboard.Key.shift_r, keyboard.Key.down}.issubset(self.special_keys)
-            or (
-                VK_NUMPAD2 in self.vk_codes
-                and (VK_LSHIFT in self.vk_codes or VK_RSHIFT in self.vk_codes)
-            )
-        ):
-            logging.info("Streaming hotkey detected - switch to elitedesk")
-            for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
-                if vk_code in self.vk_codes:
-                    self._send_event({'type': 'key', 'key_type': 'vk', 'key': vk_code, 'pressed': False})
-                    self.pressed_keys.discard(('vk', vk_code))
-            self.vk_codes.clear()
-            self.worker.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
-            return
-
-        if pressed:
-            self.pressed_keys.add(('vk', vk) if vk is not None else ('key', str(key)))
-        else:
-            self.pressed_keys.discard(('vk', vk) if vk is not None else ('key', str(key)))
-
-        if hasattr(key, 'char') and key.char is not None:
-            evt = {'type': 'key', 'key_type': 'char', 'key': key.char, 'pressed': pressed}
-        elif hasattr(key, 'name'):
-            evt = {'type': 'key', 'key_type': 'special', 'key': key.name, 'pressed': pressed}
-        elif vk is not None:
-            evt = {'type': 'key', 'key_type': 'vk', 'key': vk, 'pressed': pressed}
-        else:
-            return
-        self._send_event(evt)
+            pass # Should not happen with the get_nowait call, but as a safeguard
 
     def _on_move(self, x, y):
         if self.is_warping:
@@ -239,15 +138,47 @@ class InputStreamer:
             return
         dx = x - self.last_pos['x']
         dy = y - self.last_pos['y']
-        if dx or dy:
+        if dx != 0 or dy != 0:
             self._send_event({'type': 'move_relative', 'dx': dx, 'dy': dy})
         self.is_warping = True
-        self.host_mouse.position = (self.center_x, self.center_y)
-        self.last_pos['x'] = self.center_x
-        self.last_pos['y'] = self.center_y
+        self.host_mouse_controller.position = (self.center_x, self.center_y)
+        self.last_pos = {'x': self.center_x, 'y': self.center_y}
 
     def _on_click(self, x, y, button, pressed):
         self._send_event({'type': 'click', 'button': button.name, 'pressed': pressed})
 
     def _on_scroll(self, x, y, dx, dy):
         self._send_event({'type': 'scroll', 'dx': dx, 'dy': dy})
+
+    def _on_key(self, key, pressed):
+        # --- Hotkey detection logic (using two-set method) ---
+        try:
+            vk = key.vk
+            if pressed: self.current_vks.add(vk)
+            else: self.current_vks.discard(vk)
+        except AttributeError:
+            if pressed: self.current_special_keys.add(key)
+            else: self.current_special_keys.discard(key)
+
+        if (VK_LSHIFT in self.current_vks or VK_RSHIFT in self.current_vks) and (VK_NUMPAD0 in self.current_vks):
+            if pressed:
+                logging.info("!!! Return-to-host hotkey detected during streaming !!!")
+                self.worker.deactivate_kvm(switch_monitor=True, reason="streaming_hotkey")
+            return # Do not forward the hotkey
+
+        # --- Forward regular key events ---
+        key_type, key_val = None, None
+        if hasattr(key, "char") and key.char is not None:
+            key_type, key_val = "char", key.char
+        elif isinstance(key, keyboard.Key):
+            key_type, key_val = "special", key.name
+        elif hasattr(key, "vk"):
+            key_type, key_val = "vk", key.vk
+        else:
+            return # Unknown key
+
+        key_id = (key_type, key_val)
+        if pressed: self.pressed_keys_for_release.add(key_id)
+        else: self.pressed_keys_for_release.discard(key_id)
+        
+        self._send_event({"type": "key", "key_type": key_type, "key": key_val, "pressed": pressed})
