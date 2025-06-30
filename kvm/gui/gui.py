@@ -35,8 +35,6 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer, QStandardPaths
 from ..network.worker import KVMWorker
 from ..config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH, TEMP_DIR_PARTS
 
-MB = 1024 * 1024
-
 
 def set_autostart(enabled: bool) -> None:
     """Enable or disable autostart depending on the current platform."""
