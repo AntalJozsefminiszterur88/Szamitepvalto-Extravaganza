@@ -152,7 +152,8 @@ class KVMWorker(QObject):
         self.clipboard_thread = threading.Thread(target=self._clipboard_loop_client, args=(s,), daemon=True)
         self.clipboard_thread.start()
         self.switch_monitor = True
-        self.input_streamer.start()
+        # Avoid capturing local input on the client. The streamer is only
+        # started when the host explicitly activates a KVM session.
 
         try:
             self._client_recv_loop(s)

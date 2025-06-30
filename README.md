@@ -61,6 +61,10 @@ also retries the last known IP address. This means that whether the
 host or any receiver is powered on first, they will automatically find
 each other and connect once both sides are running.
 
+On receiver machines the local keyboard and mouse are no longer grabbed as
+soon as a connection is established. The host must explicitly activate a KVM
+session (via hotkey or the GUI) before control is transferred.
+
 The desktop acting as the host now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
