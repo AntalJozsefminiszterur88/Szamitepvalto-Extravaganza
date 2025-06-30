@@ -27,6 +27,11 @@ from config import (
     VK_LSHIFT,
     VK_RSHIFT,
 )
+from file_transfer import (
+    FILE_CHUNK_SIZE,
+    TRANSFER_TIMEOUT,
+    PROGRESS_UPDATE_INTERVAL,
+)
 
 
 class ConnectionMixin:
