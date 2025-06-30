@@ -129,8 +129,13 @@ class KVMWorker(QObject):
     def run_client(self):
         listener = KVMServiceListener(self)
         ServiceBrowser(self.zeroconf, SERVICE_TYPE, listener)
-        if self.last_server_ip:
-            self._start_reconnect_loop()
+
+        # Always keep a reconnect loop running so the client will
+        # automatically try to re-establish the connection whenever it is
+        # lost. The loop attempts to connect using the last known IP and
+        # also relies on Zeroconf events when a server becomes available.
+        self._start_reconnect_loop()
+
         self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
         while self._running:
             time.sleep(1)
@@ -143,11 +148,20 @@ class KVMWorker(QObject):
         self._reconnect_thread.start()
 
     def _reconnect_loop(self):
-        while self._running and not self.server_socket and self.last_server_ip:
-            self.status_update.emit(f"Újrakapcsolódás {self.last_server_ip}...")
-            self.connect_to_server(self.last_server_ip, self.settings['port'])
+        # Keep looping as long as the worker is running. The loop itself only
+        # attempts to reconnect when there is no active connection. This way the
+        # thread can remain alive and will automatically retry should the
+        # connection drop at any time.
+        while self._running:
+            if not self.server_socket and self.last_server_ip:
+                self.status_update.emit(
+                    f"Újrakapcsolódás {self.last_server_ip}..."
+                )
+                self.connect_to_server(self.last_server_ip, self.settings['port'])
             for _ in range(5):
-                if not self._running or self.server_socket:
+                if not self._running:
+                    break
+                if self.server_socket:
                     break
                 time.sleep(1)
 
