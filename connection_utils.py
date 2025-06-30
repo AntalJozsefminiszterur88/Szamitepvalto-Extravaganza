@@ -433,6 +433,13 @@ class ConnectionMixin:
                     settings_store.setValue('network/last_server_ip', ip)
                     logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
                     self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
+                    # Connect immediately using the simpler logic from earlier
+                    threading.Thread(
+                        target=self.worker.connect_to_server,
+                        args=(ip, self.worker.settings['port']),
+                        daemon=True,
+                        name="ConnectThread",
+                    ).start()
 
             def update_service(self, zc, type, name):
                 pass
