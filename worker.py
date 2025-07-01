@@ -39,7 +39,10 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
     )
     finished = Signal()
     status_update = Signal(str)
-    # ... other signals ...
+    update_progress_display = Signal(int, str)
+    file_transfer_error = Signal(str)
+    incoming_upload_started = Signal(str, int)
+    request_deactivation = Signal(str)
 
     def __init__(self, settings):
         super().__init__()
