@@ -210,6 +210,7 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         if listener is not None:
             try:
                 listener.stop()
+                listener.join()
             except Exception:
                 pass
             try:
