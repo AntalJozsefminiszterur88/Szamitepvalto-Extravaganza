@@ -191,10 +191,12 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         if self.kvm_active and current.startswith(target):
             logging.debug("Deactivating KVM because active client matches target")
             self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control same client")
+            self.active_client = None
             return
         if self.kvm_active:
             logging.debug("Deactivating current KVM session before switching client")
             self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control switch")
+            self.active_client = None
         if self.set_active_client_by_name(name):
             logging.debug("Activating KVM for client %s", name)
             self.activate_kvm(switch_monitor=switch_monitor)
@@ -332,15 +334,4 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
             self._host_mouse_controller = None
             self._orig_mouse_pos = None
 
-        if self.active_client not in self.client_sockets:
-            if self.active_client is not None:
-                logging.warning("Active client disconnected during deactivation")
-            else:
-                logging.debug("No active client set after deactivation")
-            if self.client_sockets:
-                self.active_client = self.client_sockets[0]
-                logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
-            else:
-                self.active_client = None
-    
-
+        # Connection state handling is now performed by toggle_client_control
