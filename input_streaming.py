@@ -79,9 +79,35 @@ def stream_inputs(worker):
                     sock.sendall(struct.pack('!I', len(packed)) + packed)
                     sock.settimeout(1.0)
                 except (socket.timeout, BlockingIOError):
-                    logging.warning("Client not reading, disconnecting %s", worker.client_infos.get(sock, sock.getpeername()))
+                    client_name = worker.client_infos.get(sock)
+                    if client_name is None:
+                        try:
+                            client_name = str(sock.getpeername())
+                        except Exception:
+                            client_name = "<unknown>"
+                    logging.warning("Client not reading, disconnecting %s", client_name)
                     to_remove.append(sock)
                 except Exception as e:
+                    try:
+                        event = msgpack.unpackb(packed, raw=False)
+                    except Exception:
+                        event = '<unpack failed>'
+                    client_name = worker.client_infos.get(sock)
+                    if client_name is None:
+                        try:
+                            client_name = str(sock.getpeername())
+                        except Exception:
+                            client_name = "<unknown>"
+                    logging.error(
+                        "Failed sending event %s to %s: %s",
+                        event,
+                        client_name,
+                        e,
+                        exc_info=True,
+                    )
+                    if event != '<unpack failed>':
+                        unsent_events.append(event)
+                    to_remove.append(sock)
                     try:
                         event = msgpack.unpackb(packed, raw=False)
                     except Exception:
@@ -301,4 +327,3 @@ def stream_inputs(worker):
         logging.warning("Unsent or failed events: %s", unsent_events)
 
     logging.info("Streaming listenerek leálltak.")
-
