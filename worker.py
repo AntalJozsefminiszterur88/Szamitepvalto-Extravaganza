@@ -49,7 +49,7 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'network_file_clipboard', '_cancel_transfer', 'last_server_ip',
-        'clipboard_lock'
+        'clipboard_lock', 'hotkey_listener'
     )
 
     finished = Signal()
@@ -88,6 +88,7 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self._cancel_transfer = threading.Event()
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
+        self.hotkey_listener = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -104,6 +105,118 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
                 kc.release(k)
             except Exception:
                 pass
+
+    def _start_hotkey_listener(self):
+        """Start the idle hotkey listener for client switching."""
+        if self.hotkey_listener is not None:
+            return
+
+        # Definitions for NumLock OFF state based on diagnostic results
+        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
+        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
+        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
+        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
+        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
+        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
+
+        # Definitions for NumLock ON state (fallback using VK codes)
+        hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
+        hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
+        hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
+        hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
+        hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
+        hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
+
+        current_pressed_vk_codes = set()
+        current_pressed_special_keys = set()
+        pending_client = None
+
+        def on_press(key):
+            nonlocal pending_client
+            try:
+                current_pressed_vk_codes.add(key.vk)
+            except AttributeError:
+                current_pressed_special_keys.add(key)
+
+            logging.debug(
+                f"Key pressed: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
+            )
+
+            if (
+                hotkey_desktop_l_numoff.issubset(current_pressed_special_keys)
+                or hotkey_desktop_r_numoff.issubset(current_pressed_special_keys)
+            ) or (
+                hotkey_desktop_l_numon.issubset(current_pressed_vk_codes)
+                or hotkey_desktop_r_numon.issubset(current_pressed_vk_codes)
+            ):
+                logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
+                pending_client = 'desktop'
+            elif (
+                hotkey_laptop_l_numoff.issubset(current_pressed_special_keys)
+                or hotkey_laptop_r_numoff.issubset(current_pressed_special_keys)
+            ) or (
+                hotkey_laptop_l_numon.issubset(current_pressed_vk_codes)
+                or hotkey_laptop_r_numon.issubset(current_pressed_vk_codes)
+            ):
+                logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
+                pending_client = 'laptop'
+            elif (
+                hotkey_elitdesk_l_numoff.issubset(
+                    current_pressed_special_keys.union(current_pressed_vk_codes)
+                )
+                or hotkey_elitdesk_r_numoff.issubset(
+                    current_pressed_special_keys.union(current_pressed_vk_codes)
+                )
+            ) or (
+                hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes)
+                or hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes)
+            ):
+                logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
+                pending_client = 'elitedesk'
+
+        def on_release(key):
+            nonlocal pending_client
+            try:
+                current_pressed_vk_codes.discard(key.vk)
+            except AttributeError:
+                current_pressed_special_keys.discard(key)
+
+            logging.debug(
+                f"Key released: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
+            )
+
+            if pending_client and not current_pressed_vk_codes and not current_pressed_special_keys:
+                logging.info(f"Hotkey action executed: {pending_client}")
+                if pending_client == 'desktop':
+                    self.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
+                else:
+                    self.toggle_client_control(
+                        pending_client,
+                        switch_monitor=(pending_client == 'elitedesk'),
+                        release_keys=False,
+                    )
+                pending_client = None
+
+        self.hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self.pynput_listeners.append(self.hotkey_listener)
+        self.hotkey_listener.start()
+        logging.info("Gyorsbillentyű figyelő elindítva.")
+
+    def _stop_hotkey_listener(self):
+        """Stop the idle hotkey listener if running."""
+        listener = getattr(self, 'hotkey_listener', None)
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
+            try:
+                self.pynput_listeners.remove(listener)
+            except ValueError:
+                pass
+            self.hotkey_listener = None
+            self.release_hotkey_keys()
+            logging.info("Gyorsbillentyű figyelő leállítva.")
 
     # ------------------------------------------------------------------
     # Clipboard utilities
@@ -308,6 +421,7 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self.kvm_active = True
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
+        self._stop_hotkey_listener()
         self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
         self.streaming_thread.start()
         logging.debug("Streaming thread started")
@@ -346,6 +460,10 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
 
+        if self.streaming_thread and self.streaming_thread.is_alive():
+            self.streaming_thread.join(timeout=1)
+        self.streaming_thread = None
+
         # A monitor visszaváltást a toggle metódus végzi, miután a streaming szál leállt
         switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
         if switch:
@@ -371,3 +489,5 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
             self._orig_mouse_pos = None
 
         # Connection state handling is now performed by toggle_client_control
+        if self._running:
+            self._start_hotkey_listener()

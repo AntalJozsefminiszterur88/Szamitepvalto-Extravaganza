@@ -60,100 +60,13 @@ class ConnectionMixin:
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        # Definitions for NumLock OFF state based on diagnostic results
-        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
-        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
-        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
-        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
-        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
-        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
-
-        # Definitions for NumLock ON state (fallback using VK codes)
-        hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
-        hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
-        hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
-        hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
-        hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
-        hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
-
-        current_pressed_vk_codes = set()
-        current_pressed_special_keys = set()
-        pending_client = None
-
-        def on_press(key):
-            nonlocal pending_client
-            try:
-                current_pressed_vk_codes.add(key.vk)
-            except AttributeError:
-                current_pressed_special_keys.add(key)
-
-            logging.debug(
-                f"Key pressed: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
-            )
-
-            if (
-                hotkey_desktop_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_desktop_r_numoff.issubset(current_pressed_special_keys)
-            ) or (
-                hotkey_desktop_l_numon.issubset(current_pressed_vk_codes)
-                or hotkey_desktop_r_numon.issubset(current_pressed_vk_codes)
-            ):
-                logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
-                pending_client = 'desktop'
-            elif (
-                hotkey_laptop_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_laptop_r_numoff.issubset(current_pressed_special_keys)
-            ) or (
-                hotkey_laptop_l_numon.issubset(current_pressed_vk_codes)
-                or hotkey_laptop_r_numon.issubset(current_pressed_vk_codes)
-            ):
-                logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
-                pending_client = 'laptop'
-            elif (
-                hotkey_elitdesk_l_numoff.issubset(
-                    current_pressed_special_keys.union(current_pressed_vk_codes)
-                )
-                or hotkey_elitdesk_r_numoff.issubset(
-                    current_pressed_special_keys.union(current_pressed_vk_codes)
-                )
-            ) or (
-                hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes)
-                or hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes)
-            ):
-                logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
-                pending_client = 'elitedesk'
-
-        def on_release(key):
-            nonlocal pending_client
-            try:
-                current_pressed_vk_codes.discard(key.vk)
-            except AttributeError:
-                current_pressed_special_keys.discard(key)
-
-            logging.debug(
-                f"Key released: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
-            )
-
-            if pending_client and not current_pressed_vk_codes and not current_pressed_special_keys:
-                logging.info(f"Hotkey action executed: {pending_client}")
-                if pending_client == 'desktop':
-                    self.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
-                else:
-                    self.toggle_client_control(
-                        pending_client,
-                        switch_monitor=(pending_client == 'elitedesk'),
-                        release_keys=False,
-                    )
-                pending_client = None
-        
-        hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self.pynput_listeners.append(hotkey_listener)
-        hotkey_listener.start()
-        logging.info("Gyorsbillentyű figyelő elindítva.")
+        # Hotkey listener is managed by KVMWorker
+        self._start_hotkey_listener()
 
         while self._running:
             time.sleep(0.5)
-        
+
+        self._stop_hotkey_listener()
         logging.info("Adó szolgáltatás leállt.")
 
     def accept_connections(self):
