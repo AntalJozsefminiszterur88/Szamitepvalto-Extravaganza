@@ -92,17 +92,9 @@ def stream_inputs(worker):
                         unsent_events.append(event)
                     to_remove.append(sock)
             for s in to_remove:
-                try:
-                    s.close()
-                except Exception:
-                    pass
-                if s in worker.client_sockets:
-                    worker.client_sockets.remove(s)
-                if s in worker.client_infos:
-                    del worker.client_infos[s]
                 if s == worker.active_client:
-                    worker.active_client = None
                     active_lost = True
+                worker._remove_client(s, reason="send failed or timeout")
             if active_lost:
                 worker.status_update.emit("Kapcsolat megszakadt. Várakozás új kliensre...")
             if to_remove and not worker.client_sockets:

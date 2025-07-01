@@ -146,6 +146,30 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
             except Exception as e:
                 logging.error("Failed to broadcast message: %s", e)
 
+    def _remove_client(self, sock, reason: str = "") -> None:
+        """Safely remove a client socket and update state."""
+        client_name = self.client_infos.get(sock, str(sock))
+        if reason:
+            logging.info("Removing client %s: %s", client_name, reason)
+        else:
+            logging.info("Removing client %s", client_name)
+        try:
+            sock.close()
+        except Exception as e:
+            logging.error("Error closing client socket %s: %s", client_name, e)
+        if sock in self.client_sockets:
+            self.client_sockets.remove(sock)
+        if sock in self.client_infos:
+            del self.client_infos[sock]
+        if sock == self.active_client:
+            self.active_client = None
+            if self.kvm_active:
+                self.deactivate_kvm(
+                    reason=reason or "active client disconnected"
+                )
+        if not self.client_sockets and self.kvm_active:
+            self.deactivate_kvm(reason="all clients disconnected")
+
     # ------------------------------------------------------------------
     # Clipboard synchronization
     # ------------------------------------------------------------------

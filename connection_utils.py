@@ -397,10 +397,6 @@ class ConnectionMixin:
                     break
         finally:
             logging.warning(f"Kliens lecsatlakozott: {addr}.")
-            try:
-                sock.close()
-            except Exception:
-                pass
             if upload_info and upload_info.get('temp_dir'):
                 logging.warning("Cleaning up incomplete download directory: %s", upload_info['temp_dir'])
                 try:
@@ -411,14 +407,7 @@ class ConnectionMixin:
             upload_info = None
             self._cancel_transfer.clear()
             self._clear_network_file_clipboard()
-            if sock in self.client_sockets:
-                self.client_sockets.remove(sock)
-            if sock in self.client_infos:
-                del self.client_infos[sock]
-            if sock == self.active_client:
-                self.active_client = None
-            if self.kvm_active and not self.client_sockets:
-                self.deactivate_kvm(reason="all clients disconnected")
+            self._remove_client(sock, reason="connection lost or error")
             logging.debug("monitor_client exit for %s", client_name)
     def run_client(self):
         """Run the client mode with persistent discovery and reconnect logic."""
