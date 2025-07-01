@@ -189,39 +189,51 @@ def stream_inputs(worker):
             if (
                 hotkey_desktop_l_numoff.issubset(current_special_keys)
                 or hotkey_desktop_r_numoff.issubset(current_special_keys)
-                or ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD0 in current_vks)
+                or (
+                    (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
+                    and VK_NUMPAD0 in current_vks
+                )
             ):
                 for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
                     if vk_code in current_vks:
                         send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                         pressed_keys.discard(("vk", vk_code))
                 current_vks.clear()
+                logging.info("Streaming hotkey detected: desktop -> deactivating KVM")
                 worker.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
                 return
 
             if (
                 hotkey_laptop_l_numoff.issubset(current_special_keys)
                 or hotkey_laptop_r_numoff.issubset(current_special_keys)
-                or ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD1 in current_vks)
+                or (
+                    (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
+                    and VK_NUMPAD1 in current_vks
+                )
             ):
                 for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
                     if vk_code in current_vks:
                         send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                         pressed_keys.discard(("vk", vk_code))
                 current_vks.clear()
+                logging.info("Streaming hotkey detected: laptop -> toggling control")
                 worker.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
                 return
 
             if (
                 hotkey_elitdesk_l_numoff.issubset(current_special_keys.union(current_vks))
                 or hotkey_elitdesk_r_numoff.issubset(current_special_keys.union(current_vks))
-                or ((VK_LSHIFT in current_vks or VK_RSHIFT in current_vks) and VK_NUMPAD2 in current_vks)
+                or (
+                    (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
+                    and VK_NUMPAD2 in current_vks
+                )
             ):
                 for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
                     if vk_code in current_vks:
                         send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                         pressed_keys.discard(("vk", vk_code))
                 current_vks.clear()
+                logging.info("Streaming hotkey detected: elitedesk -> toggling control")
                 worker.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
                 return
 
