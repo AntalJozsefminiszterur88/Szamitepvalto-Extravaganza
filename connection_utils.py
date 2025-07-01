@@ -250,8 +250,12 @@ class ConnectionMixin:
                                 self.toggle_client_control('laptop', switch_monitor=False)
                             elif data.get('type') == 'clipboard_text':
                                 text = data.get('text', '')
-                                if text != self.last_clipboard:
-                                    self._set_clipboard(text)
+                                broadcast = False
+                                with self.clipboard_lock:
+                                    if text != self.last_clipboard:
+                                        self._set_clipboard(text)
+                                        broadcast = True
+                                if broadcast:
                                     self._broadcast_message(data, exclude=sock)
                             elif data.get('type') == 'paste_request':
                                 dest = data.get('destination')
@@ -632,8 +636,9 @@ class ConnectionMixin:
                                 pressed_keys.discard(k_press)
                     elif event_type == 'clipboard_text':
                         text = data.get('text', '')
-                        if text != self.last_clipboard:
-                            self._set_clipboard(text)
+                        with self.clipboard_lock:
+                            if text != self.last_clipboard:
+                                self._set_clipboard(text)
                     elif event_type == 'file_metadata':
                         temp_dir_for_download = self._get_temp_dir()
                         incoming_tmp = os.path.join(temp_dir_for_download, data['name'])

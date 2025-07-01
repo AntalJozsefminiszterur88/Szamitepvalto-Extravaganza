@@ -48,7 +48,8 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
-        'network_file_clipboard', '_cancel_transfer', 'last_server_ip'
+        'network_file_clipboard', '_cancel_transfer', 'last_server_ip',
+        'clipboard_lock'
     )
 
     finished = Signal()
@@ -80,6 +81,7 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self.device_name = settings.get('device_name', socket.gethostname())
         self.clipboard_thread = None
         self.last_clipboard = ""
+        self.clipboard_lock = threading.Lock()
         self.server_socket = None
         self.network_file_clipboard = None
         logging.debug("Network file clipboard cleared")
@@ -108,19 +110,21 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
     # ------------------------------------------------------------------
     def _set_clipboard(self, text: str) -> None:
         """Safely set the system clipboard."""
-        try:
-            pyperclip.copy(text)
-            self.last_clipboard = text
-        except Exception as e:
-            logging.error("Failed to set clipboard: %s", e)
+        with self.clipboard_lock:
+            try:
+                pyperclip.copy(text)
+                self.last_clipboard = text
+            except Exception as e:
+                logging.error("Failed to set clipboard: %s", e)
 
     def _get_clipboard(self) -> str:
         """Safely read the system clipboard."""
-        try:
-            return pyperclip.paste()
-        except Exception as e:
-            logging.error("Failed to read clipboard: %s", e)
-            return self.last_clipboard
+        with self.clipboard_lock:
+            try:
+                return pyperclip.paste()
+            except Exception as e:
+                logging.error("Failed to read clipboard: %s", e)
+                return self.last_clipboard
 
     # ------------------------------------------------------------------
     # Network helpers
@@ -152,16 +156,24 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
     def _clipboard_loop_server(self) -> None:
         while self._running:
             text = self._get_clipboard()
-            if text != self.last_clipboard:
-                self.last_clipboard = text
+            send_needed = False
+            with self.clipboard_lock:
+                if text != self.last_clipboard:
+                    self.last_clipboard = text
+                    send_needed = True
+            if send_needed:
                 self._broadcast_message({'type': 'clipboard_text', 'text': text})
             time.sleep(0.5)
 
     def _clipboard_loop_client(self, sock) -> None:
         while self._running and self.server_socket is sock:
             text = self._get_clipboard()
-            if text != self.last_clipboard:
-                self.last_clipboard = text
+            send_needed = False
+            with self.clipboard_lock:
+                if text != self.last_clipboard:
+                    self.last_clipboard = text
+                    send_needed = True
+            if send_needed:
                 self._send_message(sock, {'type': 'clipboard_text', 'text': text})
             time.sleep(0.5)
 
