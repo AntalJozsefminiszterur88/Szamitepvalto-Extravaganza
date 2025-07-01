@@ -46,10 +46,10 @@ def stream_inputs(worker):
     except Exception:
         center_x, center_y = 800, 600
 
-    last_pos = {
-        'x': host_mouse_controller.position[0],
-        'y': host_mouse_controller.position[1],
-    }
+    # FIX: Explicitly center the mouse at the start of streaming
+    host_mouse_controller.position = (center_x, center_y)
+    # Initialize last_pos with the now-guaranteed center coordinates
+    last_pos = {'x': center_x, 'y': center_y}
     is_warping = False
 
     send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
