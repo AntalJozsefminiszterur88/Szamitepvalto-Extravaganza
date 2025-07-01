@@ -231,6 +231,8 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
 
     def run(self):
         logging.info(f"Worker elindítva {self.settings['role']} módban.")
+        # Ensure no stuck modifier keys remain from a previous run
+        self.release_hotkey_keys()
         if self.settings['role'] == 'ado':
             self.run_server()
         else:
