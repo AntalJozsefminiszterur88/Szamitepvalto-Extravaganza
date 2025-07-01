@@ -488,6 +488,7 @@ class ConnectionMixin:
         }
         hk_listener = None
         hb_thread = None
+        incoming_info = None
 
         logging.debug(
             "connect_to_server attempting to connect to %s cancel=%s",
@@ -507,7 +508,6 @@ class ConnectionMixin:
             settings_store = QSettings(ORG_NAME, APP_NAME)
             settings_store.setValue('network/last_server_ip', ip)
             self.last_server_ip = ip
-            incoming_info = None
             self._cancel_transfer.clear()
             logging.debug("Connected to server, cancel flag cleared")
             logging.debug("Cancel flag state at connect: %s", self._cancel_transfer.is_set())
