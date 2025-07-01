@@ -76,6 +76,15 @@ setting `logging.basicConfig(level=logging.DEBUG)`. Detailed information will
 then appear in the console about hotkey detection, network activity and event
 forwarding.
 
+### Troubleshooting input capture
+
+If the mouse or keyboard does not respond after connecting, the application
+might lack the necessary permissions to control input devices. On Windows run
+the program as **Administrator**. On Linux root privileges (or the appropriate
+`udev` permissions) are required, while on macOS the app must be granted
+*Accessibility* access. If listener startup fails the status bar will display an
+"Input capture error" message.
+
 ### System tray
 
 When closing the main window with the **X** button the window is automatically

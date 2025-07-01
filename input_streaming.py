@@ -249,11 +249,21 @@ def stream_inputs(worker):
             logging.error("Hiba az on_key függvényben: %s", e, exc_info=True)
             return False
 
-    m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
-    k_listener = keyboard.Listener(on_press=lambda k: on_key(k, True), on_release=lambda k: on_key(k, False), suppress=True)
+    try:
+        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
+        k_listener = keyboard.Listener(
+            on_press=lambda k: on_key(k, True),
+            on_release=lambda k: on_key(k, False),
+            suppress=True,
+        )
 
-    m_listener.start()
-    k_listener.start()
+        m_listener.start()
+        k_listener.start()
+    except Exception as e:  # pragma: no cover - depends on OS permissions
+        logging.error("Failed to start input listeners: %s", e, exc_info=True)
+        worker.status_update.emit(f"Input capture error: {e}")
+        worker.deactivate_kvm(reason="listener start failed")
+        return
 
     while worker.kvm_active and worker._running:
         time.sleep(STREAM_LOOP_DELAY)
