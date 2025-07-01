@@ -1,4 +1,4 @@
-"""KVM worker logic with deep debug logging."""
+"""Single-Listener, bomb-proof KVM worker logic."""
 
 import socket
 import time
@@ -9,9 +9,9 @@ from typing import Optional
 
 import msgpack
 import pyperclip
-from pynput import keyboard
+import tkinter
+from pynput import mouse, keyboard
 from zeroconf import Zeroconf, ServiceBrowser
-from input_streaming import stream_inputs
 from connection_utils import ConnectionMixin
 from file_transfer import FileTransferMixin
 from monitorcontrol import get_monitors
@@ -37,11 +37,10 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
 
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
-        'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
-        'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
+        'active_client', 'zeroconf', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'network_file_clipboard', '_cancel_transfer', 'last_server_ip',
-        'clipboard_lock', 'hotkey_listener'
+        'clipboard_lock', '_input_listeners'
     )
 
     finished = Signal()
@@ -59,10 +58,7 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self.client_sockets = []
         self.client_infos = {}
         self.active_client = None
-        self.pynput_listeners = []
         self.zeroconf = Zeroconf()
-        self.streaming_thread = None
-        self.switch_monitor = True
         self.local_ip = get_local_ip()
         self.server_ip = None
         self.connection_thread = None
@@ -77,19 +73,18 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self.server_socket = None
         self.network_file_clipboard = None
         self._cancel_transfer = threading.Event()
-        self._host_mouse_controller = None
-        self._orig_mouse_pos = None
-        self.hotkey_listener = None
+        self._input_listeners = []
 
     # ------------------------------------------------------------------
     # Utility methods
     # ------------------------------------------------------------------
-    def release_hotkey_keys(self):
-        """Ensure that special hotkey keys are released."""
+    def release_all_keys(self):
+        """Ensure that modifier and numpad keys are released."""
         kc = keyboard.Controller()
         keys = [
-            keyboard.Key.shift_l,
-            keyboard.Key.shift_r,
+            keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r,
+            keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r,
+            keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r,
             keyboard.KeyCode.from_vk(VK_NUMPAD0),
             keyboard.KeyCode.from_vk(VK_NUMPAD1),
             keyboard.KeyCode.from_vk(VK_NUMPAD2),
@@ -100,90 +95,148 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------
-    # Hotkey listener management
-    # ------------------------------------------------------------------
-    def _start_hotkey_listener(self):
-        logging.debug("Attempting to start idle hotkey listener...")
-        if self.hotkey_listener is not None:
-            logging.debug("Idle hotkey listener already running.")
-            return
 
-        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
-        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
-        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
-        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
-        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
-        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
+    def _input_loop(self):
+        """The single, permanent input listener loop."""
+        logging.info("--- PERMANENT INPUT LOOP STARTED ---")
 
-        hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
-        hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
-        hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
-        hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
-        hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
-        hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
+        hotkey_desktop = ({VK_LSHIFT, VK_NUMPAD0}, {keyboard.Key.shift, keyboard.Key.insert})
+        hotkey_laptop = ({VK_LSHIFT, VK_NUMPAD1}, {keyboard.Key.shift, keyboard.Key.end})
+        hotkey_elitedesk = ({VK_LSHIFT, VK_NUMPAD2}, {keyboard.Key.shift, VK_NUMPAD2})
 
-        current_pressed_vk_codes, current_pressed_special_keys, pending_client = set(), set(), None
+        current_vks, current_special = set(), set()
+        pressed_keys_forwarded = set()
+
+        try:
+            root = tkinter.Tk(); root.withdraw()
+            center_x, center_y = (root.winfo_screenwidth() // 2, root.winfo_screenheight() // 2)
+            root.destroy()
+        except Exception:
+            center_x, center_y = 800, 600
+        is_warping = False
+
+        mouse_controller = mouse.Controller()
+
+        def send(data):
+            if not self.kvm_active or not self.active_client:
+                return
+            try:
+                packed = msgpack.packb(data, use_bin_type=True)
+                message = struct.pack('!I', len(packed)) + packed
+                self.active_client.sendall(message)
+            except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                logging.error("Send failed, client disconnected: %s", e)
+                self._remove_client(self.active_client, "send failed")
+            except Exception as e:
+                logging.error("Unexpected send error: %s", e)
+
+        def on_move(x, y):
+            nonlocal is_warping
+            if self.kvm_active:
+                if is_warping:
+                    is_warping = False
+                    return
+                dx, dy = x - mouse_controller.position[0], y - mouse_controller.position[1]
+                if dx != 0 or dy != 0:
+                    send({'type': 'move_relative', 'dx': dx, 'dy': dy})
+                is_warping = True
+                mouse_controller.position = (center_x, center_y)
+
+        def on_click(x, y, button, pressed):
+            if self.kvm_active:
+                send({'type': 'click', 'button': button.name, 'pressed': pressed})
+
+        def on_scroll(x, y, dx, dy):
+            if self.kvm_active:
+                send({'type': 'scroll', 'dx': dx, 'dy': dy})
+
+        def handle_hotkey_check():
+            for vk_set, key_set in [hotkey_desktop, hotkey_laptop, hotkey_elitedesk]:
+                if vk_set.issubset(current_vks) or key_set.issubset(current_special):
+                    if vk_set == hotkey_desktop[0]:
+                        target = 'desktop'
+                    elif vk_set == hotkey_laptop[0]:
+                        target = 'laptop'
+                    else:
+                        target = 'elitedesk'
+
+                    if self.kvm_active:
+                        logging.info(f"STREAMING HOTKEY: Deactivating for target {target}")
+                        send_release_for_pressed()
+                        self.toggle_client_control(target)
+                    else:
+                        logging.info(f"IDLE HOTKEY: Activating for target {target}")
+                        self.toggle_client_control(target)
+                    return True
+            return False
+
+        def send_release_for_pressed():
+            for key_type, key_val in list(pressed_keys_forwarded):
+                send({"type": "key", "key_type": key_type, "key": key_val, "pressed": False})
+            pressed_keys_forwarded.clear()
 
         def on_press(key):
-            nonlocal pending_client
             try:
-                current_pressed_vk_codes.add(key.vk)
+                vk = key.vk
+                current_vks.add(vk)
             except AttributeError:
-                current_pressed_special_keys.add(key)
+                current_special.add(key)
 
-            if any([
-                hotkey_desktop_l_numoff.issubset(current_pressed_special_keys),
-                hotkey_desktop_r_numoff.issubset(current_pressed_special_keys),
-                hotkey_desktop_l_numon.issubset(current_pressed_vk_codes),
-                hotkey_desktop_r_numon.issubset(current_pressed_vk_codes),
-            ]):
-                pending_client = 'desktop'
-            elif any([
-                hotkey_laptop_l_numoff.issubset(current_pressed_special_keys),
-                hotkey_laptop_r_numoff.issubset(current_pressed_special_keys),
-                hotkey_laptop_l_numon.issubset(current_pressed_vk_codes),
-                hotkey_laptop_r_numon.issubset(current_pressed_vk_codes),
-            ]):
-                pending_client = 'laptop'
-            elif any([
-                hotkey_elitdesk_l_numoff.issubset(current_pressed_special_keys.union(current_pressed_vk_codes)),
-                hotkey_elitdesk_r_numoff.issubset(current_pressed_special_keys.union(current_pressed_vk_codes)),
-                hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes),
-                hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes),
-            ]):
-                pending_client = 'elitedesk'
+            if handle_hotkey_check():
+                return
+
+            if self.kvm_active:
+                if hasattr(key, "char") and key.char:
+                    key_type, key_val = "char", key.char
+                elif hasattr(key, "name"):
+                    key_type, key_val = "special", key.name
+                elif hasattr(key, "vk"):
+                    key_type, key_val = "vk", key.vk
+                else:
+                    return
+
+                key_id = (key_type, key_val)
+                if key_id not in pressed_keys_forwarded:
+                    pressed_keys_forwarded.add(key_id)
+                    send({"type": "key", "key_type": key_type, "key": key_val, "pressed": True})
 
         def on_release(key):
-            nonlocal pending_client
             try:
-                current_pressed_vk_codes.discard(key.vk)
+                vk = key.vk
+                current_vks.discard(vk)
             except AttributeError:
-                current_pressed_special_keys.discard(key)
-            if pending_client and not current_pressed_vk_codes and not current_pressed_special_keys:
-                logging.info(f"IDLE HOTKEY ACTION: {pending_client}")
-                if pending_client == 'desktop':
-                    self.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
+                current_special.discard(key)
+
+            if self.kvm_active:
+                if hasattr(key, "char") and key.char:
+                    key_type, key_val = "char", key.char
+                elif hasattr(key, "name"):
+                    key_type, key_val = "special", key.name
+                elif hasattr(key, "vk"):
+                    key_type, key_val = "vk", key.vk
                 else:
-                    self.toggle_client_control(pending_client, switch_monitor=(pending_client == 'elitedesk'))
-                pending_client = None
+                    return
 
-        self.hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self.pynput_listeners.append(self.hotkey_listener)
-        self.hotkey_listener.start()
-        logging.info("Tétlen gyorsbillentyű figyelő elindítva.")
+                key_id = (key_type, key_val)
+                if key_id in pressed_keys_forwarded:
+                    pressed_keys_forwarded.discard(key_id)
+                    send({"type": "key", "key_type": key_type, "key": key_val, "pressed": False})
 
-    def _stop_hotkey_listener(self):
-        logging.debug("Attempting to stop idle hotkey listener...")
-        if self.hotkey_listener:
-            try:
-                self.hotkey_listener.stop()
-            except Exception:
-                pass
-            if self.hotkey_listener in self.pynput_listeners:
-                self.pynput_listeners.remove(self.hotkey_listener)
-            self.hotkey_listener = None
-            logging.info("Tétlen gyorsbillentyű figyelő leállítva.")
+        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=self.kvm_active)
+        k_listener = keyboard.Listener(on_press=on_press, on_release=on_release, suppress=self.kvm_active)
+        self._input_listeners.extend([m_listener, k_listener])
+        m_listener.start(); k_listener.start()
+
+        while self._running:
+            suppress = self.kvm_active
+            if m_listener.suppress != suppress:
+                m_listener.suppress = suppress
+            if k_listener.suppress != suppress:
+                k_listener.suppress = suppress
+            time.sleep(0.1)
+
+        logging.info("--- PERMANENT INPUT LOOP STOPPED ---")
+        m_listener.stop(); k_listener.stop()
 
     # ------------------------------------------------------------------
     # Networking helpers
@@ -311,8 +364,11 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
         self._running = False
         if self.kvm_active:
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")
-        else:
-            self._stop_hotkey_listener()
+        for listener in self._input_listeners:
+            try:
+                listener.stop()
+            except Exception:
+                pass
         try:
             self.zeroconf.close()
         except Exception:
@@ -330,6 +386,8 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
     def run(self):
         logging.info(f"Worker starting in '{self.settings['role']}' mode.")
         if self.settings['role'] == 'ado':
+            input_thread = threading.Thread(target=self._input_loop, daemon=True, name="InputLoop")
+            input_thread.start()
             self.run_server()
         else:
             self.run_client()
@@ -342,49 +400,37 @@ class KVMWorker(FileTransferMixin, ConnectionMixin, QObject):
             logging.error("activate_kvm called with no active_client.")
             return
 
-        self._stop_hotkey_listener()
+        if self.kvm_active:
+            return
         self.kvm_active = True
         client_name = self.client_infos.get(self.active_client, "ismeretlen")
         self.status_update.emit(f"Állapot: Aktív - {client_name}")
         logging.info(f"KVM activated. Target: {client_name}")
 
-        self.switch_monitor = switch_monitor
-        self.streaming_thread = threading.Thread(target=stream_inputs, args=(self,), daemon=True, name="StreamingThread")
-        self.streaming_thread.start()
-        logging.debug("Streaming thread started.")
+        if switch_monitor:
+            try:
+                with list(get_monitors())[0] as monitor:
+                    monitor.set_input_source(self.settings['monitor_codes']['client'])
+            except Exception as e:
+                self.status_update.emit(f"Monitor hiba: {e}")
 
-    def deactivate_kvm(self, switch_monitor=None, *, reason: Optional[str] = None):
-        logging.debug(f"--- DEACTIVATE KVM. Reason: {reason or 'unknown'} ---")
+    def deactivate_kvm(self, switch_monitor=True, *, reason: Optional[str] = None):
+        logging.info("KVM deactivated. Reason: %s", reason or "unknown")
         if not self.kvm_active:
-            logging.debug("Deactivation requested, but KVM is already inactive.")
             return
 
         self.kvm_active = False
-        logging.info("KVM deactivated. Reason: %s", reason or "unknown")
 
-        self._stop_hotkey_listener()
-
-        if self.streaming_thread and self.streaming_thread.is_alive():
-            logging.debug("Waiting for streaming thread to stop...")
-            self.streaming_thread.join(timeout=0.5)
-            logging.debug("Streaming thread stopped.")
-
-        switch = switch_monitor if switch_monitor is not None else self.switch_monitor
-        if switch:
-            logging.debug("Switching monitor back to host.")
-            time.sleep(0.2)
+        if switch_monitor:
             try:
                 with list(get_monitors())[0] as monitor:
                     monitor.set_input_source(self.settings['monitor_codes']['host'])
             except Exception as e:
                 self.status_update.emit(f"Monitor hiba: {e}")
 
-        self.release_hotkey_keys()
+        self.release_all_keys()
         self.active_client = None
         self.status_update.emit("Állapot: Inaktív. Várakozás gyorsbillentyűre.")
-
-        if self._running:
-            self._start_hotkey_listener()
 
     # Additional methods for network/file transfer remain unchanged.
 

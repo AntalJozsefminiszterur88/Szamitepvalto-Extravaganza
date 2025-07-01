@@ -7,13 +7,13 @@ import logging
 import ctypes
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
+from PySide6.QtCore import QLockFile, QStandardPaths, QSettings, QTimer
 from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
 
 # A naplózást itt, a legfelső szinten állítjuk be.
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
@@ -60,7 +60,8 @@ if __name__ == "__main__":
     if start_hidden:
         window.hide()
         if auto_connect:
-            window.start_kvm_service()
+            # A QTimer biztosítja, hogy az eseményhurok már fusson, amikor a szolgáltatás indul
+            QTimer.singleShot(100, window.start_kvm_service)
     else:
         window.show()
     sys.exit(app.exec())

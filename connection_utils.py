@@ -56,8 +56,6 @@ class ConnectionMixin:
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        # Hotkey listener is now managed by the KVMWorker activate/deactivate logic
-        self._start_hotkey_listener()
 
         while self._running:
             time.sleep(0.5)
