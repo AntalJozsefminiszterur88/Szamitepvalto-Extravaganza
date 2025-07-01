@@ -38,13 +38,18 @@ def stream_inputs(worker):
     try:
         root = tkinter.Tk()
         root.withdraw()
-        center_x, center_y = root.winfo_screenwidth() // 2, root.winfo_screenheight() // 2
+        center_x, center_y = (
+            root.winfo_screenwidth() // 2,
+            root.winfo_screenheight() // 2,
+        )
         root.destroy()
     except Exception:
         center_x, center_y = 800, 600
 
-    host_mouse_controller.position = (center_x, center_y)
-    last_pos = {'x': center_x, 'y': center_y}
+    last_pos = {
+        'x': host_mouse_controller.position[0],
+        'y': host_mouse_controller.position[1],
+    }
     is_warping = False
 
     send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
