@@ -23,9 +23,6 @@ from config import (
     VK_NUMPAD0,
     VK_NUMPAD1,
     VK_NUMPAD2,
-    VK_F12,
-    VK_LSHIFT,
-    VK_RSHIFT,
 )
 from file_transfer import (
     FILE_CHUNK_SIZE,
@@ -392,7 +389,6 @@ class ConnectionMixin:
             'right': mouse.Button.right,
             'middle': mouse.Button.middle,
         }
-        hk_listener = None
         hb_thread = None
         incoming_info = None
 
@@ -433,42 +429,6 @@ class ConnectionMixin:
             logging.info("TCP kapcsolat sikeres.")
             self.status_update.emit("Csatlakozva. Irányítás átvéve.")
 
-            def send_command(cmd):
-                try:
-                    packed = msgpack.packb({'command': cmd}, use_bin_type=True)
-                    s.sendall(struct.pack('!I', len(packed)) + packed)
-                    logging.info(f"Command sent to server: {cmd}")
-                except Exception:
-                    logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
-
-            hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
-            hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
-
-            client_pressed_special_keys = set()
-            client_pressed_vk_codes = set()
-
-            def hk_press(key):
-                try:
-                    client_pressed_vk_codes.add(key.vk)
-                except AttributeError:
-                    client_pressed_special_keys.add(key)
-
-                combined_pressed = client_pressed_special_keys.union(
-                    {keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes}
-                )
-
-                if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
-                    logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
-                    send_command('switch_elitedesk')
-
-            def hk_release(key):
-                try:
-                    client_pressed_vk_codes.discard(key.vk)
-                except AttributeError:
-                    client_pressed_special_keys.discard(key)
-
-            hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
-            hk_listener.start()
 
             last_event_time = time.time()
             last_warning = 0
@@ -651,11 +611,6 @@ class ConnectionMixin:
             for k in list(pressed_keys):
                 try:
                     keyboard_controller.release(k)
-                except Exception:
-                    pass
-            if hk_listener is not None:
-                try:
-                    hk_listener.stop()
                 except Exception:
                     pass
             self.release_hotkey_keys()

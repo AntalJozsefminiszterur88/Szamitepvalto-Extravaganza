@@ -28,6 +28,8 @@ from config import (
     VK_NUMPAD0,
     VK_NUMPAD1,
     VK_NUMPAD2,
+    VK_LSHIFT,
+    VK_RSHIFT,
 )
 
 
