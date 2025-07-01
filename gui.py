@@ -176,6 +176,31 @@ class MainWindow(QMainWindow):
         self.init_tray_icon()
         self.load_settings()
 
+        # Clean up old temporary directories on startup
+        temp_base = self.temp_path_edit.text()
+        app_temp_suffix = os.path.join(*TEMP_DIR_PARTS)
+        if not os.path.normpath(temp_base).endswith(os.path.normpath(app_temp_suffix)):
+            app_temp_path = os.path.join(temp_base, app_temp_suffix)
+        else:
+            app_temp_path = temp_base
+
+        if os.path.isdir(app_temp_path):
+            now = time.time()
+            for entry in os.listdir(app_temp_path):
+                full_path = os.path.join(app_temp_path, entry)
+                if not os.path.isdir(full_path):
+                    continue
+                try:
+                    mtime = os.path.getmtime(full_path)
+                except OSError:
+                    continue
+                if now - mtime > 24 * 3600:
+                    try:
+                        shutil.rmtree(full_path)
+                        logging.info("Régi ideiglenes mappa törölve: %s", full_path)
+                    except Exception as e:  # noqa: BLE001
+                        logging.debug("Temp mappa törlése sikertelen %s: %s", full_path, e)
+
     def get_settings(self):
         if self.radio_desktop.isChecked():
             mode = 'ado'
