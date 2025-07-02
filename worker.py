@@ -471,6 +471,9 @@ class KVMWorker(QObject):
                                 exc_info=True,
                             )
                 except socket.timeout:
+                    if sock in self.file_handler.current_uploads:
+                        self.file_handler.handle_transfer_timeout(sock)
+                        break
                     continue
                 except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, socket.error):
                     break
