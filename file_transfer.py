@@ -4,6 +4,7 @@ import socket
 import struct
 import tempfile
 import threading
+import queue
 import time
 import zipfile
 import logging
@@ -305,6 +306,14 @@ class FileTransferHandler:
         self._cancel_transfer.set()
         logging.debug("File transfer cancel signal set")
 
+    def _file_writer_thread(self, info: dict):
+        """Background thread that writes queued chunks to disk."""
+        while True:
+            chunk = info['queue'].get()
+            if chunk is None:
+                break
+            info['file'].write(chunk)
+
     def _cleanup_failed_transfer(self, info):
         """Internal helper to clean up a failed incoming transfer."""
         if not info:
@@ -454,7 +463,15 @@ class FileTransferHandler:
                 'start_time': time.time(),
                 'last_percentage': -1,
                 'last_emit_time': time.time(),
+                'queue': queue.Queue(maxsize=100),
             }
+            writer_thread = threading.Thread(
+                target=self._file_writer_thread,
+                args=(info,),
+                daemon=True,
+            )
+            info['writer_thread'] = writer_thread
+            writer_thread.start()
             if self.settings['role'] == 'ado':
                 self.current_uploads[sock] = info
             else:
@@ -468,17 +485,7 @@ class FileTransferHandler:
             info = self.current_uploads.get(sock) if self.settings['role'] == 'ado' else self.current_downloads.get(sock)
             if info:
                 try:
-                    try:
-                        info['file'].write(data['data'])
-                    except (IOError, OSError) as e:
-                        logging.error('Transfer chunk IO error: %s', e, exc_info=True)
-                        self.worker.file_transfer_error.emit(f"Fájl írási hiba a szerveren: {e}")
-                        self._cleanup_failed_transfer(info)
-                        if self.settings['role'] == 'ado':
-                            self.current_uploads.pop(sock, None)
-                        else:
-                            self.current_downloads.pop(sock, None)
-                        return
+                    info['queue'].put(data['data'])
                     info['received'] += len(data['data'])
                     if time.time() - info['last_emit_time'] >= PROGRESS_UPDATE_INTERVAL:
                         current_percentage = int((info['received'] / info['size']) * 100) if info['size'] > 0 else 0
@@ -500,6 +507,8 @@ class FileTransferHandler:
         if msg_type == 'file_end':
             info = self.current_uploads.pop(sock, None) if self.settings['role'] == 'ado' else self.current_downloads.pop(sock, None)
             if info:
+                info['queue'].put(None)
+                info['writer_thread'].join()
                 info['file'].close()
                 if self.settings['role'] == 'ado':
                     final_label = f"{info['name']}: Kész! ({info['size']/1024/1024:.1f}MB)"
