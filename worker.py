@@ -389,6 +389,54 @@ class KVMWorker(QObject):
 
         logging.info("Adó szolgáltatás leállt.")
 
+    def _handle_incoming_message(self, sock, data, button_map):
+        """Handle a fully unpacked message."""
+        try:
+            cmd = data.get('command')
+            if cmd == 'switch_elitedesk':
+                self.toggle_client_control('elitedesk', switch_monitor=True)
+                return
+            if cmd == 'switch_laptop':
+                self.toggle_client_control('laptop', switch_monitor=False)
+                return
+
+            msg_type = data.get('type')
+            if msg_type == 'move_relative':
+                self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+            elif msg_type == 'click':
+                btn = button_map.get(data.get('button'))
+                if btn:
+                    (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
+            elif msg_type == 'scroll':
+                self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
+            elif msg_type == 'key':
+                k_info = data.get('key')
+                if data.get('key_type') == 'char':
+                    k_press = k_info
+                elif data.get('key_type') == 'special':
+                    k_press = getattr(keyboard.Key, k_info, None)
+                elif data.get('key_type') == 'vk':
+                    k_press = keyboard.KeyCode.from_vk(int(k_info))
+                else:
+                    k_press = None
+                if k_press:
+                    if data.get('pressed'):
+                        self.keyboard_controller.press(k_press)
+                        self._pressed_keys.add(k_press)
+                    else:
+                        self.keyboard_controller.release(k_press)
+                        self._pressed_keys.discard(k_press)
+            elif msg_type == 'clipboard_text':
+                text = data.get('text', '')
+                if text != self.last_clipboard:
+                    self._set_clipboard(text)
+                    if sock in self.client_sockets:
+                        self._broadcast_message(data, exclude=sock)
+            else:
+                self.file_handler.handle_network_message(data, sock)
+        except Exception as e:
+            logging.error("Failed to process message: %s", e, exc_info=True)
+
     def _process_messages(self):
         """Process queued client messages in a dedicated thread."""
         logging.debug("Message processor thread started")
@@ -397,48 +445,51 @@ class KVMWorker(QObject):
             'right': mouse.Button.right,
             'middle': mouse.Button.middle,
         }
-        while self._running:
-            try:
-                sock, data = self.message_queue.get()
-            except Exception:
-                break
-            if sock is None and data is None:
-                break
-            try:
-                msg_type = data.get('type')
-                if msg_type == 'move_relative':
-                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
-                elif msg_type == 'click':
-                    btn = button_map.get(data.get('button'))
-                    if btn:
-                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
-                elif msg_type == 'scroll':
-                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
-                elif msg_type == 'key':
-                    k_info = data.get('key')
-                    if data.get('key_type') == 'char':
-                        k_press = k_info
-                    elif data.get('key_type') == 'special':
-                        k_press = getattr(keyboard.Key, k_info, None)
-                    elif data.get('key_type') == 'vk':
-                        k_press = keyboard.KeyCode.from_vk(int(k_info))
+        buffers = {}
+        try:
+            while self._running:
+                try:
+                    sock, data = self.message_queue.get()
+                except Exception:
+                    break
+                if sock is None and data is None:
+                    break
+
+                try:
+                    if isinstance(data, (bytes, bytearray)):
+                        buffer = buffers.setdefault(sock, bytearray())
+                        buffer.extend(data)
+                        while len(buffer) >= 4:
+                            try:
+                                msg_len = struct.unpack('!I', buffer[:4])[0]
+                            except struct.error:
+                                logging.error("Invalid length header from %s", self.client_infos.get(sock, sock))
+                                break
+                            if len(buffer) < 4 + msg_len:
+                                break
+                            payload = bytes(buffer[4:4 + msg_len])
+                            del buffer[:4 + msg_len]
+                            try:
+                                message = msgpack.unpackb(payload, raw=False)
+                            except Exception as e:
+                                logging.error(
+                                    f"Failed to unpack message from {self.client_infos.get(sock, sock)}: {e}",
+                                    exc_info=True,
+                                )
+                                continue
+                            logging.debug(
+                                f"Processing message of type '{message.get('type')}' from {self.client_infos.get(sock, sock)}"
+                            )
+                            self._handle_incoming_message(sock, message, button_map)
                     else:
-                        k_press = None
-                    if k_press:
-                        if data.get('pressed'):
-                            self.keyboard_controller.press(k_press)
-                            self._pressed_keys.add(k_press)
-                        else:
-                            self.keyboard_controller.release(k_press)
-                            self._pressed_keys.discard(k_press)
-                elif msg_type == 'clipboard_text':
-                    text = data.get('text', '')
-                    if text != self.last_clipboard:
-                        self._set_clipboard(text)
-                else:
-                    self.file_handler.handle_network_message(data, sock)
-            except Exception as e:
-                logging.error("Failed to process message: %s", e, exc_info=True)
+                        logging.debug(
+                            f"Processing message of type '{data.get('type')}' from {self.client_infos.get(sock, sock)}"
+                        )
+                        self._handle_incoming_message(sock, data, button_map)
+                except Exception as e:
+                    logging.error("Error in message processing loop: %s", e, exc_info=True)
+        finally:
+            buffers.clear()
 
 
     def accept_connections(self):
@@ -467,8 +518,6 @@ class KVMWorker(QObject):
     def monitor_client(self, sock, addr):
         """Monitor a single client connection, handle commands and remove it on disconnect."""
         sock.settimeout(30.0)
-        buffer = b''
-
         def recv_all(s, n):
             data = b''
             while len(data) < n:
@@ -503,45 +552,13 @@ class KVMWorker(QObject):
             except Exception:
                 pass
         try:
-            last_log = time.time()
             while self._running:
-                if time.time() - last_log >= 10:
-                    logging.debug(
-                        "monitor_client main loop.",
-                    )
-                    last_log = time.time()
                 try:
                     chunk = sock.recv(4096)
                     if not chunk:
                         break
-                    buffer += chunk
-                    while len(buffer) >= 4:
-                        try:
-                            msg_len = struct.unpack('!I', buffer[:4])[0]
-                            if len(buffer) < 4 + msg_len:
-                                break
-                            payload = buffer[4:4 + msg_len]
-                            buffer = buffer[4 + msg_len:]
-                            data = msgpack.unpackb(payload, raw=False)
-
-                            cmd = data.get('command')
-                            if cmd == 'switch_elitedesk':
-                                self.toggle_client_control('elitedesk', switch_monitor=True)
-                            elif cmd == 'switch_laptop':
-                                self.toggle_client_control('laptop', switch_monitor=False)
-                            else:
-                                if data.get('type') == 'clipboard_text':
-                                    text = data.get('text', '')
-                                    if text != self.last_clipboard:
-                                        self._set_clipboard(text)
-                                        self._broadcast_message(data, exclude=sock)
-                                else:
-                                    self.message_queue.put((sock, data))
-                        except Exception as e:
-                            logging.error(
-                                f"Hiba a(z) {client_name} klienstől kapott üzenet feldolgozása közben: {e}",
-                                exc_info=True,
-                            )
+                    self.message_queue.put((sock, chunk))
+                    logging.debug(f"Queued {len(chunk)} raw bytes from {client_name}")
                 except socket.timeout:
                     if sock in self.file_handler.current_uploads:
                         self.file_handler.handle_transfer_timeout(sock)
@@ -551,7 +568,7 @@ class KVMWorker(QObject):
                     break
                 except Exception as e:
                     logging.error(
-                        f"Hiba a(z) {client_name} klienstől kapott üzenet feldolgozása közben: {e}",
+                        f"monitor_client recv error from {client_name}: {e}",
                         exc_info=True,
                     )
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
