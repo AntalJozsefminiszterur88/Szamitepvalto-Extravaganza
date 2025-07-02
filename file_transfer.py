@@ -325,13 +325,24 @@ class FileTransferHandler:
     def _file_writer_thread(self, info: dict):
         """Background thread that writes queued chunks to disk."""
         logging.debug("file writer thread started for %s", info.get('name'))
-        while True:
-            chunk = info['queue'].get()
-            if chunk is None:
-                break
-            info['file'].write(chunk)
-            logging.debug("file writer wrote %d bytes for %s", len(chunk), info.get('name'))
-        logging.debug("file writer thread exiting for %s", info.get('name'))
+        try:
+            while True:
+                chunk = info['queue'].get()
+                if chunk is None:
+                    break
+                info['file'].write(chunk)
+                logging.debug(
+                    "file writer wrote %d bytes for %s",
+                    len(chunk),
+                    info.get('name'),
+                )
+        except Exception as e:
+            logging.error(
+                "file writer error for %s: %s", info.get('name'), e, exc_info=True
+            )
+            self._cancel_transfer.set()
+        finally:
+            logging.debug("file writer thread exiting for %s", info.get('name'))
 
     def _cleanup_failed_transfer(self, info):
         """Internal helper to clean up a failed incoming transfer."""
@@ -483,7 +494,7 @@ class FileTransferHandler:
                 'start_time': time.time(),
                 'last_percentage': -1,
                 'last_emit_time': time.time(),
-                'queue': queue.Queue(maxsize=1000),
+                'queue': queue.Queue(),
             }
             writer_thread = threading.Thread(
                 target=self._file_writer_thread,
