@@ -1159,6 +1159,6 @@ class KVMWorker(QObject):
                 self.file_handler.on_client_disconnected(s)
                 self.server_socket = None
                 if self._running:
-                    logging.info("Újracsatlakozási kísérlet 5 másodperc múlva...")
-                    time.sleep(5)
+                    logging.info("Újracsatlakozási kísérlet 2 másodperc múlva...")
+                    time.sleep(2)
                 logging.debug("connect_to_server loop ended")
