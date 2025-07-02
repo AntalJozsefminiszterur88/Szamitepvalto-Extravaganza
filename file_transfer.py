@@ -324,11 +324,14 @@ class FileTransferHandler:
 
     def _file_writer_thread(self, info: dict):
         """Background thread that writes queued chunks to disk."""
+        logging.debug("file writer thread started for %s", info.get('name'))
         while True:
             chunk = info['queue'].get()
             if chunk is None:
                 break
             info['file'].write(chunk)
+            logging.debug("file writer wrote %d bytes for %s", len(chunk), info.get('name'))
+        logging.debug("file writer thread exiting for %s", info.get('name'))
 
     def _cleanup_failed_transfer(self, info):
         """Internal helper to clean up a failed incoming transfer."""
@@ -445,6 +448,7 @@ class FileTransferHandler:
     # --------------------------------------------------------------
     def handle_network_message(self, data: dict, sock: socket.socket):
         msg_type = data.get('type')
+        logging.debug("handle_network_message received type '%s'", msg_type)
         if msg_type == 'paste_request':
             dest = data.get('destination')
             if self.network_file_clipboard and self.network_file_clipboard.get('archive'):
@@ -479,7 +483,7 @@ class FileTransferHandler:
                 'start_time': time.time(),
                 'last_percentage': -1,
                 'last_emit_time': time.time(),
-                'queue': queue.Queue(maxsize=100),
+                'queue': queue.Queue(maxsize=1000),
             }
             writer_thread = threading.Thread(
                 target=self._file_writer_thread,

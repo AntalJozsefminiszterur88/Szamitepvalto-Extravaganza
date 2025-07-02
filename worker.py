@@ -272,12 +272,6 @@ class KVMWorker(QObject):
         )
         self.clipboard_thread.start()
 
-        self.message_processor_thread = threading.Thread(
-            target=self._process_server_messages,
-            daemon=True,
-            name="MsgProcessor",
-        )
-        self.message_processor_thread.start()
         
         info = ServiceInfo(
             SERVICE_TYPE,
@@ -568,13 +562,44 @@ class KVMWorker(QObject):
             except Exception:
                 pass
         try:
+            buffer = bytearray()
+            logging.debug("monitor_client main loop starting for %s", client_name)
             while self._running:
+                logging.debug("monitor_client waiting for data from %s", client_name)
                 try:
                     chunk = sock.recv(4096)
                     if not chunk:
                         break
-                    self.message_queue.put((sock, chunk))
-                    logging.debug(f"Queued {len(chunk)} raw bytes from {client_name}")
+                    buffer.extend(chunk)
+                    logging.debug("Received %d bytes from %s", len(chunk), client_name)
+                    while len(buffer) >= 4:
+                        msg_len = struct.unpack('!I', buffer[:4])[0]
+                        if len(buffer) < 4 + msg_len:
+                            break
+                        payload = bytes(buffer[4:4 + msg_len])
+                        del buffer[:4 + msg_len]
+                        try:
+                            data = msgpack.unpackb(payload, raw=False)
+                        except Exception as e:
+                            logging.error("Failed to unpack message from %s: %s", client_name, e, exc_info=True)
+                            continue
+                        logging.debug(
+                            "monitor_client processing message type '%s'", data.get('type') or data.get('command')
+                        )
+                        cmd = data.get('command')
+                        if cmd == 'switch_elitedesk':
+                            self.toggle_client_control('elitedesk', switch_monitor=True)
+                            continue
+                        if cmd == 'switch_laptop':
+                            self.toggle_client_control('laptop', switch_monitor=False)
+                            continue
+                        if data.get('type') == 'clipboard_text':
+                            text = data.get('text', '')
+                            if text != self.last_clipboard:
+                                self._set_clipboard(text)
+                                self._broadcast_message(data, exclude=sock)
+                        else:
+                            self.file_handler.handle_network_message(data, sock)
                 except socket.timeout:
                     if sock in self.file_handler.current_uploads:
                         self.file_handler.handle_transfer_timeout(sock)
