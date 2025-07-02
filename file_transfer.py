@@ -31,6 +31,26 @@ class FileTransferHandler:
         self.current_uploads = {}
         self.current_downloads = {}
 
+    def _cleanup_transfer_info(self, info: dict) -> None:
+        """Release resources associated with a transfer info dictionary."""
+        if not info:
+            return
+        try:
+            f = info.get('file')
+            if f:
+                f.close()
+        except Exception:
+            pass
+        writer = info.get('writer_thread')
+        if writer:
+            try:
+                info.get('queue', queue.Queue()).put(None)
+            except Exception:
+                pass
+            writer.join(timeout=1)
+        if info.get('temp_dir'):
+            shutil.rmtree(info['temp_dir'], ignore_errors=True)
+
     # --------------------------------------------------------------
     # Utility helpers
     # --------------------------------------------------------------
@@ -229,13 +249,9 @@ class FileTransferHandler:
                         f"Filename conflict: '{target_path_base}' exists. Renaming to '{final_target_path}'"
                     )
                 shutil.move(source_path, final_target_path)
-        except Exception:
+        finally:
             shutil.rmtree(temp_extract, ignore_errors=True)
-            logging.debug("Extraction failed, removed %s", temp_extract)
-            raise
-        else:
-            shutil.rmtree(temp_extract, ignore_errors=True)
-            logging.debug("Extraction complete, removed %s", temp_extract)
+            logging.debug("Removed temporary extract dir %s", temp_extract)
 
     def _send_archive(self, sock, archive_path, dest_dir):
         self._cancel_transfer.clear()
@@ -316,14 +332,7 @@ class FileTransferHandler:
 
     def _cleanup_failed_transfer(self, info):
         """Internal helper to clean up a failed incoming transfer."""
-        if not info:
-            return
-        try:
-            info.get('file').close()
-        except Exception:
-            pass
-        if info.get('temp_dir'):
-            shutil.rmtree(info['temp_dir'], ignore_errors=True)
+        self._cleanup_transfer_info(info)
 
     def handle_transfer_timeout(self, sock):
         """Handle cleanup when a file transfer times out."""
@@ -344,24 +353,29 @@ class FileTransferHandler:
         cancel_evt = threading.Event()
         result = {}
         temp_archive_dir = None
-        def run_archiving():
-            result['archive'] = self._create_archive(paths, cancel_event=cancel_evt)
-        arch_thread = threading.Thread(target=run_archiving, daemon=True)
-        arch_thread.start()
-        arch_thread.join(timeout)
-        if arch_thread.is_alive():
-            cancel_evt.set()
-            arch_thread.join(5)
-            logging.critical("Archiving of %s timed out after %.1f minutes.", paths, timeout / 60)
-            self.worker.file_transfer_error.emit("Archiválás időtúllépés (túl nagy fájl?)")
-            if result.get('archive'):
-                shutil.rmtree(os.path.dirname(result['archive']), ignore_errors=True)
-            return
-        archive = result.get('archive')
         try:
+            def run_archiving():
+                result['archive'] = self._create_archive(paths, cancel_event=cancel_evt)
+
+            arch_thread = threading.Thread(target=run_archiving, daemon=True)
+            arch_thread.start()
+            arch_thread.join(timeout)
+            if arch_thread.is_alive():
+                cancel_evt.set()
+                arch_thread.join(5)
+                logging.critical(
+                    "Archiving of %s timed out after %.1f minutes.", paths, timeout / 60
+                )
+                self.worker.file_transfer_error.emit("Archiválás időtúllépés (túl nagy fájl?)")
+                if result.get('archive'):
+                    temp_archive_dir = os.path.dirname(result['archive'])
+                return
+
+            archive = result.get('archive')
             if not archive:
                 self._clear_network_file_clipboard()
                 return
+
             temp_archive_dir = os.path.dirname(archive)
             if self.settings['role'] == 'ado':
                 self._clear_network_file_clipboard()
@@ -372,7 +386,9 @@ class FileTransferHandler:
                     'source_id': self.device_name,
                 }
                 logging.debug("Network file clipboard set: %s", self.network_file_clipboard)
-                self.worker._broadcast_message({'type': 'network_clipboard_set', 'source_id': self.device_name, 'operation': operation})
+                self.worker._broadcast_message(
+                    {'type': 'network_clipboard_set', 'source_id': self.device_name, 'operation': operation}
+                )
             else:
                 sock = self.worker.server_socket
                 if not sock:
@@ -571,21 +587,20 @@ class FileTransferHandler:
 
     def on_client_disconnected(self, sock: socket.socket):
         info = self.current_uploads.pop(sock, None)
-        if info and info.get('temp_dir'):
-            try:
-                info['file'].close()
-            except Exception:
-                pass
-            shutil.rmtree(info['temp_dir'], ignore_errors=True)
+        if info:
+            self._cleanup_transfer_info(info)
         info = self.current_downloads.pop(sock, None)
-        if info and info.get('temp_dir'):
-            try:
-                info['file'].close()
-            except Exception:
-                pass
-            shutil.rmtree(info['temp_dir'], ignore_errors=True)
+        if info:
+            self._cleanup_transfer_info(info)
         self._cancel_transfer.clear()
         self._clear_network_file_clipboard()
 
     def cleanup(self):
-        self.on_client_disconnected(None)
+        for info in list(self.current_uploads.values()):
+            self._cleanup_transfer_info(info)
+        self.current_uploads.clear()
+        for info in list(self.current_downloads.values()):
+            self._cleanup_transfer_info(info)
+        self.current_downloads.clear()
+        self._cancel_transfer.clear()
+        self._clear_network_file_clipboard()
