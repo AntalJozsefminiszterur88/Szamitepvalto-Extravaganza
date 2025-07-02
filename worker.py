@@ -1103,11 +1103,18 @@ class KVMWorker(QObject):
                                     self._set_clipboard(text)
                             else:
                                 self.file_handler.handle_network_message(data, s)
+                        except Exception as e:
+                            logging.error(
+                                f"Hiba a szervertől kapott üzenet feldolgozásakor: {e}",
+                                exc_info=True,
+                            )
 
             except Exception as e:
                 if self._running:
                     logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-                    self.status_update.emit(f"Kapcsolat sikertelen: {e}. Újrapróbálkozás 5 mp múlva...")
+                    self.status_update.emit(
+                        f"Kapcsolat sikertelen: {e}. Újrapróbálkozás 5 mp múlva..."
+                    )
 
             finally:
                 logging.info("Connection to server closed")
