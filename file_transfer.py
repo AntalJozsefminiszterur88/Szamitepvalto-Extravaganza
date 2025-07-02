@@ -305,6 +305,17 @@ class FileTransferHandler:
         self._cancel_transfer.set()
         logging.debug("File transfer cancel signal set")
 
+    def _cleanup_failed_transfer(self, info):
+        """Internal helper to clean up a failed incoming transfer."""
+        if not info:
+            return
+        try:
+            info.get('file').close()
+        except Exception:
+            pass
+        if info.get('temp_dir'):
+            shutil.rmtree(info['temp_dir'], ignore_errors=True)
+
     def handle_transfer_timeout(self, sock):
         """Handle cleanup when a file transfer times out."""
         logging.error("File transfer timeout occurred")
@@ -457,7 +468,17 @@ class FileTransferHandler:
             info = self.current_uploads.get(sock) if self.settings['role'] == 'ado' else self.current_downloads.get(sock)
             if info:
                 try:
-                    info['file'].write(data['data'])
+                    try:
+                        info['file'].write(data['data'])
+                    except (IOError, OSError) as e:
+                        logging.error('Transfer chunk IO error: %s', e, exc_info=True)
+                        self.worker.file_transfer_error.emit(f"Fájl írási hiba a szerveren: {e}")
+                        self._cleanup_failed_transfer(info)
+                        if self.settings['role'] == 'ado':
+                            self.current_uploads.pop(sock, None)
+                        else:
+                            self.current_downloads.pop(sock, None)
+                        return
                     info['received'] += len(data['data'])
                     if time.time() - info['last_emit_time'] >= PROGRESS_UPDATE_INTERVAL:
                         current_percentage = int((info['received'] / info['size']) * 100) if info['size'] > 0 else 0
