@@ -273,7 +273,7 @@ class KVMWorker(QObject):
         self.clipboard_thread.start()
 
         self.message_processor_thread = threading.Thread(
-            target=self._process_messages,
+            target=self._process_server_messages,
             daemon=True,
             name="MsgProcessor",
         )
@@ -389,107 +389,123 @@ class KVMWorker(QObject):
 
         logging.info("Adó szolgáltatás leállt.")
 
-    def _handle_incoming_message(self, sock, data, button_map):
-        """Handle a fully unpacked message."""
+    def _process_server_messages(self):
+        """Process raw messages received from clients on the server."""
+        logging.debug("Server message processor thread started")
+        buffers = {}
         try:
-            cmd = data.get('command')
-            if cmd == 'switch_elitedesk':
-                self.toggle_client_control('elitedesk', switch_monitor=True)
-                return
-            if cmd == 'switch_laptop':
-                self.toggle_client_control('laptop', switch_monitor=False)
-                return
+            while self._running:
+                try:
+                    sock, chunk = self.message_queue.get()
+                except Exception:
+                    break
+                if sock is None and chunk is None:
+                    break
 
-            msg_type = data.get('type')
-            if msg_type == 'move_relative':
-                self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
-            elif msg_type == 'click':
-                btn = button_map.get(data.get('button'))
-                if btn:
-                    (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
-            elif msg_type == 'scroll':
-                self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
-            elif msg_type == 'key':
-                k_info = data.get('key')
-                if data.get('key_type') == 'char':
-                    k_press = k_info
-                elif data.get('key_type') == 'special':
-                    k_press = getattr(keyboard.Key, k_info, None)
-                elif data.get('key_type') == 'vk':
-                    k_press = keyboard.KeyCode.from_vk(int(k_info))
-                else:
-                    k_press = None
-                if k_press:
-                    if data.get('pressed'):
-                        self.keyboard_controller.press(k_press)
-                        self._pressed_keys.add(k_press)
+                if not isinstance(chunk, (bytes, bytearray)):
+                    continue
+
+                buffer = buffers.setdefault(sock, bytearray())
+                buffer.extend(chunk)
+                while len(buffer) >= 4:
+                    try:
+                        msg_len = struct.unpack('!I', buffer[:4])[0]
+                    except struct.error:
+                        logging.error("Invalid length header from %s", self.client_infos.get(sock, sock))
+                        buffers.pop(sock, None)
+                        break
+                    if len(buffer) < 4 + msg_len:
+                        break
+                    payload = bytes(buffer[4:4 + msg_len])
+                    del buffer[:4 + msg_len]
+                    try:
+                        data = msgpack.unpackb(payload, raw=False)
+                    except Exception as e:
+                        logging.error(
+                            "Failed to unpack message from %s: %s",
+                            self.client_infos.get(sock, sock),
+                            e,
+                            exc_info=True,
+                        )
+                        continue
+                    logging.debug(
+                        "Server handling message type '%s' from %s",
+                        data.get('type') or data.get('command'),
+                        self.client_infos.get(sock, sock),
+                    )
+
+                    cmd = data.get('command')
+                    if cmd == 'switch_elitedesk':
+                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        continue
+                    if cmd == 'switch_laptop':
+                        self.toggle_client_control('laptop', switch_monitor=False)
+                        continue
+
+                    if data.get('type') == 'clipboard_text':
+                        text = data.get('text', '')
+                        if text != self.last_clipboard:
+                            self._set_clipboard(text)
+                            self._broadcast_message(data, exclude=sock)
                     else:
-                        self.keyboard_controller.release(k_press)
-                        self._pressed_keys.discard(k_press)
-            elif msg_type == 'clipboard_text':
-                text = data.get('text', '')
-                if text != self.last_clipboard:
-                    self._set_clipboard(text)
-                    if sock in self.client_sockets:
-                        self._broadcast_message(data, exclude=sock)
-            else:
-                self.file_handler.handle_network_message(data, sock)
-        except Exception as e:
-            logging.error("Failed to process message: %s", e, exc_info=True)
+                        self.file_handler.handle_network_message(data, sock)
+        finally:
+            buffers.clear()
 
-    def _process_messages(self):
-        """Process queued client messages in a dedicated thread."""
-        logging.debug("Message processor thread started")
+    def _process_client_messages(self):
+        """Process already unpacked messages received from the server."""
+        logging.debug("Client message processor thread started")
         button_map = {
             'left': mouse.Button.left,
             'right': mouse.Button.right,
             'middle': mouse.Button.middle,
         }
-        buffers = {}
-        try:
-            while self._running:
-                try:
-                    sock, data = self.message_queue.get()
-                except Exception:
-                    break
-                if sock is None and data is None:
-                    break
-
-                try:
-                    if isinstance(data, (bytes, bytearray)):
-                        buffer = buffers.setdefault(sock, bytearray())
-                        buffer.extend(data)
-                        while len(buffer) >= 4:
-                            try:
-                                msg_len = struct.unpack('!I', buffer[:4])[0]
-                            except struct.error:
-                                logging.error("Invalid length header from %s", self.client_infos.get(sock, sock))
-                                break
-                            if len(buffer) < 4 + msg_len:
-                                break
-                            payload = bytes(buffer[4:4 + msg_len])
-                            del buffer[:4 + msg_len]
-                            try:
-                                message = msgpack.unpackb(payload, raw=False)
-                            except Exception as e:
-                                logging.error(
-                                    f"Failed to unpack message from {self.client_infos.get(sock, sock)}: {e}",
-                                    exc_info=True,
-                                )
-                                continue
-                            logging.debug(
-                                f"Processing message of type '{message.get('type')}' from {self.client_infos.get(sock, sock)}"
-                            )
-                            self._handle_incoming_message(sock, message, button_map)
+        while self._running:
+            try:
+                sock, data = self.message_queue.get()
+            except Exception:
+                break
+            if sock is None and data is None:
+                break
+            try:
+                logging.debug(
+                    "Client handling message type '%s'",
+                    data.get('type'),
+                )
+                msg_type = data.get('type')
+                if msg_type == 'move_relative':
+                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'click':
+                    btn = button_map.get(data.get('button'))
+                    if btn:
+                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
+                elif msg_type == 'scroll':
+                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'key':
+                    k_info = data.get('key')
+                    if data.get('key_type') == 'char':
+                        k_press = k_info
+                    elif data.get('key_type') == 'special':
+                        k_press = getattr(keyboard.Key, k_info, None)
+                    elif data.get('key_type') == 'vk':
+                        k_press = keyboard.KeyCode.from_vk(int(k_info))
                     else:
-                        logging.debug(
-                            f"Processing message of type '{data.get('type')}' from {self.client_infos.get(sock, sock)}"
-                        )
-                        self._handle_incoming_message(sock, data, button_map)
-                except Exception as e:
-                    logging.error("Error in message processing loop: %s", e, exc_info=True)
-        finally:
-            buffers.clear()
+                        k_press = None
+                    if k_press:
+                        if data.get('pressed'):
+                            self.keyboard_controller.press(k_press)
+                            self._pressed_keys.add(k_press)
+                        else:
+                            self.keyboard_controller.release(k_press)
+                            self._pressed_keys.discard(k_press)
+                elif msg_type == 'clipboard_text':
+                    text = data.get('text', '')
+                    if text != self.last_clipboard:
+                        self._set_clipboard(text)
+                else:
+                    self.file_handler.handle_network_message(data, sock)
+            except Exception as e:
+                logging.error("Failed to process client message: %s", e, exc_info=True)
 
 
     def accept_connections(self):
@@ -1040,7 +1056,7 @@ class KVMWorker(QObject):
 
         if not self.message_processor_thread:
             self.message_processor_thread = threading.Thread(
-                target=self._process_messages,
+                target=self._process_client_messages,
                 daemon=True,
                 name="MsgProcessor",
             )
