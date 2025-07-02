@@ -51,7 +51,9 @@ class KVMWorker(QObject):
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
-        'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread'
+        'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
+        '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
+        'keyboard_controller', '_pressed_keys'
     )
 
     finished = Signal()
@@ -89,6 +91,9 @@ class KVMWorker(QObject):
         self.message_processor_thread = None
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
+        self.mouse_controller = mouse.Controller()
+        self.keyboard_controller = keyboard.Controller()
+        self._pressed_keys = set()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -387,6 +392,11 @@ class KVMWorker(QObject):
     def _process_messages(self):
         """Process queued client messages in a dedicated thread."""
         logging.debug("Message processor thread started")
+        button_map = {
+            'left': mouse.Button.left,
+            'right': mouse.Button.right,
+            'middle': mouse.Button.middle,
+        }
         while self._running:
             try:
                 sock, data = self.message_queue.get()
@@ -395,7 +405,38 @@ class KVMWorker(QObject):
             if sock is None and data is None:
                 break
             try:
-                self.file_handler.handle_network_message(data, sock)
+                msg_type = data.get('type')
+                if msg_type == 'move_relative':
+                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'click':
+                    btn = button_map.get(data.get('button'))
+                    if btn:
+                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
+                elif msg_type == 'scroll':
+                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'key':
+                    k_info = data.get('key')
+                    if data.get('key_type') == 'char':
+                        k_press = k_info
+                    elif data.get('key_type') == 'special':
+                        k_press = getattr(keyboard.Key, k_info, None)
+                    elif data.get('key_type') == 'vk':
+                        k_press = keyboard.KeyCode.from_vk(int(k_info))
+                    else:
+                        k_press = None
+                    if k_press:
+                        if data.get('pressed'):
+                            self.keyboard_controller.press(k_press)
+                            self._pressed_keys.add(k_press)
+                        else:
+                            self.keyboard_controller.release(k_press)
+                            self._pressed_keys.discard(k_press)
+                elif msg_type == 'clipboard_text':
+                    text = data.get('text', '')
+                    if text != self.last_clipboard:
+                        self._set_clipboard(text)
+                else:
+                    self.file_handler.handle_network_message(data, sock)
             except Exception as e:
                 logging.error("Failed to process message: %s", e, exc_info=True)
 
@@ -980,20 +1021,21 @@ class KVMWorker(QObject):
             )
             self.connection_thread.start()
 
+        if not self.message_processor_thread:
+            self.message_processor_thread = threading.Thread(
+                target=self._process_messages,
+                daemon=True,
+                name="MsgProcessor",
+            )
+            self.message_processor_thread.start()
+
         browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, ServiceListener(self))
         self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
         while self._running:
             time.sleep(0.5)
 
     def connect_to_server(self):
-        mouse_controller = mouse.Controller()
-        keyboard_controller = keyboard.Controller()
-        pressed_keys = set()
-        button_map = {
-            'left': mouse.Button.left,
-            'right': mouse.Button.right,
-            'middle': mouse.Button.middle,
-        }
+        self._pressed_keys = set()
         hk_listener = None
 
         while self._running:
@@ -1116,38 +1158,7 @@ class KVMWorker(QObject):
                                 break
                             data = msgpack.unpackb(payload, raw=False)
                             last_event_time = time.time()
-                            event_type = data.get('type')
-                            if event_type == 'move_relative':
-                                mouse_controller.move(data['dx'], data['dy'])
-                            elif event_type == 'click':
-                                b = button_map.get(data['button'])
-                                if b:
-                                    (mouse_controller.press if data['pressed'] else mouse_controller.release)(b)
-                            elif event_type == 'scroll':
-                                mouse_controller.scroll(data['dx'], data['dy'])
-                            elif event_type == 'key':
-                                k_info = data['key']
-                                if data['key_type'] == 'char':
-                                    k_press = k_info
-                                elif data['key_type'] == 'special':
-                                    k_press = getattr(keyboard.Key, k_info, None)
-                                elif data['key_type'] == 'vk':
-                                    k_press = keyboard.KeyCode.from_vk(int(k_info))
-                                else:
-                                    k_press = None
-                                if k_press:
-                                    if data['pressed']:
-                                        keyboard_controller.press(k_press)
-                                        pressed_keys.add(k_press)
-                                    else:
-                                        keyboard_controller.release(k_press)
-                                        pressed_keys.discard(k_press)
-                            elif event_type == 'clipboard_text':
-                                text = data.get('text', '')
-                                if text != self.last_clipboard:
-                                    self._set_clipboard(text)
-                            else:
-                                self.file_handler.handle_network_message(data, s)
+                            self.message_queue.put((s, data))
                         except Exception as e:
                             logging.error(
                                 f"Hiba a szervertől kapott üzenet feldolgozásakor: {e}",
@@ -1179,11 +1190,12 @@ class KVMWorker(QObject):
                         self.clipboard_thread.join(timeout=0.1)
                     except Exception:
                         pass
-                for k in list(pressed_keys):
+                for k in list(self._pressed_keys):
                     try:
-                        keyboard_controller.release(k)
+                        self.keyboard_controller.release(k)
                     except Exception:
                         pass
+                self._pressed_keys.clear()
                 if hk_listener is not None:
                     try:
                         hk_listener.stop()
