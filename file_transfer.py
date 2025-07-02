@@ -305,6 +305,13 @@ class FileTransferHandler:
         self._cancel_transfer.set()
         logging.debug("File transfer cancel signal set")
 
+    def handle_transfer_timeout(self, sock):
+        """Handle cleanup when a file transfer times out."""
+        logging.error("File transfer timeout occurred")
+        self.worker.file_transfer_error.emit(
+            "Fájlátvitel időtúllépés. A kapcsolat megszakadt.")
+        self.on_client_disconnected(sock)
+
     # --------------------------------------------------------------
     # Public API used by worker
     # --------------------------------------------------------------
