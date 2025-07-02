@@ -444,34 +444,45 @@ class KVMWorker(QObject):
                         break
                     buffer += chunk
                     while len(buffer) >= 4:
-                        msg_len = struct.unpack('!I', buffer[:4])[0]
-                        if len(buffer) < 4 + msg_len:
-                            break
-                        payload = buffer[4:4 + msg_len]
-                        buffer = buffer[4 + msg_len:]
                         try:
+                            msg_len = struct.unpack('!I', buffer[:4])[0]
+                            if len(buffer) < 4 + msg_len:
+                                break
+                            payload = buffer[4:4 + msg_len]
+                            buffer = buffer[4 + msg_len:]
                             data = msgpack.unpackb(payload, raw=False)
-                        except Exception:
-                            logging.warning("Hibas parancs a klienstol")
-                            continue
 
-                        cmd = data.get('command')
-                        if cmd == 'switch_elitedesk':
-                            self.toggle_client_control('elitedesk', switch_monitor=True)
-                        elif cmd == 'switch_laptop':
-                            self.toggle_client_control('laptop', switch_monitor=False)
-                        else:
-                            if data.get('type') == 'clipboard_text':
-                                text = data.get('text', '')
-                                if text != self.last_clipboard:
-                                    self._set_clipboard(text)
-                                    self._broadcast_message(data, exclude=sock)
+                            cmd = data.get('command')
+                            if cmd == 'switch_elitedesk':
+                                self.toggle_client_control('elitedesk', switch_monitor=True)
+                            elif cmd == 'switch_laptop':
+                                self.toggle_client_control('laptop', switch_monitor=False)
                             else:
-                                self.file_handler.handle_network_message(data, sock)
+                                if data.get('type') == 'clipboard_text':
+                                    text = data.get('text', '')
+                                    if text != self.last_clipboard:
+                                        self._set_clipboard(text)
+                                        self._broadcast_message(data, exclude=sock)
+                                else:
+                                    self.file_handler.handle_network_message(data, sock)
+                        except Exception as e:
+                            logging.error(
+                                f"Hiba a(z) {client_name} klienstől kapott üzenet feldolgozása közben: {e}",
+                                exc_info=True,
+                            )
                 except socket.timeout:
                     continue
-                except (socket.error, BrokenPipeError):
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, socket.error):
                     break
+                except Exception as e:
+                    logging.error(
+                        f"Hiba a(z) {client_name} klienstől kapott üzenet feldolgozása közben: {e}",
+                        exc_info=True,
+                    )
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
+            logging.warning(f"Hálózati hiba a kliensnél ({client_name}): {e}")
+        except Exception as e:
+            logging.error(f"Váratlan hiba a monitor_client-ben ({client_name}): {e}", exc_info=True)
         finally:
             logging.warning(f"Kliens lecsatlakozott: {addr}.")
             try:
@@ -1061,14 +1072,14 @@ class KVMWorker(QObject):
                             "connect_to_server recv loop. cancel=%s",
                             self.file_handler._cancel_transfer.is_set(),
                         )
-                        raw_len = recv_all(s, 4)
-                        if not raw_len:
-                            break
-                        msg_len = struct.unpack('!I', raw_len)[0]
-                        payload = recv_all(s, msg_len)
-                        if payload is None:
-                            break
                         try:
+                            raw_len = recv_all(s, 4)
+                            if not raw_len:
+                                break
+                            msg_len = struct.unpack('!I', raw_len)[0]
+                            payload = recv_all(s, msg_len)
+                            if payload is None:
+                                break
                             data = msgpack.unpackb(payload, raw=False)
                             last_event_time = time.time()
                             event_type = data.get('type')
@@ -1109,6 +1120,12 @@ class KVMWorker(QObject):
                                 exc_info=True,
                             )
 
+            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
+                if self._running:
+                    logging.warning(f"Csatlakozás megszakadt: {e}")
+                    self.status_update.emit(
+                        f"Kapcsolat megszakadt: {e}. Újrapróbálkozás 5 mp múlva..."
+                    )
             except Exception as e:
                 if self._running:
                     logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
