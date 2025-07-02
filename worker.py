@@ -51,7 +51,7 @@ class KVMWorker(QObject):
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
-        'last_server_ip', 'file_handler'
+        'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread'
     )
 
     finished = Signal()
@@ -85,6 +85,8 @@ class KVMWorker(QObject):
         self.last_clipboard = ""
         self.server_socket = None
         self.file_handler = FileTransferHandler(self)
+        self.message_queue = queue.Queue()
+        self.message_processor_thread = None
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
 
@@ -238,6 +240,12 @@ class KVMWorker(QObject):
             self.connection_thread.join(timeout=1)
         if self.clipboard_thread and self.clipboard_thread.is_alive():
             self.clipboard_thread.join(timeout=1)
+        if self.message_processor_thread and self.message_processor_thread.is_alive():
+            try:
+                self.message_queue.put_nowait((None, None))
+            except Exception:
+                pass
+            self.message_processor_thread.join(timeout=1)
         self.file_handler.cleanup()
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
@@ -258,6 +266,13 @@ class KVMWorker(QObject):
             target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
         )
         self.clipboard_thread.start()
+
+        self.message_processor_thread = threading.Thread(
+            target=self._process_messages,
+            daemon=True,
+            name="MsgProcessor",
+        )
+        self.message_processor_thread.start()
         
         info = ServiceInfo(
             SERVICE_TYPE,
@@ -366,8 +381,24 @@ class KVMWorker(QObject):
 
         while self._running:
             time.sleep(0.5)
-        
+
         logging.info("Adó szolgáltatás leállt.")
+
+    def _process_messages(self):
+        """Process queued client messages in a dedicated thread."""
+        logging.debug("Message processor thread started")
+        while self._running:
+            try:
+                sock, data = self.message_queue.get()
+            except Exception:
+                break
+            if sock is None and data is None:
+                break
+            try:
+                self.file_handler.handle_network_message(data, sock)
+            except Exception as e:
+                logging.error("Failed to process message: %s", e, exc_info=True)
+
 
     def accept_connections(self):
         try:
@@ -464,7 +495,7 @@ class KVMWorker(QObject):
                                         self._set_clipboard(text)
                                         self._broadcast_message(data, exclude=sock)
                                 else:
-                                    self.file_handler.handle_network_message(data, sock)
+                                    self.message_queue.put((sock, data))
                         except Exception as e:
                             logging.error(
                                 f"Hiba a(z) {client_name} klienstől kapott üzenet feldolgozása közben: {e}",
