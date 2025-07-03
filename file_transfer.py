@@ -260,6 +260,12 @@ class FileTransferHandler:
         try:
             size = os.path.getsize(archive_path)
             name = os.path.basename(archive_path)
+            logging.info(
+                "Starting archive send: %s (%d bytes) to %s",
+                name,
+                size,
+                sock.getpeername() if hasattr(sock, 'getpeername') else 'server',
+            )
             meta = {
                 'type': 'file_metadata',
                 'name': name,
@@ -277,6 +283,12 @@ class FileTransferHandler:
                     chunk = f.read(FILE_CHUNK_SIZE)
                     if not chunk:
                         break
+                    logging.debug(
+                        "Sending chunk of %d bytes for %s at offset %d",
+                        len(chunk),
+                        name,
+                        sent,
+                    )
                     if not self.worker._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
                         return
                     sent += len(chunk)
@@ -304,6 +316,11 @@ class FileTransferHandler:
         finally:
             sock.settimeout(prev_to)
             self._cancel_transfer.clear()
+            logging.info(
+                "Finished archive send: %s (%d bytes sent)",
+                name,
+                sent if 'sent' in locals() else 0,
+            )
             logging.debug("Archive send finished")
 
     def _clear_network_file_clipboard(self):
@@ -363,6 +380,9 @@ class FileTransferHandler:
 
     def _share_files_thread(self, paths, operation):
         self._cancel_transfer.clear()
+        logging.info(
+            "share_files_thread started: %s files, operation=%s", len(paths), operation
+        )
         timeout = self.settings.get('archive_timeout_seconds', 900)
         cancel_evt = threading.Event()
         result = {}
@@ -391,6 +411,7 @@ class FileTransferHandler:
                 return
 
             temp_archive_dir = os.path.dirname(archive)
+            logging.info("Archive ready at %s", archive)
             if self.settings['role'] == 'ado':
                 self._clear_network_file_clipboard()
                 self.network_file_clipboard = {
@@ -414,6 +435,7 @@ class FileTransferHandler:
             if temp_archive_dir and self.settings['role'] != 'ado':
                 shutil.rmtree(temp_archive_dir, ignore_errors=True)
             self._cancel_transfer.clear()
+            logging.info("share_files_thread finished")
 
     def request_paste(self, dest_dir) -> None:
         self._cancel_transfer.clear()
@@ -516,6 +538,9 @@ class FileTransferHandler:
             info = self.current_uploads.get(sock) if self.settings['role'] == 'ado' else self.current_downloads.get(sock)
             if info:
                 try:
+                    logging.debug(
+                        "Received chunk of %d bytes for %s", len(data['data']), info.get('name')
+                    )
                     info['queue'].put(data['data'])
                     info['received'] += len(data['data'])
                     if time.time() - info['last_emit_time'] >= PROGRESS_UPDATE_INTERVAL:
@@ -541,6 +566,9 @@ class FileTransferHandler:
                 info['queue'].put(None)
                 info['writer_thread'].join()
                 info['file'].close()
+                logging.debug(
+                    "File transfer completed for %s", info.get('name')
+                )
                 if self.settings['role'] == 'ado':
                     final_label = f"{info['name']}: Kész! ({info['size']/1024/1024:.1f}MB)"
                     self.worker.update_progress_display.emit(100, final_label)
