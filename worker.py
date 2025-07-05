@@ -639,7 +639,13 @@ class KVMWorker(QObject):
             if sock in self.client_infos:
                 del self.client_infos[sock]
             if sock == self.active_client:
-                self.active_client = None
+                if self.client_sockets:
+                    self.active_client = self.client_sockets[0]
+                    self.status_update.emit(
+                        f"Aktív kliens megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
+                    )
+                else:
+                    self.active_client = None
             if self.kvm_active and not self.client_sockets:
                 self.deactivate_kvm(reason="all clients disconnected")
             logging.debug("monitor_client exit for %s", client_name)
@@ -666,6 +672,12 @@ class KVMWorker(QObject):
             switch_monitor,
             self.client_infos.get(self.active_client, "unknown"),
         )
+        if self.active_client is None and self.client_sockets:
+            self.active_client = self.client_sockets[0]
+            logging.info(
+                "No active client selected. Defaulting to %s",
+                self.client_infos.get(self.active_client, "ismeretlen"),
+            )
         if not self.client_sockets:
             self.status_update.emit("Hiba: Nincs csatlakozott kliens a váltáshoz!")
             logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
@@ -793,7 +805,9 @@ class KVMWorker(QObject):
                     packed, event = payload, None
                 to_remove = []
                 active_lost = False
-                targets = [self.active_client] if self.active_client else list(self.client_sockets)
+                if self.active_client is None and self.client_sockets:
+                    self.active_client = self.client_sockets[0]
+                targets = [self.active_client] if self.active_client else []
                 for sock in list(targets):
                     if sock not in self.client_sockets:
                         continue
@@ -844,10 +858,17 @@ class KVMWorker(QObject):
                     if s == self.active_client:
                         self.active_client = None
                         active_lost = True
+                        if self.client_sockets:
+                            self.active_client = self.client_sockets[0]
                 if active_lost:
-                    self.status_update.emit(
-                        "Kapcsolat megszakadt. Várakozás új kliensre..."
-                    )
+                    if self.active_client:
+                        self.status_update.emit(
+                            f"Kapcsolat megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
+                        )
+                    else:
+                        self.status_update.emit(
+                            "Kapcsolat megszakadt. Várakozás új kliensre..."
+                        )
                 if to_remove and not self.client_sockets:
                     self.deactivate_kvm(reason="all clients disconnected")
                     break

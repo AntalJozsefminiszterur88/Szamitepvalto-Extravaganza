@@ -61,8 +61,9 @@ also retries the last known IP address. This means that whether the
 host or any receiver is powered on first, they will automatically find
 each other and connect once both sides are running.
 
-The desktop acting as the host now accepts multiple client connections simultaneously. All
-connected receivers will get the forwarded input events.
+The desktop acting as the host can accept multiple client connections at once. Only the
+selected receiver will get the forwarded input events. Switch targets with the hotkeys to
+transfer control exclusively.
 
 ### Host hotkeys
 
