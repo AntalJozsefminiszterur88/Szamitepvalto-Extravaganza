@@ -933,11 +933,11 @@ class KVMWorker(QObject):
 
                 if (
                     (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and VK_NUMPAD0 in current_vks
+                    and (VK_NUMPAD0 in current_vks or VK_INSERT in current_vks)
                 ):
                     logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
                     # Send key releases to the client before disabling streaming
-                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0]:
+                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_INSERT]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                             pressed_keys.discard(("vk", vk_code))
