@@ -15,7 +15,9 @@ from config import TEMP_DIR_PARTS
 
 # Constants duplicated from worker for standalone operation
 FILE_CHUNK_SIZE = 65536
-TRANSFER_TIMEOUT = 30
+# Socket timeout (seconds) during file transfers. Increased
+# from 30 to 90 seconds to better tolerate slower connections.
+TRANSFER_TIMEOUT = 90
 PROGRESS_UPDATE_INTERVAL = 0.5
 
 
@@ -274,6 +276,7 @@ class FileTransferHandler:
                 'source_id': self.network_file_clipboard.get('source_id') if self.network_file_clipboard else self.device_name,
             }
             if not self.worker._send_message(sock, meta):
+                logging.error("Failed to send metadata for archive %s", name)
                 return
             sent = 0
             last_percentage = -1
@@ -290,6 +293,11 @@ class FileTransferHandler:
                         sent,
                     )
                     if not self.worker._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
+                        logging.error(
+                            "Failed to send file chunk at offset %d for %s",
+                            sent,
+                            name,
+                        )
                         return
                     sent += len(chunk)
                     if time.time() - last_emit_time >= PROGRESS_UPDATE_INTERVAL:
