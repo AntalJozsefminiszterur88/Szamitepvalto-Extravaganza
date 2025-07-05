@@ -294,7 +294,7 @@ class FileTransferHandler:
                     )
                     if not self.worker._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
                         logging.error(
-                            "Failed to send file chunk at offset %d for %s",
+                            "Failed to send file chunk at offset %d for %s. Aborting transfer.",
                             sent,
                             name,
                         )

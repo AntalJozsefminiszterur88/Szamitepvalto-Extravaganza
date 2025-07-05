@@ -149,7 +149,12 @@ class KVMWorker(QObject):
             )
             return True
         except Exception as e:
-            logging.error("Failed to send message: %s", e, exc_info=True)
+            logging.error(
+                "Failed to send message type '%s': %s",
+                data.get('type'),
+                e,
+                exc_info=True,
+            )
             return False
 
     def _broadcast_message(self, data, exclude=None) -> None:
@@ -612,6 +617,11 @@ class KVMWorker(QObject):
                         else:
                             self.file_handler.handle_network_message(data, sock)
                 except socket.timeout:
+                    logging.debug(
+                        "Socket timeout waiting for data from %s (timeout=%s)",
+                        client_name,
+                        sock.gettimeout(),
+                    )
                     if sock in self.file_handler.current_uploads:
                         self.file_handler.handle_transfer_timeout(sock)
                         break
@@ -798,9 +808,10 @@ class KVMWorker(QObject):
                     if sock not in self.client_sockets:
                         continue
                     try:
+                        prev_to = sock.gettimeout()
                         sock.settimeout(0.1)
                         sock.sendall(struct.pack('!I', len(packed)) + packed)
-                        sock.settimeout(1.0)
+                        sock.settimeout(prev_to)
                         if event and event.get('type') == 'move_relative':
                             logging.debug(
                                 "Mouse move sent to %s: dx=%s dy=%s",
