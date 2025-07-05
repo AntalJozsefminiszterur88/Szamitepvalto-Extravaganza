@@ -280,7 +280,8 @@ class FileTransferHandler:
                 return
             sent = 0
             last_percentage = -1
-            last_emit_time = time.time()
+            start_time = time.time()
+            last_emit_time = start_time
             with open(archive_path, 'rb') as f:
                 while True:
                     chunk = f.read(FILE_CHUNK_SIZE)
@@ -292,17 +293,21 @@ class FileTransferHandler:
                         name,
                         sent,
                     )
-                    if not self.worker._send_message(sock, {'type': 'file_chunk', 'data': chunk}):
+                    send_success = self.worker._send_message(sock, {'type': 'file_chunk', 'data': chunk})
+                    if not send_success:
                         logging.error(
                             "Failed to send file chunk at offset %d for %s. Aborting transfer.",
                             sent,
                             name,
                         )
+                        self.worker.file_transfer_error.emit(
+                            f"Fájlküldés megszakadt a(z) {name} fájlnál."
+                        )
                         return
                     sent += len(chunk)
                     if time.time() - last_emit_time >= PROGRESS_UPDATE_INTERVAL:
                         current_percentage = int((sent / size) * 100) if size > 0 else 0
-                        elapsed_time = time.time() - (last_emit_time if last_percentage != -1 else time.time())
+                        elapsed_time = time.time() - start_time
                         speed_mbps = (sent / (1024*1024)) / elapsed_time if elapsed_time > 0 else 0
                         remaining_bytes = size - sent
                         etr_seconds = int(remaining_bytes / (speed_mbps * 1024 * 1024)) if speed_mbps > 0 else 0
@@ -497,6 +502,9 @@ class FileTransferHandler:
                 self._send_archive(sock, self.network_file_clipboard['archive'], dest)
             return
         if msg_type == 'file_metadata':
+            file_size = data.get('size', 0)
+            file_name = data.get('name')
+            logging.info(f"Received file_metadata for '{file_name}' with size: {file_size} bytes.")
             temp_dir = self._get_temp_dir()
             incoming_path = os.path.join(temp_dir, data['name'])
             self._clear_network_file_clipboard()
@@ -539,7 +547,8 @@ class FileTransferHandler:
                 self.current_downloads[sock] = info
             self.worker.update_progress_display.emit(0, f"{info['name']}: 0MB / {info['size']/1024/1024:.1f}MB")
             if self.settings['role'] == 'ado':
-                self.worker.incoming_upload_started.emit(data.get('name'), data.get('size', 0))
+                logging.info("Emitting incoming_upload_started signal.")
+                self.worker.incoming_upload_started.emit(file_name, float(file_size))
             sock.settimeout(TRANSFER_TIMEOUT)
             return
         if msg_type == 'file_chunk':
@@ -571,6 +580,10 @@ class FileTransferHandler:
         if msg_type == 'file_end':
             info = self.current_uploads.pop(sock, None) if self.settings['role'] == 'ado' else self.current_downloads.pop(sock, None)
             if info:
+                logging.info(
+                    "Received file_end for '%s'. Total bytes received: %d. Expected size: %d.",
+                    info.get('name'), info.get('received'), info.get('size')
+                )
                 info['queue'].put(None)
                 info['writer_thread'].join()
                 info['file'].close()

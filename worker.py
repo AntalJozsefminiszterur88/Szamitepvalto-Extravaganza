@@ -64,7 +64,7 @@ class KVMWorker(QObject):
     status_update = Signal(str)
     update_progress_display = Signal(int, str)  # percentage, label text
     file_transfer_error = Signal(str)
-    incoming_upload_started = Signal(str, int)
+    incoming_upload_started = Signal(str, float)
 
     def __init__(self, settings):
         super().__init__()
