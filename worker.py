@@ -42,7 +42,9 @@ SEND_QUEUE_MAXSIZE = 200
 # File transfer chunk size
 FILE_CHUNK_SIZE = 65536
 # Socket timeout (seconds) during file transfers
-TRANSFER_TIMEOUT = 30
+# Timeout while waiting for file transfer data
+# Increased from 30 to 90 seconds to handle slower networks
+TRANSFER_TIMEOUT = 90
 # Minimum delay between progress updates
 PROGRESS_UPDATE_INTERVAL = 0.5
 
