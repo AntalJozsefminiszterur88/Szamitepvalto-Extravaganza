@@ -948,26 +948,34 @@ class KVMWorker(QObject):
                     (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
                     and VK_NUMPAD1 in current_vks
                 ):
-                    logging.debug(f"Hotkey detected for laptop with current_vks={current_vks}")
-                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
-                        if vk_code in current_vks:
-                            send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                            pressed_keys.discard(("vk", vk_code))
-                    current_vks.clear()
-                    self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
-                    return
+                    active_name = self.client_infos.get(self.active_client, "").lower()
+                    logging.debug(
+                        f"Hotkey detected for laptop with current_vks={current_vks} while active={active_name}"
+                    )
+                    if active_name != "elitedesk":
+                        for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
+                            if vk_code in current_vks:
+                                send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                                pressed_keys.discard(("vk", vk_code))
+                        current_vks.clear()
+                        self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+                        return
                 if (
                     (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
                     and VK_NUMPAD2 in current_vks
                 ):
-                    logging.debug(f"Hotkey detected for elitedesk with current_vks={current_vks}")
-                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
-                        if vk_code in current_vks:
-                            send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                            pressed_keys.discard(("vk", vk_code))
-                    current_vks.clear()
-                    self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
-                    return
+                    active_name = self.client_infos.get(self.active_client, "").lower()
+                    logging.debug(
+                        f"Hotkey detected for elitedesk with current_vks={current_vks} while active={active_name}"
+                    )
+                    if active_name != "laptop":
+                        for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
+                            if vk_code in current_vks:
+                                send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                                pressed_keys.discard(("vk", vk_code))
+                        current_vks.clear()
+                        self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
+                        return
 
                 if hasattr(k, "char") and k.char is not None:
                     key_type = "char"
