@@ -400,11 +400,11 @@ class MainWindow(QMainWindow):
         logging.info("[GUI_DEBUG] show_progress_dialog: Label set to: %s", self.progress_dialog.labelText())
         self.progress_dialog.show()
 
-    def on_incoming_upload_started(self, filename: str, total_size: int):
+    def on_incoming_upload_started(self, filename: str, total_size: float):
         logging.info(
             "[GUI_DEBUG] on_incoming_upload_started triggered. Filename: %s, Size: %d",
             filename,
-            total_size,
+            int(total_size),
         )
         self.show_progress_dialog("Fájl fogadása")
         logging.info(
