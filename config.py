@@ -31,6 +31,8 @@ VK_NUMPAD2 = 98
 VK_F12 = 123
 VK_LSHIFT = 160
 VK_RSHIFT = 161
+VK_INSERT = 45
+VK_END = 35
 
 
 def resource_path(relative_path: str) -> str:

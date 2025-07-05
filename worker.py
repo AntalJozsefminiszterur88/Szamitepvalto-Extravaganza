@@ -31,6 +31,8 @@ from config import (
     VK_F12,
     VK_LSHIFT,
     VK_RSHIFT,
+    VK_INSERT,
+    VK_END,
 )
 
 # Delay between iterations in the streaming loop to lower CPU usage
@@ -287,13 +289,13 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        # Definitions for NumLock OFF state based on diagnostic results
-        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
-        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
-        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
-        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
-        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
-        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
+        # Definitions for NumLock OFF state using VK codes
+        hotkey_desktop_l_numoff = {VK_LSHIFT, VK_INSERT}
+        hotkey_desktop_r_numoff = {VK_RSHIFT, VK_INSERT}
+        hotkey_laptop_l_numoff = {VK_LSHIFT, VK_END}
+        hotkey_laptop_r_numoff = {VK_RSHIFT, VK_END}
+        hotkey_elitdesk_l_numoff = {VK_LSHIFT, VK_NUMPAD2}
+        hotkey_elitdesk_r_numoff = {VK_RSHIFT, VK_NUMPAD2}
 
         # Definitions for NumLock ON state (fallback using VK codes)
         hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
@@ -319,8 +321,8 @@ class KVMWorker(QObject):
             )
 
             if (
-                hotkey_desktop_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_desktop_r_numoff.issubset(current_pressed_special_keys)
+                hotkey_desktop_l_numoff.issubset(current_pressed_vk_codes)
+                or hotkey_desktop_r_numoff.issubset(current_pressed_vk_codes)
             ) or (
                 hotkey_desktop_l_numon.issubset(current_pressed_vk_codes)
                 or hotkey_desktop_r_numon.issubset(current_pressed_vk_codes)
@@ -328,8 +330,8 @@ class KVMWorker(QObject):
                 logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
                 pending_client = 'desktop'
             elif (
-                hotkey_laptop_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_laptop_r_numoff.issubset(current_pressed_special_keys)
+                hotkey_laptop_l_numoff.issubset(current_pressed_vk_codes)
+                or hotkey_laptop_r_numoff.issubset(current_pressed_vk_codes)
             ) or (
                 hotkey_laptop_l_numon.issubset(current_pressed_vk_codes)
                 or hotkey_laptop_r_numon.issubset(current_pressed_vk_codes)
@@ -337,12 +339,8 @@ class KVMWorker(QObject):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'laptop'
             elif (
-                hotkey_elitdesk_l_numoff.issubset(
-                    current_pressed_special_keys.union(current_pressed_vk_codes)
-                )
-                or hotkey_elitdesk_r_numoff.issubset(
-                    current_pressed_special_keys.union(current_pressed_vk_codes)
-                )
+                hotkey_elitdesk_l_numoff.issubset(current_pressed_vk_codes)
+                or hotkey_elitdesk_r_numoff.issubset(current_pressed_vk_codes)
             ) or (
                 hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes)
                 or hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes)
@@ -907,12 +905,12 @@ class KVMWorker(QObject):
                 return key.value.vk
             return None
 
-        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
-        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
-        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
-        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
-        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
-        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
+        hotkey_desktop_l_numoff = {VK_LSHIFT, VK_INSERT}
+        hotkey_desktop_r_numoff = {VK_RSHIFT, VK_INSERT}
+        hotkey_laptop_l_numoff = {VK_LSHIFT, VK_END}
+        hotkey_laptop_r_numoff = {VK_RSHIFT, VK_END}
+        hotkey_elitdesk_l_numoff = {VK_LSHIFT, VK_NUMPAD2}
+        hotkey_elitdesk_r_numoff = {VK_RSHIFT, VK_NUMPAD2}
 
         hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
         hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
@@ -938,8 +936,8 @@ class KVMWorker(QObject):
                         current_special_keys.discard(k)
 
                 if (
-                    hotkey_desktop_l_numoff.issubset(current_special_keys)
-                    or hotkey_desktop_r_numoff.issubset(current_special_keys)
+                    hotkey_desktop_l_numoff.issubset(current_vks)
+                    or hotkey_desktop_r_numoff.issubset(current_vks)
                     or (
                         (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
                         and VK_NUMPAD0 in current_vks
@@ -955,8 +953,8 @@ class KVMWorker(QObject):
                     self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
                     return
                 if (
-                    hotkey_laptop_l_numoff.issubset(current_special_keys)
-                    or hotkey_laptop_r_numoff.issubset(current_special_keys)
+                    hotkey_laptop_l_numoff.issubset(current_vks)
+                    or hotkey_laptop_r_numoff.issubset(current_vks)
                     or (
                         (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
                         and VK_NUMPAD1 in current_vks
@@ -971,8 +969,8 @@ class KVMWorker(QObject):
                     self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
                     return
                 if (
-                    hotkey_elitdesk_l_numoff.issubset(current_special_keys.union(current_vks))
-                    or hotkey_elitdesk_r_numoff.issubset(current_special_keys.union(current_vks))
+                    hotkey_elitdesk_l_numoff.issubset(current_vks)
+                    or hotkey_elitdesk_r_numoff.issubset(current_vks)
                     or (
                         (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
                         and VK_NUMPAD2 in current_vks
