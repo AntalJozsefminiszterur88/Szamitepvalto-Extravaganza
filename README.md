@@ -64,6 +64,17 @@ each other and connect once both sides are running.
 The desktop acting as the host now accepts multiple client connections simultaneously. All
 connected receivers will get the forwarded input events.
 
+### Host hotkeys
+
+While running on the desktop, use the following shortcuts to control the connected machines:
+
+- **Shift + Numpad 1** – Take control of the laptop
+- **Shift + Numpad 2** – Take control of the EliteDesk and switch the monitor input
+- **Shift + Numpad 0** – Return control to the desktop and restore the monitor input
+
+Switching directly between the laptop and EliteDesk is disabled. Press `Shift + Numpad 0` first to
+return to the desktop before activating the other client.
+
 Slow clients that cannot keep up with the stream are disconnected after a short
 send timeout so they no longer cause lag for others. Input events are queued up
 to a limited size and older ones are discarded if necessary. The application
