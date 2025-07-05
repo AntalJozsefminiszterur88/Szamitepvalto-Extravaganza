@@ -307,8 +307,8 @@ class KVMWorker(QObject):
         hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
         hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
         hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
-        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, VK_NUMPAD2}
-        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, VK_NUMPAD2}
+        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, keyboard.Key.down}
+        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, keyboard.Key.down}
 
         # Definitions for NumLock ON state (fallback using VK codes)
         hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
@@ -352,12 +352,8 @@ class KVMWorker(QObject):
                 logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
                 pending_client = 'laptop'
             elif (
-                hotkey_elitdesk_l_numoff.issubset(
-                    current_pressed_special_keys.union(current_pressed_vk_codes)
-                )
-                or hotkey_elitdesk_r_numoff.issubset(
-                    current_pressed_special_keys.union(current_pressed_vk_codes)
-                )
+                hotkey_elitdesk_l_numoff.issubset(current_pressed_special_keys)
+                or hotkey_elitdesk_r_numoff.issubset(current_pressed_special_keys)
             ) or (
                 hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes)
                 or hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes)
