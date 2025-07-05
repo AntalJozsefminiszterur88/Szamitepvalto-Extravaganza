@@ -138,6 +138,11 @@ class KVMWorker(QObject):
         try:
             packed = msgpack.packb(data, use_bin_type=True)
             sock.sendall(struct.pack('!I', len(packed)) + packed)
+            logging.debug(
+                "Sent message type '%s' (%d bytes)",
+                data.get('type'),
+                len(packed),
+            )
             return True
         except Exception as e:
             logging.error("Failed to send message: %s", e, exc_info=True)
@@ -151,6 +156,12 @@ class KVMWorker(QObject):
                 continue
             try:
                 s.sendall(struct.pack('!I', len(packed)) + packed)
+                logging.debug(
+                    "Broadcast message type '%s' to %s (%d bytes)",
+                    data.get('type'),
+                    self.client_infos.get(s, 'unknown'),
+                    len(packed),
+                )
             except Exception as e:
                 logging.error("Failed to broadcast message: %s", e)
 
