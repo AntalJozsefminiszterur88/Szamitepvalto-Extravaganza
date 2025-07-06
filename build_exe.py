@@ -22,7 +22,8 @@ def build():
         "-m",
         "PyInstaller",
         "--onefile",
-        "--windowed",  # hide console window
+        "--windowed",  # hide console window on Windows/macOS
+        "--noconsole",  # explicit alias for clarity
         "--name",
         "Szamitepvalto-Extravaganza",
         "--icon",
