@@ -115,6 +115,11 @@ packaged build this autostart setting is also honoured when the ``.exe`` is
 started manually, causing the window to stay in the tray and the previous
 connection to activate immediately.
 
+Every time the application starts it now refreshes the registry entry when
+autostart is enabled, so the path always refers to the currently running
+executable. This prevents console windows from appearing if the application was
+packaged after enabling autostart from a normal Python interpreter.
+
 
 ## Clipboard synchronization
 

@@ -267,6 +267,13 @@ class MainWindow(QMainWindow):
         self.autostart_check.setChecked(
             settings.value("other/autostart", False, type=bool)
         )
+        # Ensure the autostart registry entry always references the
+        # currently running executable if the option is enabled.
+        if self.autostart_check.isChecked():
+            try:
+                set_autostart(True)
+            except Exception as e:
+                logging.error("Nem sikerült az autostart frissítése: %s", e)
         default_temp_path = QStandardPaths.writableLocation(QStandardPaths.TempLocation)
         self.temp_path_edit.setText(settings.value("other/temp_path", default_temp_path))
         self.temp_path_edit.textChanged.connect(self.save_settings)
