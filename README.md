@@ -123,6 +123,11 @@ port and briefly pauses so the host receives the byte. The `PicoSerialHandler`
 in the desktop application listens for these values to activate the appropriate
 target.
 
+If both the console and data CDC interfaces are enabled, Windows will expose two
+COM ports. The application expects the **data** interface, so ensure this port is
+available or disable the console interface in `boot.py` to avoid connecting to
+the wrong one.
+
 After copying `boot.py` to the Pico you must reset the board for the new
 configuration to take effect.
 
