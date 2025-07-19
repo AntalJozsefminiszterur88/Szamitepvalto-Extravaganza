@@ -16,6 +16,8 @@ python main.py
 
 This starts the Qt based interface defined in `gui.py` and launches the
 background worker defined in `worker.py` for handling networking and hotkeys.
+For troubleshooting, you can enable debug logging by setting the
+`logging` level to `DEBUG` in `main.py`.
 
 ## Building a Windows executable
 
