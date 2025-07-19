@@ -1116,13 +1116,11 @@ class KVMWorker(QObject):
 
         retry_delay = 3
         max_retry_delay = 30
-        is_first_run = True
+
+        self.status_update.emit("Várakozás a hálózatra...")
+        time.sleep(5)
 
         while self._running:
-            if is_first_run:
-                self.status_update.emit("Waiting for network to initialize...")
-                time.sleep(5)
-                is_first_run = False
             ip = self.server_ip or self.last_server_ip
             if not ip:
                 time.sleep(0.5)
@@ -1135,7 +1133,7 @@ class KVMWorker(QObject):
                 ip,
                 self.file_handler._cancel_transfer.is_set(),
             )
-            self.status_update.emit(f"Connecting to server at {ip}...")
+            self.status_update.emit(f"Csatlakozás: {ip}...")
 
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1164,7 +1162,7 @@ class KVMWorker(QObject):
                     self.clipboard_thread.start()
 
                     logging.info("TCP kapcsolat sikeres.")
-                    self.status_update.emit("Csatlakozva. Irányítás átvéve.")
+                    self.status_update.emit("Csatlakozva. Irányítás átvételre kész.")
                     retry_delay = 3
 
                     def send_command(cmd):
