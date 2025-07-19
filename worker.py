@@ -16,7 +16,11 @@ from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
 from file_transfer import FileTransferHandler
-from pico_serial_handler import PicoSerialHandler
+try:
+    from pico_serial_handler import PicoSerialHandler
+    PICO_SUPPORT = True
+except ImportError:
+    PICO_SUPPORT = False
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
@@ -310,12 +314,17 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        pico_handler = PicoSerialHandler(self)
-        self.pico_handler_thread = threading.Thread(
-            target=pico_handler.run, daemon=True, name="PicoSerialThread"
-        )
-        self.pico_handler_thread.start()
-        logging.info("Pico listener thread started.")
+        if PICO_SUPPORT:
+            pico_handler = PicoSerialHandler(self)
+            self.pico_handler_thread = threading.Thread(
+                target=pico_handler.run, daemon=True, name="PicoSerialThread"
+            )
+            self.pico_handler_thread.start()
+            logging.info("Pico listener thread started.")
+        else:
+            logging.info(
+                "Pico handler not loaded (pico_serial_handler.py not found)."
+            )
 
         # Definitions for NumLock OFF state based on diagnostic results
         hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
@@ -1248,52 +1257,3 @@ class KVMWorker(QObject):
                     time.sleep(retry_delay)
                     retry_delay = min(retry_delay * 1.5, max_retry_delay)
 
-            except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
-                if self._running:
-                    logging.warning(f"Csatlakozás megszakadt: {e}")
-            except (ConnectionRefusedError, socket.timeout, OSError) as e:
-                if self._running:
-                    logging.warning(
-                        f"Csatlakozás sikertelen: {e.__class__.__name__}. A szerver valószínűleg nem elérhető."
-                    )
-            except Exception as e:
-                if self._running:
-                    logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-
-            finally:
-                logging.info("Connection to server closed")
-                if hb_thread is not None:
-                    try:
-                        hb_thread.join(timeout=0.1)
-                    except Exception:
-                        pass
-                if self.clipboard_thread is not None:
-                    try:
-                        self.clipboard_thread.join(timeout=0.1)
-                    except Exception:
-                        pass
-                for k in list(self._pressed_keys):
-                    try:
-                        self.keyboard_controller.release(k)
-                    except Exception:
-                        pass
-                self._pressed_keys.clear()
-                if hk_listener is not None:
-                    try:
-                        hk_listener.stop()
-                    except Exception:
-                        pass
-                self.release_hotkey_keys()
-                self.file_handler.on_client_disconnected(s)
-                self.server_socket = None
-                if self._running:
-                    self.status_update.emit(
-                        f"Újrapróbálkozás {retry_delay:.0f} mp múlva..."
-                    )
-                    logging.info(
-                        "Újracsatlakozási kísérlet %s másodperc múlva...",
-                        retry_delay,
-                    )
-                    time.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 1.5, max_retry_delay)
-                logging.debug("connect_to_server loop ended")
