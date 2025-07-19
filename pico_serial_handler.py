@@ -1,6 +1,5 @@
 import logging
 import time
-import threading
 import serial
 from serial.tools import list_ports
 
@@ -10,9 +9,15 @@ class PicoSerialHandler:
         self.worker = worker
 
     def _find_pico_port(self):
+        """Return the device path of a connected Pico if available."""
+        keywords = ("pico", "circuitpython")
         for port in list_ports.comports():
             try:
-                if "pico" in port.description.lower():
+                desc = port.description.lower()
+                manuf = (getattr(port, "manufacturer", "") or "").lower()
+                if port.vid == 0x2E8A:
+                    return port.device
+                if any(k in desc for k in keywords) or any(k in manuf for k in keywords):
                     return port.device
             except Exception:
                 continue
