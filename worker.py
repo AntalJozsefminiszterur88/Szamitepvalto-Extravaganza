@@ -318,7 +318,7 @@ class KVMWorker(QObject):
         self.status_update.emit(
             "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: "
             "Asztal - Shift + Numpad 0, Laptop - Shift + Numpad 1, "
-            "ElitDesk - Shift + Numpad 2"
+            "ElitDesk - Shift + Numpad 2 (NumLock mindegy)"
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
@@ -326,31 +326,26 @@ class KVMWorker(QObject):
 
         # A gombnyomásokat figyelő halmazok
         current_pressed_vk = set()
+        numpad_pressed_vk = set()
         current_pressed_special = set()
 
-        # A hotkey kombinációk definíciója egy szótárban
+        # A hotkey kombinációk definíciója egy szótárban (csak a Pico gombokhoz)
         hotkey_combinations = {
-            # Pico Hotkeys (speciális billentyűk)
             frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f1}): "pico_desktop",
             frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f1}): "pico_desktop",
             frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f2}): "pico_laptop",
             frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f2}): "pico_laptop",
             frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f3}): "pico_elitedesk",
             frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f3}): "pico_elitedesk",
-
-            # Eredeti Hotkeys (NumLock OFF, speciális billentyűk)
-            frozenset({keyboard.Key.shift, keyboard.Key.insert}): "desktop_numoff",
-            frozenset({keyboard.Key.shift_r, keyboard.Key.insert}): "desktop_numoff",
-            frozenset({keyboard.Key.shift, keyboard.Key.end}): "laptop_numoff",
-            frozenset({keyboard.Key.shift_r, keyboard.Key.end}): "laptop_numoff",
-            frozenset({keyboard.Key.shift, keyboard.Key.down}): "elitedesk_numoff",
-            frozenset({keyboard.Key.shift_r, keyboard.Key.down}): "elitedesk_numoff",
         }
 
         def on_press(key):
-            try:
-                current_pressed_vk.add(key.vk)
-            except AttributeError:
+            vk = getattr(key, 'vk', None)
+            if vk is not None:
+                current_pressed_vk.add(vk)
+                if getattr(key, '_flags', 0) == 0:
+                    numpad_pressed_vk.add(vk)
+            else:
                 current_pressed_special.add(key)
 
             # Ellenőrizzük a speciális billentyűk kombinációit
@@ -361,18 +356,26 @@ class KVMWorker(QObject):
                 return
 
             # Ellenőrizzük a VK kódos kombinációkat (NumLock ON)
-            if (VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk):
+            if VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk:
                 if VK_NUMPAD0 in current_pressed_vk:
                     handle_action("desktop_numon")
                 elif VK_NUMPAD1 in current_pressed_vk:
                     handle_action("laptop_numon")
                 elif VK_NUMPAD2 in current_pressed_vk:
                     handle_action("elitedesk_numon")
+                elif VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk:
+                    handle_action("desktop_numoff")
+                elif VK_END in current_pressed_vk and VK_END in numpad_pressed_vk:
+                    handle_action("laptop_numoff")
+                elif VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk:
+                    handle_action("elitedesk_numoff")
 
         def on_release(key):
-            try:
-                current_pressed_vk.discard(key.vk)
-            except AttributeError:
+            vk = getattr(key, 'vk', None)
+            if vk is not None:
+                current_pressed_vk.discard(vk)
+                numpad_pressed_vk.discard(vk)
+            else:
                 current_pressed_special.discard(key)
 
         def handle_action(action_name):
@@ -936,6 +939,7 @@ class KVMWorker(QObject):
         
         pressed_keys = set()
         current_vks = set()
+        numpad_vks = set()
 
         def get_vk(key):
             if hasattr(key, "vk") and key.vk is not None:
@@ -951,12 +955,18 @@ class KVMWorker(QObject):
                 if vk is not None:
                     if p:
                         current_vks.add(vk)
+                        if getattr(k, '_flags', 0) == 0:
+                            numpad_vks.add(vk)
                     else:
                         current_vks.discard(vk)
+                        numpad_vks.discard(vk)
 
                 if (
                     (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and (VK_NUMPAD0 in current_vks or VK_INSERT in current_vks)
+                    and (
+                        VK_NUMPAD0 in current_vks
+                        or (VK_INSERT in current_vks and VK_INSERT in numpad_vks)
+                    )
                 ):
                     logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
                     # Send key releases to the client before disabling streaming
@@ -969,7 +979,10 @@ class KVMWorker(QObject):
                     return
                 if (
                     (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and VK_NUMPAD1 in current_vks
+                    and (
+                        VK_NUMPAD1 in current_vks
+                        or (VK_END in current_vks and VK_END in numpad_vks)
+                    )
                 ):
                     active_name = self.client_infos.get(self.active_client, "").lower()
                     logging.debug(
@@ -985,7 +998,10 @@ class KVMWorker(QObject):
                         return
                 if (
                     (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and VK_NUMPAD2 in current_vks
+                    and (
+                        VK_NUMPAD2 in current_vks
+                        or (VK_DOWN in current_vks and VK_DOWN in numpad_vks)
+                    )
                 ):
                     active_name = self.client_infos.get(self.active_client, "").lower()
                     logging.debug(
