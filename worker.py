@@ -1143,6 +1143,15 @@ class KVMWorker(QObject):
                 logging.info(f"Connecting to {ip}:{self.settings['port']}")
                 s.connect((ip, self.settings['port']))
                 s.settimeout(None)
+
+                # Send initial handshake with our device name so the server can
+                # store a friendly identifier instead of just the remote
+                # address. If this fails we continue anyway and fall back to the
+                # numeric address on the server side.
+                try:
+                    self._send_message(s, {"device_name": self.device_name})
+                except Exception:
+                    logging.warning("Failed to send device_name handshake", exc_info=True)
                 
                 self.server_socket = s
                 settings_store = QSettings(ORG_NAME, APP_NAME)
