@@ -1111,143 +1111,132 @@ class KVMWorker(QObject):
             time.sleep(0.5)
 
     def connect_to_server(self):
+        """
+        Intelligens újracsatlakozási logikával ellátott metódus a szerverhez való csatlakozáshoz.
+        Kezeli a hálózat lassú felépülését induláskor (pl. Wi-Fi).
+        """
         self._pressed_keys = set()
         hk_listener = None
 
+        # Intelligens újrapróbálkozási logika változói
         retry_delay = 3
         max_retry_delay = 30
 
+        # Egyszeri, 5 másodperces kezdeti várakozás a hálózat felépülésére.
+        # Ez a metódus elején, a fő cikluson KÍVÜL van, így csak egyszer fut le.
+        logging.info("Kezdeti várakozás (5 mp) a hálózat felépülésére...")
         self.status_update.emit("Várakozás a hálózatra...")
         time.sleep(5)
 
         while self._running:
             ip = self.server_ip or self.last_server_ip
             if not ip:
-                time.sleep(0.5)
+                self.status_update.emit("Adó keresése a hálózaton...")
+                time.sleep(1) # Várunk, amíg a Zeroconf talál egy IP-t
                 continue
 
-            hb_thread = None  # Ensure heartbeat thread variable is always defined
-
-            logging.debug(
-                "connect_to_server attempting to connect to %s cancel=%s",
-                ip,
-                self.file_handler._cancel_transfer.is_set(),
-            )
-            self.status_update.emit(f"Csatlakozás: {ip}...")
+            hb_thread = None
+            s = None # Definiáljuk a socketet a try blokk előtt, hogy a finally is lássa
 
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    s.settimeout(5.0)
-                    logging.info(f"Connecting to {ip}:{self.settings['port']}")
-                    s.connect((ip, self.settings['port']))
-                    s.settimeout(None)
-                    self.server_socket = s
-                    settings_store = QSettings(ORG_NAME, APP_NAME)
-                    settings_store.setValue('network/last_server_ip', ip)
-                    self.last_server_ip = ip
-                    self.file_handler._cancel_transfer.clear()
-                    logging.debug("Connected to server")
+                # Tiszta, egyértelmű státusz üzenet a csatlakozás előtt
+                self.status_update.emit(f"Csatlakozás: {ip}...")
+                
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.settimeout(5.0)
+                logging.info(f"Connecting to {ip}:{self.settings['port']}")
+                s.connect((ip, self.settings['port']))
+                s.settimeout(None)
+                
+                self.server_socket = s
+                settings_store = QSettings(ORG_NAME, APP_NAME)
+                settings_store.setValue('network/last_server_ip', ip)
+                self.last_server_ip = ip
+                self.file_handler._cancel_transfer.clear()
+                logging.info("Sikeres csatlakozás!")
 
-                    try:
-                        hello = msgpack.packb({'device_name': self.device_name}, use_bin_type=True)
-                        s.sendall(struct.pack('!I', len(hello)) + hello)
-                        logging.debug("Handshake sent to server")
-                    except Exception as e:
-                        logging.error(f"Failed to send handshake: {e}")
+                # Sikeres csatlakozás után visszaállítjuk a várakozási időt
+                retry_delay = 3
 
-                    self.clipboard_thread = threading.Thread(
-                        target=self._clipboard_loop_client, args=(s,), daemon=True, name="ClipboardCli"
-                    )
-                    self.clipboard_thread.start()
+                self.clipboard_thread = threading.Thread(
+                    target=self._clipboard_loop_client, args=(s,), daemon=True, name="ClipboardCli"
+                )
+                self.clipboard_thread.start()
 
-                    logging.info("TCP kapcsolat sikeres.")
-                    self.status_update.emit("Csatlakozva. Irányítás átvételre kész.")
-                    retry_delay = 3
-
-                    def send_command(cmd):
+                # Tiszta, egyértelmű státusz üzenet a siker után
+                self.status_update.emit("Csatlakozva. Irányítás átvételre kész.")
+                
+                # Hotkey listener a kliens oldalon
+                hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
+                hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
+                client_pressed_special_keys = set()
+                client_pressed_vk_codes = set()
+                def hk_press(key):
+                    try: client_pressed_vk_codes.add(key.vk)
+                    except AttributeError: client_pressed_special_keys.add(key)
+                    combined_pressed = client_pressed_special_keys.union({keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes})
+                    if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
+                        logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
                         try:
-                            packed = msgpack.packb({'command': cmd}, use_bin_type=True)
+                            packed = msgpack.packb({'command': 'switch_elitedesk'}, use_bin_type=True)
                             s.sendall(struct.pack('!I', len(packed)) + packed)
-                            logging.info(f"Command sent to server: {cmd}")
-                        except Exception:
-                            logging.error("Nem sikerult parancsot kuldeni", exc_info=True)
+                        except Exception: pass
+                def hk_release(key):
+                    try: client_pressed_vk_codes.discard(key.vk)
+                    except AttributeError: client_pressed_special_keys.discard(key)
+                hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
+                hk_listener.start()
 
-                    hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
-                    hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
+                # A belső while ciklus, ami az üzeneteket fogadja
+                def recv_all(sock, n):
+                    data = b''
+                    while len(data) < n:
+                        chunk = sock.recv(n - len(data))
+                        if not chunk: return None
+                        data += chunk
+                    return data
 
-                    client_pressed_special_keys = set()
-                    client_pressed_vk_codes = set()
+                while self._running and self.server_ip == ip:
+                    raw_len = recv_all(s, 4)
+                    if not raw_len: break
+                    msg_len = struct.unpack('!I', raw_len)[0]
+                    payload = recv_all(s, msg_len)
+                    if payload is None: break
+                    data = msgpack.unpackb(payload, raw=False)
+                    self.message_queue.put((s, data))
+            
+            except (ConnectionRefusedError, socket.timeout, OSError) as e:
+                if self._running:
+                    logging.warning(f"Csatlakozás sikertelen: {e.__class__.__name__}. A szerver valószínűleg nem elérhető.")
+            
+            except Exception as e:
+                if self._running:
+                    logging.error(f"Váratlan hiba a csatlakozáskor: {e}", exc_info=True)
 
-                    def hk_press(key):
-                        try:
-                            client_pressed_vk_codes.add(key.vk)
-                        except AttributeError:
-                            client_pressed_special_keys.add(key)
+            finally:
+                logging.info("Szerverkapcsolat lezárult vagy sikertelen volt.")
+                if hb_thread: hb_thread.join(timeout=0.1)
+                if self.clipboard_thread: self.clipboard_thread.join(timeout=0.1)
+                
+                # A többi cleanup kód
+                for k in list(self._pressed_keys):
+                    try: self.keyboard_controller.release(k)
+                    except: pass
+                self._pressed_keys.clear()
+                if hk_listener: hk_listener.stop()
+                self.release_hotkey_keys()
+                # Biztonságos hívás, csak akkor fut le, ha 's' létezik és létrejött a kapcsolat
+                if s: self.file_handler.on_client_disconnected(s)
 
-                        combined_pressed = client_pressed_special_keys.union(
-                            {keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes}
-                        )
-
-                        if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
-                            logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
-                            send_command('switch_elitedesk')
-
-                    def hk_release(key):
-                        try:
-                            client_pressed_vk_codes.discard(key.vk)
-                        except AttributeError:
-                            client_pressed_special_keys.discard(key)
-
-                    hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
-                    hk_listener.start()
-
-                    last_event_time = time.time()
-                    last_warning = 0
-                    hb_thread = None
-
-                    def heartbeat():
-                        nonlocal last_warning
-                        while self._running and self.server_ip == ip:
-                            if time.time() - last_event_time > 2:
-                                if time.time() - last_warning > 2:
-                                    logging.warning("No input events received for over 2 seconds")
-                                    last_warning = time.time()
-                            time.sleep(1)
-
-                    hb_thread = threading.Thread(target=heartbeat, daemon=True, name="HeartbeatThread")
-                    hb_thread.start()
-
-                    def recv_all(sock, n):
-                        data = b''
-                        while len(data) < n:
-                            chunk = sock.recv(n - len(data))
-                            if not chunk:
-                                return None
-                            data += chunk
-                        return data
-
-                    while self._running and self.server_ip == ip:
-                        logging.debug(
-                            "connect_to_server recv loop. cancel=%s",
-                            self.file_handler._cancel_transfer.is_set(),
-                        )
-                        try:
-                            raw_len = recv_all(s, 4)
-                            if not raw_len:
-                                break
-                            msg_len = struct.unpack('!I', raw_len)[0]
-                            payload = recv_all(s, msg_len)
-                            if payload is None:
-                                break
-                            data = msgpack.unpackb(payload, raw=False)
-                            last_event_time = time.time()
-                            self.message_queue.put((s, data))
-                        except Exception as e:
-                            logging.error(
-                                f"Hiba a szervertől kapott üzenet feldolgozásakor: {e}",
-                                exc_info=True,
-                            )
+                self.server_socket = None
+                
+                if self._running:
+                    # Exponenciális visszalépés
+                    self.status_update.emit(f"Újrapróbálkozás {retry_delay:.0f} mp múlva...")
+                    logging.info(f"Újracsatlakozási kísérlet {retry_delay:.1f} másodperc múlva...")
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 1.5, max_retry_delay)
 
             except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
                 if self._running:
