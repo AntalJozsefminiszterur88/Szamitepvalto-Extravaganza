@@ -103,6 +103,13 @@ When controlling the laptop, press **Ctrl + Shift + F12** to immediately switch
 control to the EliteDesk. The laptop client sends a command back to the host,
 which activates the EliteDesk as the new target.
 
+### Pico hardware buttons
+
+If a Raspberry Pi Pico is connected via USB, the application now monitors it
+with a dedicated background thread. Button `1` returns control to the desktop,
+`2` selects the laptop and `3` selects the EliteDesk. Connection and
+disconnection events are logged so you can verify detection in the console.
+
 ### Autostart
 
 On Windows the application configures autostart via the registry. When started

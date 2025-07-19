@@ -4,3 +4,4 @@ zeroconf
 monitorcontrol
 msgpack
 pyperclip
+pyserial

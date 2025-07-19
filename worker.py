@@ -57,7 +57,7 @@ class KVMWorker(QObject):
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
-        'keyboard_controller', '_pressed_keys'
+        'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler'
     )
 
     finished = Signal()
@@ -98,6 +98,8 @@ class KVMWorker(QObject):
         self.mouse_controller = mouse.Controller()
         self.keyboard_controller = keyboard.Controller()
         self._pressed_keys = set()
+        self.pico_thread = None
+        self.pico_handler = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -265,6 +267,8 @@ class KVMWorker(QObject):
             self.connection_thread.join(timeout=1)
         if self.clipboard_thread and self.clipboard_thread.is_alive():
             self.clipboard_thread.join(timeout=1)
+        if self.pico_thread and self.pico_thread.is_alive():
+            self.pico_thread.join(timeout=1)
         if self.message_processor_thread and self.message_processor_thread.is_alive():
             try:
                 self.message_queue.put_nowait((None, None))
@@ -291,6 +295,17 @@ class KVMWorker(QObject):
             target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
         )
         self.clipboard_thread.start()
+
+        # Start Pico serial monitoring in a separate thread
+        if self.pico_thread is None:
+            from pico_serial_handler import PicoSerialHandler
+            self.pico_handler = PicoSerialHandler(self)
+            self.pico_thread = threading.Thread(
+                target=self.pico_handler.run,
+                daemon=True,
+                name="PicoSerial",
+            )
+            self.pico_thread.start()
 
         
         info = ServiceInfo(

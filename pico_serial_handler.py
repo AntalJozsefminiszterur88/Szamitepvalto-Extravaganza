@@ -24,18 +24,24 @@ class PicoSerialHandler:
         return None
 
     def run(self):
-        while True:
+        """Monitor the Pico serial connection and trigger worker actions."""
+        logging.info("PicoSerialHandler thread started")
+        while self.worker._running:
             port_name = self._find_pico_port()
             if not port_name:
-                logging.info("Pico not found, scanning again...")
-                time.sleep(5)
+                logging.info("No Pico detected")
+                for _ in range(5):
+                    if not self.worker._running:
+                        logging.info("PicoSerialHandler stopping - worker ended")
+                        return
+                    time.sleep(1)
                 continue
 
             logging.info("Pico found on %s", port_name)
             try:
                 with serial.Serial(port_name, 9600, timeout=1) as ser:
                     logging.info("Connection to Pico active")
-                    while True:
+                    while self.worker._running:
                         data = ser.read(1)
                         if not data:
                             continue
@@ -48,3 +54,4 @@ class PicoSerialHandler:
             except serial.SerialException:
                 logging.info("Pico disconnected")
                 time.sleep(1)
+        logging.info("PicoSerialHandler thread exiting")
