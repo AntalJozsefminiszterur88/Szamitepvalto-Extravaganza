@@ -2,11 +2,14 @@ import time
 import board
 import digitalio
 import usb_hid
+import usb_cdc
 from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
 
 # Initialize the keyboard device
 kbd = Keyboard(usb_hid.devices)
+# Open the USB serial connection for sending button events
+serial = usb_cdc.data
 
 # Configure pins for the three buttons
 button1_pin = digitalio.DigitalInOut(board.GP16)
@@ -29,6 +32,9 @@ while True:
         kbd.press(Keycode.SHIFT, Keycode.KEYPAD_ZERO)
         time.sleep(0.1)
         kbd.release_all()
+        serial.write(b'1')
+        serial.flush()
+        time.sleep(0.05)
         while button1_pin.value:
             time.sleep(0.01)
 
@@ -37,6 +43,9 @@ while True:
         kbd.press(Keycode.SHIFT, Keycode.KEYPAD_ONE)
         time.sleep(0.1)
         kbd.release_all()
+        serial.write(b'2')
+        serial.flush()
+        time.sleep(0.05)
         while button2_pin.value:
             time.sleep(0.01)
 
@@ -45,6 +54,9 @@ while True:
         kbd.press(Keycode.SHIFT, Keycode.KEYPAD_TWO)
         time.sleep(0.1)
         kbd.release_all()
+        serial.write(b'3')
+        serial.flush()
+        time.sleep(0.05)
         while button3_pin.value:
             time.sleep(0.01)
 

@@ -110,6 +110,15 @@ with a dedicated background thread. Button `1` returns control to the desktop,
 `2` selects the laptop and `3` selects the EliteDesk. Connection and
 disconnection events are logged so you can verify detection in the console.
 
+### CircuitPython HID script
+
+The `pico_hid_switch.py` example runs directly on the Pico. It emulates the hotkey
+presses for switching computers and now opens the `usb_cdc` serial connection.
+When a button is pressed the script writes `b'1'`, `b'2'` or `b'3'` to the serial
+port and briefly pauses so the host receives the byte. The `PicoSerialHandler`
+in the desktop application listens for these values to activate the appropriate
+target.
+
 ### Autostart
 
 On Windows the application configures autostart via the registry. When started
