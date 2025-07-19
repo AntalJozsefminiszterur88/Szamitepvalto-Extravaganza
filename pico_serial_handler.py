@@ -19,6 +19,13 @@ class PicoSerialHandler:
                     return port.device
                 if any(k in desc for k in keywords) or any(k in manuf for k in keywords):
                     return port.device
+                logging.debug(
+                    "Ignoring port device=%s vid=%s description=%s manufacturer=%s",
+                    port.device,
+                    port.vid,
+                    port.description,
+                    getattr(port, "manufacturer", ""),
+                )
             except Exception:
                 continue
         return None

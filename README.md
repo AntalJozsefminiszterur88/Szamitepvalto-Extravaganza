@@ -53,9 +53,11 @@ The main dependencies are:
 
 After installing the dependencies, run `python main.py` to launch the GUI. The
 application logs activity to the console and stores settings via
-`QSettings`. Use the interface to configure host and client codes, select which
-computer this instance represents (Desktop, Laptop or EliteDesk) and start or
-stop the KVM service. The correct operating mode is selected automatically.
+`QSettings`. If you need to troubleshoot problems you can enable debug logging
+(see the section below) for much more detailed output. Use the interface to
+configure host and client codes, select which computer this instance represents
+(Desktop, Laptop or EliteDesk) and start or stop the KVM service. The correct
+operating mode is selected automatically.
 
 ### Automatic connection
 
