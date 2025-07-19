@@ -110,6 +110,9 @@ with a dedicated background thread. Button `1` returns control to the desktop,
 `2` selects the laptop and `3` selects the EliteDesk. Connection and
 disconnection events are logged so you can verify detection in the console.
 
+After copying `boot.py` to the Pico you must reset the board for the new
+configuration to take effect.
+
 ### Autostart
 
 On Windows the application configures autostart via the registry. When started
