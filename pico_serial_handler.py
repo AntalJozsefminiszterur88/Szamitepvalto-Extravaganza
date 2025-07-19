@@ -11,27 +11,34 @@ class PicoSerialHandler:
     def _find_pico_port(self):
         """Return the device path of a connected Pico if available."""
         keywords = ("pico", "circuitpython")
+        data_candidate = None
         for port in list_ports.comports():
             try:
                 desc_raw = port.description or ""
                 manuf_raw = getattr(port, "manufacturer", "") or ""
+                iface_raw = getattr(port, "interface", "") or ""
                 desc = desc_raw.lower()
                 manuf = manuf_raw.lower()
+                iface = iface_raw.lower()
                 vid = getattr(port, "vid", None)
-                if vid in (0x2E8A, 0x239A):
-                    return port.device
-                if any(k in desc for k in keywords) or any(k in manuf for k in keywords):
-                    return port.device
-                logging.debug(
-                    "Port not matched: %s VID=%s DESC='%s' MANUF='%s'",
-                    port.device,
-                    f"0x{vid:04X}" if vid else "None",
-                    desc_raw,
-                    manuf_raw,
-                )
+                matched = False
+                if vid in (0x2E8A, 0x239A) or any(k in desc for k in keywords) or any(k in manuf for k in keywords):
+                    matched = True
+                    if "data" in iface or "data" in desc:
+                        return port.device
+                    if not data_candidate:
+                        data_candidate = port.device
+                if not matched:
+                    logging.debug(
+                        "Port not matched: %s VID=%s DESC='%s' MANUF='%s'",
+                        port.device,
+                        f"0x{vid:04X}" if vid else "None",
+                        desc_raw,
+                        manuf_raw,
+                    )
             except Exception:
                 continue
-        return None
+        return data_candidate
 
     def run(self):
         """Monitor the Pico serial connection and trigger worker actions."""
