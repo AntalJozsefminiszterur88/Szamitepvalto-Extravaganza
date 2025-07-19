@@ -58,16 +58,28 @@ class PicoSerialHandler:
             try:
                 with serial.Serial(port_name, 9600, timeout=1) as ser:
                     logging.info("Connection to Pico active")
+                    ser.reset_input_buffer()
                     while self.worker._running:
                         data = ser.read(1)
                         if not data:
                             continue
-                        if data == b'1':
+                        data = data.strip()
+                        if not data:
+                            continue
+                        try:
+                            char = data.decode("utf-8")
+                        except Exception:
+                            logging.warning("Received undecodable data from Pico: %r", data)
+                            continue
+                        logging.info("Pico button pressed: %s", char)
+                        if char == '1':
                             self.worker.deactivate_kvm(switch_monitor=True, reason="pico button 1")
-                        elif data == b'2':
+                        elif char == '2':
                             self.worker.toggle_client_control('laptop', switch_monitor=False)
-                        elif data == b'3':
+                        elif char == '3':
                             self.worker.toggle_client_control('elitedesk', switch_monitor=True)
+                        else:
+                            logging.debug("Unknown Pico input: %r", data)
             except serial.SerialException:
                 logging.info("Pico disconnected")
                 time.sleep(1)
