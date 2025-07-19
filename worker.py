@@ -16,6 +16,7 @@ from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
 from file_transfer import FileTransferHandler
+from pico_serial_handler import PicoSerialHandler
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
@@ -56,6 +57,7 @@ class KVMWorker(QObject):
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
+        'pico_handler_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys'
     )
@@ -93,6 +95,7 @@ class KVMWorker(QObject):
         self.file_handler = FileTransferHandler(self)
         self.message_queue = queue.Queue()
         self.message_processor_thread = None
+        self.pico_handler_thread = None
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
         self.mouse_controller = mouse.Controller()
@@ -306,6 +309,13 @@ class KVMWorker(QObject):
             "ElitDesk - Shift + Numpad 2"
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
+
+        pico_handler = PicoSerialHandler(self)
+        self.pico_handler_thread = threading.Thread(
+            target=pico_handler.run, daemon=True, name="PicoSerialThread"
+        )
+        self.pico_handler_thread.start()
+        logging.info("Pico listener thread started.")
 
         # Definitions for NumLock OFF state based on diagnostic results
         hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
