@@ -16,11 +16,6 @@ from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
 from file_transfer import FileTransferHandler
-try:
-    from pico_serial_handler import PicoSerialHandler
-    PICO_SUPPORT = True
-except ImportError:
-    PICO_SUPPORT = False
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
@@ -61,7 +56,6 @@ class KVMWorker(QObject):
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
-        'pico_handler_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys'
     )
@@ -99,7 +93,6 @@ class KVMWorker(QObject):
         self.file_handler = FileTransferHandler(self)
         self.message_queue = queue.Queue()
         self.message_processor_thread = None
-        self.pico_handler_thread = None
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
         self.mouse_controller = mouse.Controller()
@@ -314,104 +307,72 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        if PICO_SUPPORT:
-            pico_handler = PicoSerialHandler(self)
-            self.pico_handler_thread = threading.Thread(
-                target=pico_handler.run, daemon=True, name="PicoSerialThread"
-            )
-            self.pico_handler_thread.start()
-            logging.info("Pico listener thread started.")
-        else:
-            logging.info(
-                "Pico handler not loaded (pico_serial_handler.py not found)."
-            )
 
-        # Definitions for NumLock OFF state based on diagnostic results
-        hotkey_desktop_l_numoff = {keyboard.Key.shift, keyboard.Key.insert}
-        hotkey_desktop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.insert}
-        hotkey_laptop_l_numoff = {keyboard.Key.shift, keyboard.Key.end}
-        hotkey_laptop_r_numoff = {keyboard.Key.shift_r, keyboard.Key.end}
-        hotkey_elitdesk_l_numoff = {keyboard.Key.shift, keyboard.Key.down}
-        hotkey_elitdesk_r_numoff = {keyboard.Key.shift_r, keyboard.Key.down}
 
-        # Definitions for NumLock ON state (fallback using VK codes)
-        hotkey_desktop_l_numon = {VK_LSHIFT, VK_NUMPAD0}
-        hotkey_desktop_r_numon = {VK_RSHIFT, VK_NUMPAD0}
-        hotkey_laptop_l_numon = {VK_LSHIFT, VK_NUMPAD1}
-        hotkey_laptop_r_numon = {VK_RSHIFT, VK_NUMPAD1}
-        hotkey_elitdesk_l_numon = {VK_LSHIFT, VK_NUMPAD2}
-        hotkey_elitdesk_r_numon = {VK_RSHIFT, VK_NUMPAD2}
+        # A gombnyomásokat figyelő halmazok
+        current_pressed_vk = set()
+        current_pressed_special = set()
 
-        current_pressed_vk_codes = set()
-        current_pressed_special_keys = set()
-        pending_client = None
+        # A hotkey kombinációk definíciója egy szótárban
+        hotkey_combinations = {
+            # Pico Hotkeys (speciális billentyűk)
+            frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f1}): "pico_desktop",
+            frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f1}): "pico_desktop",
+            frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f2}): "pico_laptop",
+            frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f2}): "pico_laptop",
+            frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f3}): "pico_elitedesk",
+            frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f3}): "pico_elitedesk",
+
+            # Eredeti Hotkeys (NumLock OFF, speciális billentyűk)
+            frozenset({keyboard.Key.shift, keyboard.Key.insert}): "desktop_numoff",
+            frozenset({keyboard.Key.shift_r, keyboard.Key.insert}): "desktop_numoff",
+            frozenset({keyboard.Key.shift, keyboard.Key.end}): "laptop_numoff",
+            frozenset({keyboard.Key.shift_r, keyboard.Key.end}): "laptop_numoff",
+            frozenset({keyboard.Key.shift, keyboard.Key.down}): "elitedesk_numoff",
+            frozenset({keyboard.Key.shift_r, keyboard.Key.down}): "elitedesk_numoff",
+        }
 
         def on_press(key):
-            nonlocal pending_client
             try:
-                current_pressed_vk_codes.add(key.vk)
+                current_pressed_vk.add(key.vk)
             except AttributeError:
-                current_pressed_special_keys.add(key)
+                current_pressed_special.add(key)
 
-            logging.debug(
-                f"Key pressed: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
-            )
+            # Ellenőrizzük a speciális billentyűk kombinációit
+            pressed_special_set = frozenset(current_pressed_special)
+            if pressed_special_set in hotkey_combinations:
+                action = hotkey_combinations[pressed_special_set]
+                handle_action(action)
+                return
 
-            if (
-                hotkey_desktop_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_desktop_r_numoff.issubset(current_pressed_special_keys)
-            ) or (
-                hotkey_desktop_l_numon.issubset(current_pressed_vk_codes)
-                or hotkey_desktop_r_numon.issubset(current_pressed_vk_codes)
-            ):
-                logging.info("!!! Asztal gyorsbillentyű észlelve! Visszaváltás... !!!")
-                pending_client = 'desktop'
-            elif (
-                hotkey_laptop_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_laptop_r_numoff.issubset(current_pressed_special_keys)
-            ) or (
-                hotkey_laptop_l_numon.issubset(current_pressed_vk_codes)
-                or hotkey_laptop_r_numon.issubset(current_pressed_vk_codes)
-            ):
-                logging.info("!!! Laptop gyorsbillentyű észlelve! Váltás... !!!")
-                pending_client = 'laptop'
-            elif (
-                hotkey_elitdesk_l_numoff.issubset(current_pressed_special_keys)
-                or hotkey_elitdesk_r_numoff.issubset(current_pressed_special_keys)
-            ) or (
-                hotkey_elitdesk_l_numon.issubset(current_pressed_vk_codes)
-                or hotkey_elitdesk_r_numon.issubset(current_pressed_vk_codes)
-            ):
-                logging.info("!!! ElitDesk gyorsbillentyű észlelve! Váltás... !!!")
-                pending_client = 'elitedesk'
+            # Ellenőrizzük a VK kódos kombinációkat (NumLock ON)
+            if (VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk):
+                if VK_NUMPAD0 in current_pressed_vk:
+                    handle_action("desktop_numon")
+                elif VK_NUMPAD1 in current_pressed_vk:
+                    handle_action("laptop_numon")
+                elif VK_NUMPAD2 in current_pressed_vk:
+                    handle_action("elitedesk_numon")
 
         def on_release(key):
-            nonlocal pending_client
             try:
-                current_pressed_vk_codes.discard(key.vk)
+                current_pressed_vk.discard(key.vk)
             except AttributeError:
-                current_pressed_special_keys.discard(key)
+                current_pressed_special.discard(key)
 
-            logging.debug(
-                f"Key released: {key}. VKs: {current_pressed_vk_codes}, Specials: {current_pressed_special_keys}"
-            )
+        def handle_action(action_name):
+            logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
+            if "desktop" in action_name:
+                self.deactivate_kvm(switch_monitor=True, reason=action_name)
+            elif "laptop" in action_name:
+                self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+            elif "elitedesk" in action_name:
+                self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
 
-            if pending_client and not current_pressed_vk_codes and not current_pressed_special_keys:
-                logging.info(f"Hotkey action executed: {pending_client}")
-                if pending_client == 'desktop':
-                    self.deactivate_kvm(switch_monitor=True, reason="desktop hotkey")
-                else:
-                    self.toggle_client_control(
-                        pending_client,
-                        switch_monitor=(pending_client == 'elitedesk'),
-                        release_keys=False,
-                    )
-                pending_client = None
-        
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
         hotkey_listener.start()
-        logging.info("Gyorsbillentyű figyelő elindítva.")
+        logging.info("Pynput figyelő elindítva.")
 
         while self._running:
             time.sleep(0.5)
