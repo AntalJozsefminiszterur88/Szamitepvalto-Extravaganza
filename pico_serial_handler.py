@@ -11,16 +11,26 @@ class PicoSerialHandler:
     def _find_pico_port(self):
         """Return the device path of a connected Pico if available."""
         keywords = ("pico", "circuitpython")
+        candidates = []
         for port in list_ports.comports():
             try:
-                desc = port.description.lower()
+                desc = (port.description or "").lower()
                 manuf = (getattr(port, "manufacturer", "") or "").lower()
-                if port.vid == 0x2E8A:
+                vid = getattr(port, "vid", None)
+                if vid in (0x2E8A, 0x239A):
                     return port.device
                 if any(k in desc for k in keywords) or any(k in manuf for k in keywords):
                     return port.device
+                candidates.append((vid, desc, manuf))
             except Exception:
                 continue
+        for vid, desc, manuf in candidates:
+            logging.debug(
+                "Checked serial port VID=%s DESC='%s' MANUF='%s'",
+                f"0x{vid:04X}" if vid else "None",
+                desc,
+                manuf,
+            )
         return None
 
     def run(self):
