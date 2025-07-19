@@ -1254,21 +1254,14 @@ class KVMWorker(QObject):
             except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
                 if self._running:
                     logging.warning(f"Csatlakozás megszakadt: {e}")
-                    self.status_update.emit(
-                        f"Kapcsolat megszakadt: {e}. Újrapróbálkozás {retry_delay} mp múlva..."
-                    )
             except (ConnectionRefusedError, socket.timeout, OSError) as e:
                 if self._running:
-                    logging.error(f"Csatlakozás sikertelen: {e}", exc_info=False)
-                    self.status_update.emit(
-                        f"Kapcsolat sikertelen: {e}. Újrapróbálkozás {retry_delay} mp múlva..."
+                    logging.warning(
+                        f"Csatlakozás sikertelen: {e.__class__.__name__}. A szerver valószínűleg nem elérhető."
                     )
             except Exception as e:
                 if self._running:
                     logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
-                    self.status_update.emit(
-                        f"Kapcsolat sikertelen: {e}. Újrapróbálkozás {retry_delay} mp múlva..."
-                    )
 
             finally:
                 logging.info("Connection to server closed")
@@ -1298,7 +1291,7 @@ class KVMWorker(QObject):
                 self.server_socket = None
                 if self._running:
                     self.status_update.emit(
-                        f"Connection failed. Retrying in {retry_delay} seconds..."
+                        f"Újrapróbálkozás {retry_delay:.0f} mp múlva..."
                     )
                     logging.info(
                         "Újracsatlakozási kísérlet %s másodperc múlva...",
