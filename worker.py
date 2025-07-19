@@ -1114,7 +1114,15 @@ class KVMWorker(QObject):
         self._pressed_keys = set()
         hk_listener = None
 
+        retry_delay = 3
+        max_retry_delay = 30
+        is_first_run = True
+
         while self._running:
+            if is_first_run:
+                self.status_update.emit("Waiting for network to initialize...")
+                time.sleep(5)
+                is_first_run = False
             ip = self.server_ip or self.last_server_ip
             if not ip:
                 time.sleep(0.5)
@@ -1127,6 +1135,7 @@ class KVMWorker(QObject):
                 ip,
                 self.file_handler._cancel_transfer.is_set(),
             )
+            self.status_update.emit(f"Connecting to server at {ip}...")
 
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1156,6 +1165,7 @@ class KVMWorker(QObject):
 
                     logging.info("TCP kapcsolat sikeres.")
                     self.status_update.emit("Csatlakozva. Irányítás átvéve.")
+                    retry_delay = 3
 
                     def send_command(cmd):
                         try:
@@ -1245,13 +1255,19 @@ class KVMWorker(QObject):
                 if self._running:
                     logging.warning(f"Csatlakozás megszakadt: {e}")
                     self.status_update.emit(
-                        f"Kapcsolat megszakadt: {e}. Újrapróbálkozás 5 mp múlva..."
+                        f"Kapcsolat megszakadt: {e}. Újrapróbálkozás {retry_delay} mp múlva..."
+                    )
+            except (ConnectionRefusedError, socket.timeout, OSError) as e:
+                if self._running:
+                    logging.error(f"Csatlakozás sikertelen: {e}", exc_info=False)
+                    self.status_update.emit(
+                        f"Kapcsolat sikertelen: {e}. Újrapróbálkozás {retry_delay} mp múlva..."
                     )
             except Exception as e:
                 if self._running:
                     logging.error(f"Csatlakozás sikertelen: {e}", exc_info=True)
                     self.status_update.emit(
-                        f"Kapcsolat sikertelen: {e}. Újrapróbálkozás 5 mp múlva..."
+                        f"Kapcsolat sikertelen: {e}. Újrapróbálkozás {retry_delay} mp múlva..."
                     )
 
             finally:
@@ -1281,6 +1297,13 @@ class KVMWorker(QObject):
                 self.file_handler.on_client_disconnected(s)
                 self.server_socket = None
                 if self._running:
-                    logging.info("Újracsatlakozási kísérlet 2 másodperc múlva...")
-                    time.sleep(2)
+                    self.status_update.emit(
+                        f"Connection failed. Retrying in {retry_delay} seconds..."
+                    )
+                    logging.info(
+                        "Újracsatlakozási kísérlet %s másodperc múlva...",
+                        retry_delay,
+                    )
+                    time.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 1.5, max_retry_delay)
                 logging.debug("connect_to_server loop ended")
