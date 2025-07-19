@@ -105,10 +105,12 @@ which activates the EliteDesk as the new target.
 
 ### Pico hardware buttons
 
-If a Raspberry Pi Pico is connected via USB, the application now monitors it
-with a dedicated background thread. Button `1` returns control to the desktop,
-`2` selects the laptop and `3` selects the EliteDesk. Connection and
-disconnection events are logged so you can verify detection in the console.
+If a Raspberry Pi Pico or a compatible microcontroller is connected via USB,
+the application monitors it with a dedicated background thread. Boards using
+the Raspberry Pi VID ``0x2E8A`` or Adafruit's ``0x239A`` are detected
+automatically. Button `1` returns control to the desktop, `2` selects the laptop
+and `3` selects the EliteDesk. Connection and disconnection events are logged so
+you can verify detection in the console.
 
 ### Autostart
 
