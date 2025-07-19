@@ -121,6 +121,9 @@ port and briefly pauses so the host receives the byte. The `PicoSerialHandler`
 in the desktop application listens for these values to activate the appropriate
 target.
 
+After copying `boot.py` to the Pico you must reset the board for the new
+configuration to take effect.
+
 ### Autostart
 
 On Windows the application configures autostart via the registry. When started
