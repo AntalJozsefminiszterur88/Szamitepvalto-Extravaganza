@@ -292,6 +292,8 @@ class KVMWorker(QObject):
 
     # worker.py -> JAVÍTOTT run_server metódus
 
+    # worker.py -> JAVÍTOTT, VÉGLEGES run_server metódus
+
     def run_server(self):
         accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
         accept_thread.start()
@@ -313,8 +315,8 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        # --- A belső változók és függvények DEFINÍCIÓJA ---
-        # Ezek a run_server metóduson belül vannak, ez így helyes.
+        # --- Új, robusztusabb billentyűkezelés ---
+        
         current_pressed_vk = set()
         numpad_pressed_vk = set()
         
@@ -333,27 +335,29 @@ class KVMWorker(QObject):
                 self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
 
         def on_press(key):
+            # Először a speciális F-billentyűket ellenőrizzük, amiket a Pico küld
+            if key == keyboard.Key.f13:
+                logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
+                self.deactivate_kvm(switch_monitor=True, reason="pico F13")
+                return # Feldolgoztuk, nincs más dolgunk
+            if key == keyboard.Key.f14:
+                logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
+                self.toggle_client_control('laptop', switch_monitor=False)
+                return
+            if key == keyboard.Key.f15:
+                logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
+                self.toggle_client_control('elitedesk', switch_monitor=True)
+                return
+
+            # Ha nem F-billentyű volt, akkor jöhet a VK-kód alapú logika a normál billentyűzetnek
             vk = getattr(key, 'vk', None)
             if vk is None:
-                return
+                return # Ha ez sem, akkor tényleg nem érdekel minket
 
             current_pressed_vk.add(vk)
             if getattr(key, '_flags', 0) == 0:
                 numpad_pressed_vk.add(vk)
             
-            if vk == VK_F13:
-                logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
-                self.deactivate_kvm(switch_monitor=True, reason="pico F13")
-                return
-            if vk == VK_F14:
-                logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
-                self.toggle_client_control('laptop', switch_monitor=False)
-                return
-            if vk == VK_F15:
-                logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
-                self.toggle_client_control('elitedesk', switch_monitor=True)
-                return
-
             is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
             if is_shift_pressed:
                 if VK_NUMPAD0 in current_pressed_vk or (VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk):
@@ -369,19 +373,16 @@ class KVMWorker(QObject):
                 current_pressed_vk.discard(vk)
                 numpad_pressed_vk.discard(vk)
 
-        # --- A billentyűfigyelő LÉTREHOZÁSA és INDÍTÁSA ---
-        # Ennek itt, a metóduson belül kell lennie, a fenti függvények definíciója UTÁN.
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
         hotkey_listener.start()
         logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
 
-        # A metódus fő ciklusa
         while self._running:
             time.sleep(0.5)
 
         logging.info("Adó szolgáltatás leállt.")
-
+        
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
         logging.debug("Server message processor thread started")
