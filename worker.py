@@ -934,9 +934,29 @@ class KVMWorker(QObject):
                 return key.value.vk
             return None
 
+        # worker.py -> start_kvm_streaming metóduson belüli on_key JAVÍTVA
+
         def on_key(k, p):
-            """Forward keyboard events to the client and handle the hotkey."""
+            """Forward keyboard events and handle Pico/host hotkeys DURING streaming."""
             try:
+                # --- ÚJ, FONTOS RÉSZ: VEZÉRLÉS FIGYELÉSE STREAMING ALATT ---
+                # A billentyű lenyomásakor (p=True) ellenőrizzük a vezérlőgombokat.
+                if p: 
+                    if k == keyboard.Key.f13:
+                        logging.info("!!! Visszaváltás a hosztra (Pico F13) észlelve a streaming alatt !!!")
+                        self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
+                        return # Ne küldjük tovább az F13-at a kliensnek
+                    if k == keyboard.Key.f14:
+                        logging.info("!!! Váltás laptopra (Pico F14) észlelve a streaming alatt !!!")
+                        self.toggle_client_control('laptop', switch_monitor=False)
+                        return # Ne küldjük tovább
+                    if k == keyboard.Key.f15:
+                        logging.info("!!! Váltás EliteDeskre (Pico F15) észlelve a streaming alatt !!!")
+                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        return
+
+                # Itt jön a már meglévő logika a Shift+Numpad0 figyelésére is.
+                # Ezt is kiegészítjük, hogy a Pico gombokkal konzisztens legyen.
                 vk = get_vk(k)
                 if vk is not None:
                     if p:
@@ -947,61 +967,23 @@ class KVMWorker(QObject):
                         current_vks.discard(vk)
                         numpad_vks.discard(vk)
 
-                if (
-                    (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and (
-                        VK_NUMPAD0 in current_vks
-                        or (VK_INSERT in current_vks and VK_INSERT in numpad_vks)
-                    )
-                ):
+                is_shift = VK_LSHIFT in current_vks or VK_RSHIFT in current_vks
+                is_num0 = VK_NUMPAD0 in current_vks or (VK_INSERT in current_vks and VK_INSERT in numpad_vks)
+                
+                # Visszaváltás Shift+Num0-val
+                if is_shift and is_num0:
                     logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
-                    # Send key releases to the client before disabling streaming
+                    # Elengedjük a billentyűket a kliensen, mielőtt megszakítjuk a kapcsolatot
                     for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_INSERT]:
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                            pressed_keys.discard(("vk", vk_code))
                     current_vks.clear()
                     self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
                     return
-                if (
-                    (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and (
-                        VK_NUMPAD1 in current_vks
-                        or (VK_END in current_vks and VK_END in numpad_vks)
-                    )
-                ):
-                    active_name = self.client_infos.get(self.active_client, "").lower()
-                    logging.debug(
-                        f"Hotkey detected for laptop with current_vks={current_vks} while active={active_name}"
-                    )
-                    if active_name != "elitedesk":
-                        for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD1]:
-                            if vk_code in current_vks:
-                                send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                                pressed_keys.discard(("vk", vk_code))
-                        current_vks.clear()
-                        self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
-                        return
-                if (
-                    (VK_LSHIFT in current_vks or VK_RSHIFT in current_vks)
-                    and (
-                        VK_NUMPAD2 in current_vks
-                        or (VK_DOWN in current_vks and VK_DOWN in numpad_vks)
-                    )
-                ):
-                    active_name = self.client_infos.get(self.active_client, "").lower()
-                    logging.debug(
-                        f"Hotkey detected for elitedesk with current_vks={current_vks} while active={active_name}"
-                    )
-                    if active_name != "laptop":
-                        for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD2]:
-                            if vk_code in current_vks:
-                                send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                                pressed_keys.discard(("vk", vk_code))
-                        current_vks.clear()
-                        self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
-                        return
+                
+                # --- EDDIG TART AZ ÚJ ÉS MÓDOSÍTOTT LOGIKA ---
 
+                # Az eredeti billentyű-továbbító logika marad
                 if hasattr(k, "char") and k.char is not None:
                     key_type = "char"
                     key_val = k.char
