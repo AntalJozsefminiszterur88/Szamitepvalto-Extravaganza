@@ -290,101 +290,97 @@ class KVMWorker(QObject):
 
     # worker.py -> run_server metódus JAVÍTVA
 
-def run_server(self):
-    accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
-    accept_thread.start()
+    # worker.py -> JAVÍTOTT run_server metódus
 
-    self.clipboard_thread = threading.Thread(
-        target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
-    )
-    self.clipboard_thread.start()
+    def run_server(self):
+        accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
+        accept_thread.start()
 
-    # A Felesleges PicoSerialHandler részt TÖRÖLTÜK INNEN!
-    
-    info = ServiceInfo(
-        SERVICE_TYPE,
-        f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
-        addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
-        port=self.settings['port']
-    )
-    self.zeroconf.register_service(info)
-    self.status_update.emit(
-        "Adó szolgáltatás regisztrálva. Gyorsbillentyűk aktívak."
-    )
-    logging.info("Zeroconf szolgáltatás regisztrálva.")
+        self.clipboard_thread = threading.Thread(
+            target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
+        )
+        self.clipboard_thread.start()
 
-    # A gombnyomásokat figyelő halmazok
-    current_pressed_vk = set()
-    numpad_pressed_vk = set()
+        info = ServiceInfo(
+            SERVICE_TYPE,
+            f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
+            addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
+            port=self.settings['port']
+        )
+        self.zeroconf.register_service(info)
+        self.status_update.emit(
+            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk aktívak."
+        )
+        logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-    # --- ÚJ, TISZTÁBB HOTKEY LOGIKA ---
-    def on_press(key):
-        vk = getattr(key, 'vk', None)
-        if vk is None:
-            return  # Csak a virtuális kódokkal foglalkozunk
-
-        current_pressed_vk.add(vk)
-        # NumLock-független NumPad kódok tárolása
-        if getattr(key, '_flags', 0) == 0:
-            numpad_pressed_vk.add(vk)
+        # --- A belső változók és függvények DEFINÍCIÓJA ---
+        # Ezek a run_server metóduson belül vannak, ez így helyes.
+        current_pressed_vk = set()
+        numpad_pressed_vk = set()
         
-        # --- PICO GOMBOK FIGYELÉSE (F13-F15) ---
-        # Az F13-F15 billentyűknek nincsenek módosítói, ezért egyszerűen figyeljük a VK kódjukat.
-        if vk == 124: # VK_F13
-            logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
-            self.deactivate_kvm(switch_monitor=True, reason="pico F13")
-            return
-        if vk == 125: # VK_F14
-            logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
-            # Figyelem: A felcserélt logika szerint a 2-es gomb a Laptop-ot kapcsolja.
-            # A pico_serial_handler-ben a '2' a laptop, a '3' az elitedesk volt.
-            # De a legutolsó kérésedben a NUM2-t az EliteDeskhez, a NUM1-et a Laptophoz kérted.
-            # Hogy konzisztens legyen, a F14-et a Laptophoz, F15-öt az EliteDeskhez rendelem.
-            # A Pico kódban a GP17 (gomb 2) az F14-et, a GP15 (gomb 3) az F15-öt küldi.
-            self.toggle_client_control('laptop', switch_monitor=False)
-            return
-        if vk == 126: # VK_F15
-            logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
-            self.toggle_client_control('elitedesk', switch_monitor=True)
-            return
+        # Virtuális billentyűk kódjai (biztonsági tartalék)
+        VK_F13 = 124
+        VK_F14 = 125
+        VK_F15 = 126
 
-        # --- BILLENTYŰZET GYORSBILLENTYŰK FIGYELÉSE ---
-        is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
-        
-        if is_shift_pressed:
-            # NumLock ON (VK kódok)
-            if VK_NUMPAD0 in current_pressed_vk: handle_action("desktop")
-            elif VK_NUMPAD1 in current_pressed_vk: handle_action("laptop")
-            elif VK_NUMPAD2 in current_pressed_vk: handle_action("elitedesk")
-            # NumLock OFF (VK kódok)
-            elif VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk: handle_action("desktop")
-            elif VK_END in current_pressed_vk and VK_END in numpad_pressed_vk: handle_action("laptop")
-            elif VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk: handle_action("elitedesk")
+        def handle_action(action_name):
+            logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
+            if "desktop" in action_name:
+                self.deactivate_kvm(switch_monitor=True, reason=action_name)
+            elif "laptop" in action_name:
+                self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+            elif "elitedesk" in action_name:
+                self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
 
-    def on_release(key):
-        vk = getattr(key, 'vk', None)
-        if vk is not None:
-            current_pressed_vk.discard(vk)
-            numpad_pressed_vk.discard(vk)
+        def on_press(key):
+            vk = getattr(key, 'vk', None)
+            if vk is None:
+                return
 
-    def handle_action(action_name):
-        logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
-        if "desktop" in action_name:
-            self.deactivate_kvm(switch_monitor=True, reason=action_name)
-        elif "laptop" in action_name:
-            self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
-        elif "elitedesk" in action_name:
-            self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
+            current_pressed_vk.add(vk)
+            if getattr(key, '_flags', 0) == 0:
+                numpad_pressed_vk.add(vk)
+            
+            if vk == VK_F13:
+                logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
+                self.deactivate_kvm(switch_monitor=True, reason="pico F13")
+                return
+            if vk == VK_F14:
+                logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
+                self.toggle_client_control('laptop', switch_monitor=False)
+                return
+            if vk == VK_F15:
+                logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
+                self.toggle_client_control('elitedesk', switch_monitor=True)
+                return
 
-    hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-    self.pynput_listeners.append(hotkey_listener)
-    hotkey_listener.start()
-    logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
+            is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
+            if is_shift_pressed:
+                if VK_NUMPAD0 in current_pressed_vk or (VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk):
+                    handle_action("desktop")
+                elif VK_NUMPAD1 in current_pressed_vk or (VK_END in current_pressed_vk and VK_END in numpad_pressed_vk):
+                    handle_action("laptop")
+                elif VK_NUMPAD2 in current_pressed_vk or (VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk):
+                    handle_action("elitedesk")
 
-    while self._running:
-        time.sleep(0.5)
+        def on_release(key):
+            vk = getattr(key, 'vk', None)
+            if vk is not None:
+                current_pressed_vk.discard(vk)
+                numpad_pressed_vk.discard(vk)
 
-    logging.info("Adó szolgáltatás leállt.")
+        # --- A billentyűfigyelő LÉTREHOZÁSA és INDÍTÁSA ---
+        # Ennek itt, a metóduson belül kell lennie, a fenti függvények definíciója UTÁN.
+        hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self.pynput_listeners.append(hotkey_listener)
+        hotkey_listener.start()
+        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
+
+        # A metódus fő ciklusa
+        while self._running:
+            time.sleep(0.5)
+
+        logging.info("Adó szolgáltatás leállt.")
 
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
