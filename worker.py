@@ -621,29 +621,42 @@ class KVMWorker(QObject):
             logging.warning(f"Hálózati hiba a kliensnél ({client_name}): {e}")
         except Exception as e:
             logging.error(f"Váratlan hiba a monitor_client-ben ({client_name}): {e}", exc_info=True)
+       # worker.py -> monitor_client metóduson belüli 'finally' blokk JAVÍTVA
+
         finally:
-            logging.warning(f"Kliens lecsatlakozott: {addr}.")
+            logging.warning(f"Kliens lecsatlakozott: {client_name} ({addr}).")
             try:
                 sock.close()
             except Exception:
                 pass
+            
+            # --- JAVÍTOTT LECSATLAKOZÁSI LOGIKA ---
             self.file_handler.on_client_disconnected(sock)
+
+            was_active_client = (sock == self.active_client)
+
+            # Biztosan eltávolítjuk a socketet a listákból
             if sock in self.client_sockets:
                 self.client_sockets.remove(sock)
             if sock in self.client_infos:
                 del self.client_infos[sock]
-            if sock == self.active_client:
+            
+            # Ha a lecsatlakozott kliens volt az aktív, akkor kell új aktív klienst választani
+            if was_active_client:
                 if self.client_sockets:
+                    # Választunk egy új aktív klienst a maradékból
                     self.active_client = self.client_sockets[0]
-                    self.status_update.emit(
-                        f"Aktív kliens megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
-                    )
+                    new_active_name = self.client_infos.get(self.active_client, 'ismeretlen')
+                    self.status_update.emit(f"Aktív kliens megszakadt. Átváltás: {new_active_name}")
+                    logging.info(f"Active client connection lost. Switched to next available: {new_active_name}")
                 else:
+                    # Nem maradt több kliens
                     self.active_client = None
-            if self.kvm_active and not self.client_sockets:
-                self.deactivate_kvm(reason="all clients disconnected")
-            logging.debug("monitor_client exit for %s", client_name)
+                    # Ha a KVM még aktív volt, most deaktiváljuk
+                    if self.kvm_active:
+                        self.deactivate_kvm(reason="last active client disconnected")
 
+            logging.debug("monitor_client exit for %s", client_name)
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
         logging.info(
@@ -693,6 +706,8 @@ class KVMWorker(QObject):
                 logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
                 time.sleep(1)
 
+    # worker.py -> JAVÍTOTT deactivate_kvm metódus
+
     def deactivate_kvm(
         self,
         switch_monitor=None,
@@ -700,29 +715,37 @@ class KVMWorker(QObject):
         release_keys: bool = True,
         reason: Optional[str] = None,
     ):
+        # --- ÚJ, FONTOS ELLENŐRZÉS A METÓDUS ELEJÉN ---
+        # Ha a KVM már eleve inaktív, ne csináljunk semmit, csak naplózzuk az eseményt.
+        # Ez megakadályozza a felesleges hívásokat és a hibát.
+        if not self.kvm_active:
+            logging.info(
+                "deactivate_kvm called, but KVM was already inactive. Reason: %s. No action taken.",
+                reason or "unknown",
+            )
+            # Biztonsági okokból itt is elengedhetjük a billentyűket, ha beragadnának
+            if release_keys:
+                self.release_hotkey_keys()
+            return
+        # --- EDDIG TART AZ ÚJ RÉSZ ---
+
         if reason:
             logging.info(
                 "deactivate_kvm called. reason=%s switch_monitor=%s kvm_active=%s active_client=%s",
-                reason,
-                switch_monitor,
-                self.kvm_active,
-                self.client_infos.get(self.active_client),
+                reason, switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
             )
         else:
             logging.info(
                 "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
-                switch_monitor,
-                self.kvm_active,
-                self.client_infos.get(self.active_client),
+                switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
             )
-        self.kvm_active = False
+        
+        self.kvm_active = False # Most már biztosak lehetünk benne, hogy 'True'-ról váltunk 'False'-ra.
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
 
-        # A monitor visszaváltást a toggle metódus végzi, miután a streaming szál leállt
         switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
         if switch:
-            # Itt egy kis időt adunk a streaming szálnak a leállásra, mielőtt váltunk
             time.sleep(0.2)
             try:
                 with list(get_monitors())[0] as monitor:
@@ -731,23 +754,25 @@ class KVMWorker(QObject):
             except Exception as e:
                 self.status_update.emit(f"Monitor hiba: {e}")
                 logging.error(f"Monitor hiba: {e}", exc_info=True)
-        # Ensure hotkey keys are released when deactivating if requested
+        
         if release_keys:
             self.release_hotkey_keys()
 
-        if hasattr(self, '_host_mouse_controller') and hasattr(self, '_orig_mouse_pos'):
+        if hasattr(self, '_host_mouse_controller') and self._host_mouse_controller and hasattr(self, '_orig_mouse_pos'):
             try:
                 self._host_mouse_controller.position = self._orig_mouse_pos
             except Exception as e:
                 logging.error(f"Failed to restore mouse position: {e}", exc_info=True)
-            self._host_mouse_controller = None
-            self._orig_mouse_pos = None
+        
+        self._host_mouse_controller = None
+        self._orig_mouse_pos = None
 
         if self.active_client not in self.client_sockets:
             if self.active_client is not None:
                 logging.warning("Active client disconnected during deactivation")
             else:
                 logging.debug("No active client set after deactivation")
+            
             if self.client_sockets:
                 self.active_client = self.client_sockets[0]
                 logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
