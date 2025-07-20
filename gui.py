@@ -5,6 +5,7 @@ import sys
 import time
 import logging
 import os
+import subprocess
 
 # Windows specific module only available on that platform
 import winreg  # type: ignore
@@ -39,30 +40,48 @@ MB = 1024 * 1024
 
 
 def set_autostart(enabled: bool) -> None:
-    """Enable or disable autostart depending on the current platform."""
-    if sys.platform.startswith("win") and winreg is not None:
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        app_name = "KVM_Switch"
-        try:
-            reg_key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_WRITE)
-            if enabled:
-                if getattr(sys, "frozen", False):
-                    app_path = f'"{sys.executable}" --tray'
-                else:
-                    script = os.path.join(os.path.dirname(__file__), "main.py")
-                    app_path = f'"{sys.executable}" "{script}" --tray'
-                winreg.SetValueEx(reg_key, app_name, 0, winreg.REG_SZ, app_path)
-                logging.info("Automatikus indulás bekapcsolva. Útvonal: %s", app_path)
-            else:
-                winreg.DeleteValue(reg_key, app_name)
-                logging.info("Automatikus indulás kikapcsolva.")
-            winreg.CloseKey(reg_key)
-        except FileNotFoundError:
-            logging.warning("Automatikus indulás kikapcsolva (kulcs nem létezett).")
-        except Exception as e:  # pragma: no cover - platform specific
-            logging.error("Hiba az automatikus indulás beállításakor: %s", e)
-    else:
-        logging.info("Autostart beállítás kihagyva: nem támogatott platform.")
+    """Enable or disable autostart using the Task Scheduler for higher priority."""
+    app_name = "MyKVM_Start" # A feladat neve a Feladatütemezőben
+    
+    try:
+        if enabled:
+            # Összeállítjuk az indítandó parancsot és az argumentumait
+            if getattr(sys, "frozen", False): # Ha PyInstaller exe-ként fut
+                executable = f'"{sys.executable}"'
+                arguments = '--tray'
+            else: # Ha sima python szkriptként fut
+                # Fontos a pythonw.exe, hogy ne legyen konzolablak!
+                executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
+                script_path = os.path.join(os.path.dirname(__file__), "main.py")
+                arguments = f'"{script_path}" --tray'
+            
+            # A parancs a feladat létrehozásához
+            # /SC ONLOGON -> Bejelentkezéskor indul
+            # /RL HIGHEST -> Legmagasabb jogosultságokkal fut
+            # /F -> Ha már létezik a feladat, írja felül
+            command = [
+                'schtasks', '/Create', '/TN', app_name,
+                '/TR', f"'{executable} {arguments}'",
+                '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F'
+            ]
+            
+            logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
+            # Futtatjuk a parancsot, elrejtve a felugró ablakot
+            subprocess.run(command, check=True, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info("Automatikus indulás (Feladatütemező) sikeresen beállítva.")
+
+        else:
+            # A parancs a feladat törléséhez
+            command = ['schtasks', '/Delete', '/TN', app_name, '/F']
+            logging.info(f"Autostart feladat törlése: {' '.join(command)}")
+            subprocess.run(command, check=True, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.info("Automatikus indulás (Feladatütemező) sikeresen törölve.")
+
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # A FileNotFoundError akkor jön, ha a schtasks nem található (nem Windows)
+        # A CalledProcessError akkor, ha a parancs hibával fut le (pl. jogosultsági probléma)
+        logging.error("Hiba az automatikus indulás beállításakor (schtasks): %s", e)
+        # Itt lehetne egy fallback a régi, Registry-s megoldásra, ha szükséges
 
 
 class MainWindow(QMainWindow):
