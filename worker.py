@@ -294,15 +294,16 @@ class KVMWorker(QObject):
 
     # worker.py -> JAVÍTOTT, VÉGLEGES run_server metódus
 
-    def run_server(self):
-        accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
-        accept_thread.start()
-
+     def run_server(self):
+        # A szálakat most már a cikluson belül kezeljük, hogy újraindíthatók legyenek
+        accept_thread = None
+        
         self.clipboard_thread = threading.Thread(
             target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
         )
         self.clipboard_thread.start()
 
+        # A Zeroconf szolgáltatás regisztrálása
         info = ServiceInfo(
             SERVICE_TYPE,
             f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
@@ -310,20 +311,57 @@ class KVMWorker(QObject):
             port=self.settings['port']
         )
         self.zeroconf.register_service(info)
+        last_zeroconf_refresh = time.time()
+
         self.status_update.emit(
             "Adó szolgáltatás regisztrálva. Gyorsbillentyűk aktívak."
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        # --- Új, robusztusabb billentyűkezelés ---
+        # A billentyűfigyelőt csak egyszer kell elindítani, az általában túléli az alvást
+        self.start_main_hotkey_listener()
         
+        # --- FŐ ÖNGYÓGYÍTÓ CIKLUS ---
+        while self._running:
+            # 1. EGÉSZSÉGELLENŐRZÉS: Fut-e a kapcsolatfogadó szál?
+            if accept_thread is None or not accept_thread.is_alive():
+                if accept_thread is not None:
+                    logging.warning("A kapcsolatfogadó szál (AcceptThread) leállt. Újraindítás...")
+                else:
+                    logging.info("A kapcsolatfogadó szál (AcceptThread) indítása...")
+                
+                accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
+                accept_thread.start()
+
+            # 2. EGÉSZSÉGELLENŐRZÉS: Zeroconf frissítése 60 másodpercenként
+            if time.time() - last_zeroconf_refresh > 60:
+                logging.info("Zeroconf szolgáltatás periodikus frissítése...")
+                try:
+                    # Frissítjük az IP címet, hátha változott
+                    current_ip = socket.gethostbyname(socket.gethostname())
+                    info.addresses = [socket.inet_aton(current_ip)]
+                    # A ServiceInfo objektumot nem lehet közvetlenül frissíteni, újra kell regisztrálni
+                    self.zeroconf.unregister_service(info)
+                    self.zeroconf.register_service(info)
+                    last_zeroconf_refresh = time.time()
+                    logging.info(f"Zeroconf szolgáltatás frissítve az új IP-vel: {current_ip}")
+                except Exception as e:
+                    logging.error("Hiba a Zeroconf frissítésekor: %s", e)
+
+            time.sleep(5) # 5 másodpercenként ellenőrizzük az állapotot
+
+        logging.info("Adó szolgáltatás leállt.")
+
+    def start_main_hotkey_listener(self):
+        """Segédmetódus a globális gyorsbillentyű-figyelő indítására.
+        Ez azért van külön, hogy csak egyszer hívjuk meg."""
+        if self.pynput_listeners: # Elkerüljük a többszöri indítást
+            return
+
         current_pressed_vk = set()
         numpad_pressed_vk = set()
         
-        # Virtuális billentyűk kódjai (biztonsági tartalék)
-        VK_F13 = 124
-        VK_F14 = 125
-        VK_F15 = 126
+        VK_F13, VK_F14, VK_F15 = 124, 125, 126
 
         def handle_action(action_name):
             logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
@@ -335,11 +373,10 @@ class KVMWorker(QObject):
                 self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
 
         def on_press(key):
-            # Először a speciális F-billentyűket ellenőrizzük, amiket a Pico küld
             if key == keyboard.Key.f13:
                 logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
                 self.deactivate_kvm(switch_monitor=True, reason="pico F13")
-                return # Feldolgoztuk, nincs más dolgunk
+                return
             if key == keyboard.Key.f14:
                 logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
                 self.toggle_client_control('laptop', switch_monitor=False)
@@ -349,10 +386,8 @@ class KVMWorker(QObject):
                 self.toggle_client_control('elitedesk', switch_monitor=True)
                 return
 
-            # Ha nem F-billentyű volt, akkor jöhet a VK-kód alapú logika a normál billentyűzetnek
             vk = getattr(key, 'vk', None)
-            if vk is None:
-                return # Ha ez sem, akkor tényleg nem érdekel minket
+            if vk is None: return
 
             current_pressed_vk.add(vk)
             if getattr(key, '_flags', 0) == 0:
@@ -360,12 +395,9 @@ class KVMWorker(QObject):
             
             is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
             if is_shift_pressed:
-                if VK_NUMPAD0 in current_pressed_vk or (VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk):
-                    handle_action("desktop")
-                elif VK_NUMPAD1 in current_pressed_vk or (VK_END in current_pressed_vk and VK_END in numpad_pressed_vk):
-                    handle_action("laptop")
-                elif VK_NUMPAD2 in current_pressed_vk or (VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk):
-                    handle_action("elitedesk")
+                if VK_NUMPAD0 in current_pressed_vk or (VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk): handle_action("desktop")
+                elif VK_NUMPAD1 in current_pressed_vk or (VK_END in current_pressed_vk and VK_END in numpad_pressed_vk): handle_action("laptop")
+                elif VK_NUMPAD2 in current_pressed_vk or (VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk): handle_action("elitedesk")
 
         def on_release(key):
             vk = getattr(key, 'vk', None)
