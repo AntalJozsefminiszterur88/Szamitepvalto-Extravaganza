@@ -623,6 +623,8 @@ class KVMWorker(QObject):
             logging.error(f"Váratlan hiba a monitor_client-ben ({client_name}): {e}", exc_info=True)
        # worker.py -> monitor_client metóduson belüli 'finally' blokk JAVÍTVA
 
+        # worker.py -> monitor_client metóduson belüli 'finally' blokk - VÉGLEGES JAVÍTÁS
+
         finally:
             logging.warning(f"Kliens lecsatlakozott: {client_name} ({addr}).")
             try:
@@ -630,31 +632,34 @@ class KVMWorker(QObject):
             except Exception:
                 pass
             
-            # --- JAVÍTOTT LECSATLAKOZÁSI LOGIKA ---
+            # --- ÚJ, EGYSZERŰBB ÉS HELYES LECSATLAKOZÁSI LOGIKA ---
             self.file_handler.on_client_disconnected(sock)
-
+            
             was_active_client = (sock == self.active_client)
 
-            # Biztosan eltávolítjuk a socketet a listákból
+            # Eltávolítjuk a klienst a listákból, bárhol is volt.
             if sock in self.client_sockets:
                 self.client_sockets.remove(sock)
             if sock in self.client_infos:
                 del self.client_infos[sock]
             
-            # Ha a lecsatlakozott kliens volt az aktív, akkor kell új aktív klienst választani
-            if was_active_client:
-                if self.client_sockets:
-                    # Választunk egy új aktív klienst a maradékból
-                    self.active_client = self.client_sockets[0]
-                    new_active_name = self.client_infos.get(self.active_client, 'ismeretlen')
-                    self.status_update.emit(f"Aktív kliens megszakadt. Átváltás: {new_active_name}")
-                    logging.info(f"Active client connection lost. Switched to next available: {new_active_name}")
-                else:
-                    # Nem maradt több kliens
-                    self.active_client = None
-                    # Ha a KVM még aktív volt, most deaktiváljuk
-                    if self.kvm_active:
-                        self.deactivate_kvm(reason="last active client disconnected")
+            # FŐ LOGIKA: Ha a KVM aktív volt, és a lecsatlakozott kliens
+            # volt az aktív, akkor mindenképpen adjuk vissza az irányítást a hosztnak!
+            if was_active_client and self.kvm_active:
+                logging.info(f"Active client '{client_name}' disconnected. Deactivating KVM and returning control to host.")
+                # Itt hívjuk a deactivate_kvm-et, ami mindent elintéz:
+                # - leállítja a streaminget
+                # - visszaadja a billentyűzet/egér kontrollt
+                # - visszaállítja a monitort
+                self.deactivate_kvm(reason="active client disconnected")
+            
+            # Ha a lecsatlakozott kliens nem volt aktív, vagy a KVM inaktív volt,
+            # nincs különösebb teendő, csak a listákból való eltávolítás.
+            # Az 'active_client' változó vagy None lesz (ha nem maradt senki),
+            # vagy továbbra is a helyes, még csatlakoztatott kliensre mutat.
+            elif was_active_client:
+                # Ha a KVM nem volt aktív, csak nullázzuk az aktív klienst
+                self.active_client = None
 
             logging.debug("monitor_client exit for %s", client_name)
     def toggle_kvm_active(self, switch_monitor=True):
