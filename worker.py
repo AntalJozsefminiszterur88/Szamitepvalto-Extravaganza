@@ -288,115 +288,103 @@ class KVMWorker(QObject):
             self.run_client()
         self.finished.emit()
 
-    def run_server(self):
-        accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
-        accept_thread.start()
+    # worker.py -> run_server metódus JAVÍTVA
 
-        self.clipboard_thread = threading.Thread(
-            target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
-        )
-        self.clipboard_thread.start()
+def run_server(self):
+    accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
+    accept_thread.start()
 
-        # Start Pico serial monitoring in a separate thread
-        if self.pico_thread is None:
-            from pico_serial_handler import PicoSerialHandler
-            self.pico_handler = PicoSerialHandler(self)
-            self.pico_thread = threading.Thread(
-                target=self.pico_handler.run,
-                daemon=True,
-                name="PicoSerial",
-            )
-            self.pico_thread.start()
+    self.clipboard_thread = threading.Thread(
+        target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
+    )
+    self.clipboard_thread.start()
 
+    # A Felesleges PicoSerialHandler részt TÖRÖLTÜK INNEN!
+    
+    info = ServiceInfo(
+        SERVICE_TYPE,
+        f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
+        addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
+        port=self.settings['port']
+    )
+    self.zeroconf.register_service(info)
+    self.status_update.emit(
+        "Adó szolgáltatás regisztrálva. Gyorsbillentyűk aktívak."
+    )
+    logging.info("Zeroconf szolgáltatás regisztrálva.")
+
+    # A gombnyomásokat figyelő halmazok
+    current_pressed_vk = set()
+    numpad_pressed_vk = set()
+
+    # --- ÚJ, TISZTÁBB HOTKEY LOGIKA ---
+    def on_press(key):
+        vk = getattr(key, 'vk', None)
+        if vk is None:
+            return  # Csak a virtuális kódokkal foglalkozunk
+
+        current_pressed_vk.add(vk)
+        # NumLock-független NumPad kódok tárolása
+        if getattr(key, '_flags', 0) == 0:
+            numpad_pressed_vk.add(vk)
         
-        info = ServiceInfo(
-            SERVICE_TYPE,
-            f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
-            addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
-            port=self.settings['port']
-        )
-        self.zeroconf.register_service(info)
-        self.status_update.emit(
-            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk: "
-            "Asztal - Shift + Numpad 0, Laptop - Shift + Numpad 1, "
-            "ElitDesk - Shift + Numpad 2 (NumLock mindegy)"
-        )
-        logging.info("Zeroconf szolgáltatás regisztrálva.")
+        # --- PICO GOMBOK FIGYELÉSE (F13-F15) ---
+        # Az F13-F15 billentyűknek nincsenek módosítói, ezért egyszerűen figyeljük a VK kódjukat.
+        if vk == 124: # VK_F13
+            logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
+            self.deactivate_kvm(switch_monitor=True, reason="pico F13")
+            return
+        if vk == 125: # VK_F14
+            logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
+            # Figyelem: A felcserélt logika szerint a 2-es gomb a Laptop-ot kapcsolja.
+            # A pico_serial_handler-ben a '2' a laptop, a '3' az elitedesk volt.
+            # De a legutolsó kérésedben a NUM2-t az EliteDeskhez, a NUM1-et a Laptophoz kérted.
+            # Hogy konzisztens legyen, a F14-et a Laptophoz, F15-öt az EliteDeskhez rendelem.
+            # A Pico kódban a GP17 (gomb 2) az F14-et, a GP15 (gomb 3) az F15-öt küldi.
+            self.toggle_client_control('laptop', switch_monitor=False)
+            return
+        if vk == 126: # VK_F15
+            logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
+            self.toggle_client_control('elitedesk', switch_monitor=True)
+            return
 
+        # --- BILLENTYŰZET GYORSBILLENTYŰK FIGYELÉSE ---
+        is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
+        
+        if is_shift_pressed:
+            # NumLock ON (VK kódok)
+            if VK_NUMPAD0 in current_pressed_vk: handle_action("desktop")
+            elif VK_NUMPAD1 in current_pressed_vk: handle_action("laptop")
+            elif VK_NUMPAD2 in current_pressed_vk: handle_action("elitedesk")
+            # NumLock OFF (VK kódok)
+            elif VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk: handle_action("desktop")
+            elif VK_END in current_pressed_vk and VK_END in numpad_pressed_vk: handle_action("laptop")
+            elif VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk: handle_action("elitedesk")
 
+    def on_release(key):
+        vk = getattr(key, 'vk', None)
+        if vk is not None:
+            current_pressed_vk.discard(vk)
+            numpad_pressed_vk.discard(vk)
 
-        # A gombnyomásokat figyelő halmazok
-        current_pressed_vk = set()
-        numpad_pressed_vk = set()
-        current_pressed_special = set()
+    def handle_action(action_name):
+        logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
+        if "desktop" in action_name:
+            self.deactivate_kvm(switch_monitor=True, reason=action_name)
+        elif "laptop" in action_name:
+            self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+        elif "elitedesk" in action_name:
+            self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
 
-        # A hotkey kombinációk definíciója egy szótárban (csak a Pico gombokhoz)
-        hotkey_combinations = {
-            frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f1}): "pico_desktop",
-            frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f1}): "pico_desktop",
-            frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f2}): "pico_laptop",
-            frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f2}): "pico_laptop",
-            frozenset({keyboard.Key.ctrl_l, keyboard.Key.alt_l, keyboard.Key.f3}): "pico_elitedesk",
-            frozenset({keyboard.Key.ctrl_r, keyboard.Key.alt_gr, keyboard.Key.f3}): "pico_elitedesk",
-        }
+    hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    self.pynput_listeners.append(hotkey_listener)
+    hotkey_listener.start()
+    logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
 
-        def on_press(key):
-            vk = getattr(key, 'vk', None)
-            if vk is not None:
-                current_pressed_vk.add(vk)
-                if getattr(key, '_flags', 0) == 0:
-                    numpad_pressed_vk.add(vk)
-            else:
-                current_pressed_special.add(key)
+    while self._running:
+        time.sleep(0.5)
 
-            # Ellenőrizzük a speciális billentyűk kombinációit
-            pressed_special_set = frozenset(current_pressed_special)
-            if pressed_special_set in hotkey_combinations:
-                action = hotkey_combinations[pressed_special_set]
-                handle_action(action)
-                return
-
-            # Ellenőrizzük a VK kódos kombinációkat (NumLock ON)
-            if VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk:
-                if VK_NUMPAD0 in current_pressed_vk:
-                    handle_action("desktop_numon")
-                elif VK_NUMPAD1 in current_pressed_vk:
-                    handle_action("laptop_numon")
-                elif VK_NUMPAD2 in current_pressed_vk:
-                    handle_action("elitedesk_numon")
-                elif VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk:
-                    handle_action("desktop_numoff")
-                elif VK_END in current_pressed_vk and VK_END in numpad_pressed_vk:
-                    handle_action("laptop_numoff")
-                elif VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk:
-                    handle_action("elitedesk_numoff")
-
-        def on_release(key):
-            vk = getattr(key, 'vk', None)
-            if vk is not None:
-                current_pressed_vk.discard(vk)
-                numpad_pressed_vk.discard(vk)
-            else:
-                current_pressed_special.discard(key)
-
-        def handle_action(action_name):
-            logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
-            if "desktop" in action_name:
-                self.deactivate_kvm(switch_monitor=True, reason=action_name)
-            elif "laptop" in action_name:
-                self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
-            elif "elitedesk" in action_name:
-                self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
-
-        hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self.pynput_listeners.append(hotkey_listener)
-        hotkey_listener.start()
-        logging.info("Pynput figyelő elindítva.")
-
-        while self._running:
-            time.sleep(0.5)
-
-        logging.info("Adó szolgáltatás leállt.")
+    logging.info("Adó szolgáltatás leállt.")
 
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
