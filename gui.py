@@ -39,6 +39,8 @@ from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH, TEMP_DIR_PARTS
 MB = 1024 * 1024
 
 
+# gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
+
 def set_autostart(enabled: bool) -> None:
     """Enable or disable autostart using the Task Scheduler for higher priority."""
     app_name = "MyKVM_Start" # A feladat neve a Feladatütemezőben
@@ -50,38 +52,42 @@ def set_autostart(enabled: bool) -> None:
                 executable = f'"{sys.executable}"'
                 arguments = '--tray'
             else: # Ha sima python szkriptként fut
-                # Fontos a pythonw.exe, hogy ne legyen konzolablak!
                 executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
                 script_path = os.path.join(os.path.dirname(__file__), "main.py")
                 arguments = f'"{script_path}" --tray'
             
-            # A parancs a feladat létrehozásához
-            # /SC ONLOGON -> Bejelentkezéskor indul
-            # /RL HIGHEST -> Legmagasabb jogosultságokkal fut
-            # /F -> Ha már létezik a feladat, írja felül
+            # --- JAVÍTOTT RÉSZ ---
+            # A teljes futtatandó parancs egyetlen stringként,
+            # amit a schtasks helyesen tud értelmezni.
+            task_run_command = f"{executable} {arguments}"
+
             command = [
                 'schtasks', '/Create', '/TN', app_name,
-                '/TR', f"'{executable} {arguments}'",
+                '/TR', task_run_command, # Itt már a tiszta stringet adjuk át
                 '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F'
             ]
             
             logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
-            # Futtatjuk a parancsot, elrejtve a felugró ablakot
-            subprocess.run(command, check=True, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            logging.info("Automatikus indulás (Feladatütemező) sikeresen beállítva.")
+            # A shell=True itt fontos, hogy a Windows helyesen értelmezze a parancsot
+            result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
+            logging.info("Automatikus indulás (Feladatütemező) sikeresen beállítva. Kimenet: %s", result.stdout)
 
         else:
-            # A parancs a feladat törléséhez
             command = ['schtasks', '/Delete', '/TN', app_name, '/F']
             logging.info(f"Autostart feladat törlése: {' '.join(command)}")
-            subprocess.run(command, check=True, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            logging.info("Automatikus indulás (Feladatütemező) sikeresen törölve.")
+            result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
+            logging.info("Automatikus indulás (Feladatütemező) sikeresen törölve. Kimenet: %s", result.stdout)
 
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        # A FileNotFoundError akkor jön, ha a schtasks nem található (nem Windows)
-        # A CalledProcessError akkor, ha a parancs hibával fut le (pl. jogosultsági probléma)
-        logging.error("Hiba az automatikus indulás beállításakor (schtasks): %s", e)
-        # Itt lehetne egy fallback a régi, Registry-s megoldásra, ha szükséges
+    except subprocess.CalledProcessError as e:
+        # Ha a parancs hibával tér vissza, kiírjuk a hibaüzenetét is
+        logging.error("Hiba az automatikus indulás beállításakor (schtasks). Visszatérési kód: %d", e.returncode)
+        logging.error("Schtasks HIBA kimenet: %s", e.stderr)
+        # Itt jön a jogosultsági probléma gyanúja
+        if e.returncode == 1 and ("Access is denied" in e.stderr or "A hozzáférés megtagadva" in e.stderr):
+            logging.error(">>> A hiba oka valószínűleg a hiányzó RENDSZERGAZDAI JOGOSULTSÁG. <<<")
+            # Itt jelezhetnénk a felhasználónak is a GUI-n, ha szükséges
+    except FileNotFoundError:
+        logging.info("Autostart beállítás kihagyva: nem támogatott platform (schtasks nem található).")
 
 
 class MainWindow(QMainWindow):
