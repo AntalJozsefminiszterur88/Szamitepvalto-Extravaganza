@@ -1,63 +1,64 @@
+# pico_hid_switch.py - VÉGLEGES HID VERZIÓ (F13-F15 billentyűkkel)
+
 import time
 import board
 import digitalio
 import usb_hid
-import usb_cdc
 from adafruit_hid.keyboard import Keyboard
 from adafruit_hid.keycode import Keycode
 
-# Initialize the keyboard device
+# Billentyűzet eszköz inicializálása
 kbd = Keyboard(usb_hid.devices)
-# Open the USB serial connection for sending button events
-serial = usb_cdc.data
 
-# Configure pins for the three buttons
+# --- Gombok beállítása a helyes, Pull.UP logikával ---
+# Feltételezi, hogy a gombok a GPIO pin és a GND közé vannak kötve.
+
+# Gomb 1 (Asztal / Host) -> F13 billentyűt küld
 button1_pin = digitalio.DigitalInOut(board.GP16)
 button1_pin.direction = digitalio.Direction.INPUT
-button1_pin.pull = digitalio.Pull.DOWN
+button1_pin.pull = digitalio.Pull.UP
 
+# Gomb 2 (Laptop) -> F14 billentyűt küld
 button2_pin = digitalio.DigitalInOut(board.GP17)
 button2_pin.direction = digitalio.Direction.INPUT
-button2_pin.pull = digitalio.Pull.DOWN
+button2_pin.pull = digitalio.Pull.UP
 
+# Gomb 3 (EliteDesk) -> F15 billentyűt küld
 button3_pin = digitalio.DigitalInOut(board.GP15)
 button3_pin.direction = digitalio.Direction.INPUT
-button3_pin.pull = digitalio.Pull.DOWN
+button3_pin.pull = digitalio.Pull.UP
 
-print("Pico KVM Remote (HID Mode) is running...")
+print("Pico KVM Remote (HID F-Key Mode) is running...")
 
 while True:
-    if button1_pin.value:
-        # Switch to host (Shift + Numpad 0)
-        kbd.press(Keycode.SHIFT, Keycode.KEYPAD_ZERO)
+    # Mivel Pull.UP-ot használunk, a gombnyomást a 'False' állapot jelzi (if not ...)
+
+    # 1. Gomb (GP16)
+    if not button1_pin.value:
+        print("Gomb 1 (GP16) lenyomva -> F13 küldése...")
+        kbd.press(Keycode.F13)
         time.sleep(0.1)
         kbd.release_all()
-        serial.write(b'1')
-        serial.flush()
-        time.sleep(0.05)
-        while button1_pin.value:
+        # Várunk, amíg a gombot elengedik
+        while not button1_pin.value:
             time.sleep(0.01)
 
-    if button2_pin.value:
-        # Switch to laptop (Shift + Numpad 1)
-        kbd.press(Keycode.SHIFT, Keycode.KEYPAD_ONE)
+    # 2. Gomb (GP17) - A felcserélt logika szerint a Laptop
+    if not button2_pin.value:
+        print("Gomb 2 (GP17) lenyomva -> F14 küldése...")
+        kbd.press(Keycode.F14)
         time.sleep(0.1)
         kbd.release_all()
-        serial.write(b'2')
-        serial.flush()
-        time.sleep(0.05)
-        while button2_pin.value:
+        while not button2_pin.value:
             time.sleep(0.01)
 
-    if button3_pin.value:
-        # Switch to EliteDesk (Shift + Numpad 2)
-        kbd.press(Keycode.SHIFT, Keycode.KEYPAD_TWO)
+    # 3. Gomb (GP15) - A felcserélt logika szerint az EliteDesk
+    if not button3_pin.value:
+        print("Gomb 3 (GP15) lenyomva -> F15 küldése...")
+        kbd.press(Keycode.F15)
         time.sleep(0.1)
         kbd.release_all()
-        serial.write(b'3')
-        serial.flush()
-        time.sleep(0.05)
-        while button3_pin.value:
+        while not button3_pin.value:
             time.sleep(0.01)
 
     time.sleep(0.1)
