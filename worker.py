@@ -294,7 +294,9 @@ class KVMWorker(QObject):
 
     # worker.py -> JAVÍTOTT, VÉGLEGES run_server metódus
 
-     def run_server(self):
+     # --- EZT A KÓDBLOKKOT MÁSOLD BE A KITÖRÖLT RÉSZ HELYÉRE ---
+
+    def run_server(self):
         # A szálakat most már a cikluson belül kezeljük, hogy újraindíthatók legyenek
         accept_thread = None
         
@@ -318,7 +320,7 @@ class KVMWorker(QObject):
         )
         logging.info("Zeroconf szolgáltatás regisztrálva.")
 
-        # A billentyűfigyelőt csak egyszer kell elindítani, az általában túléli az alvást
+        # A billentyűfigyelőt csak egyszer kell elindítani
         self.start_main_hotkey_listener()
         
         # --- FŐ ÖNGYÓGYÍTÓ CIKLUS ---
@@ -337,10 +339,8 @@ class KVMWorker(QObject):
             if time.time() - last_zeroconf_refresh > 60:
                 logging.info("Zeroconf szolgáltatás periodikus frissítése...")
                 try:
-                    # Frissítjük az IP címet, hátha változott
                     current_ip = socket.gethostbyname(socket.gethostname())
                     info.addresses = [socket.inet_aton(current_ip)]
-                    # A ServiceInfo objektumot nem lehet közvetlenül frissíteni, újra kell regisztrálni
                     self.zeroconf.unregister_service(info)
                     self.zeroconf.register_service(info)
                     last_zeroconf_refresh = time.time()
@@ -348,14 +348,13 @@ class KVMWorker(QObject):
                 except Exception as e:
                     logging.error("Hiba a Zeroconf frissítésekor: %s", e)
 
-            time.sleep(5) # 5 másodpercenként ellenőrizzük az állapotot
+            time.sleep(5)
 
         logging.info("Adó szolgáltatás leállt.")
 
     def start_main_hotkey_listener(self):
-        """Segédmetódus a globális gyorsbillentyű-figyelő indítására.
-        Ez azért van külön, hogy csak egyszer hívjuk meg."""
-        if self.pynput_listeners: # Elkerüljük a többszöri indítást
+        """Segédmetódus a globális gyorsbillentyű-figyelő indítására."""
+        if self.pynput_listeners:
             return
 
         current_pressed_vk = set()
@@ -409,11 +408,6 @@ class KVMWorker(QObject):
         self.pynput_listeners.append(hotkey_listener)
         hotkey_listener.start()
         logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
-
-        while self._running:
-            time.sleep(0.5)
-
-        logging.info("Adó szolgáltatás leállt.")
         
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
