@@ -2,10 +2,14 @@ import argparse
 import socket
 import threading
 import time
-import pyperclip
-import tkinter
 import logging
 import os
+try:
+    import pyperclip
+except Exception as e:  # pragma: no cover - optional dependency
+    pyperclip = None
+    logging.warning("pyperclip unavailable: %s", e)
+import tkinter
 
 BUFFER_SIZE = 4096
 CHECK_INTERVAL = 0.5
@@ -17,6 +21,8 @@ _logged_failures = set()
 
 
 def _pyperclip_copy(text: str) -> None:
+    if pyperclip is None:
+        raise RuntimeError("pyperclip not available")
     pyperclip.copy(text)
 
 
@@ -49,6 +55,8 @@ def safe_copy(text: str) -> None:
 
 
 def _pyperclip_paste() -> str:
+    if pyperclip is None:
+        raise RuntimeError("pyperclip not available")
     return pyperclip.paste()
 
 
