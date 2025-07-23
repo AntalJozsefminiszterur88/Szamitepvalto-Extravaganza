@@ -280,6 +280,820 @@ class KVMWorker(QObject):
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
 
+    def run(self):
+        logging.info(f"Worker elindítva {self.settings['role']} módban.")
+        if self.settings['role'] == 'ado':
+            self.run_server()
+        else:
+            self.run_client()
+        self.finished.emit()
+
+    # worker.py -> run_server metódus JAVÍTVA
+
+    # worker.py -> JAVÍTOTT run_server metódus
+
+    # worker.py -> JAVÍTOTT, VÉGLEGES run_server metódus
+
+     # --- EZT A KÓDBLOKKOT MÁSOLD BE A KITÖRÖLT RÉSZ HELYÉRE ---
+
+    def run_server(self):
+        # A szálakat most már a cikluson belül kezeljük, hogy újraindíthatók legyenek
+        accept_thread = None
+        
+        self.clipboard_thread = threading.Thread(
+            target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
+        )
+        self.clipboard_thread.start()
+
+        # A Zeroconf szolgáltatás regisztrálása
+        info = ServiceInfo(
+            SERVICE_TYPE,
+            f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
+            addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
+            port=self.settings['port']
+        )
+        self.zeroconf.register_service(info)
+        last_zeroconf_refresh = time.time()
+
+        self.status_update.emit(
+            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk aktívak."
+        )
+        logging.info("Zeroconf szolgáltatás regisztrálva.")
+
+        # A billentyűfigyelőt csak egyszer kell elindítani
+        self.start_main_hotkey_listener()
+        
+        # --- FŐ ÖNGYÓGYÍTÓ CIKLUS ---
+        while self._running:
+            # 1. EGÉSZSÉGELLENŐRZÉS: Fut-e a kapcsolatfogadó szál?
+            if accept_thread is None or not accept_thread.is_alive():
+                if accept_thread is not None:
+                    logging.warning("A kapcsolatfogadó szál (AcceptThread) leállt. Újraindítás...")
+                else:
+                    logging.info("A kapcsolatfogadó szál (AcceptThread) indítása...")
+                
+                accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
+                accept_thread.start()
+
+            # 2. EGÉSZSÉGELLENŐRZÉS: Zeroconf frissítése 60 másodpercenként
+            if time.time() - last_zeroconf_refresh > 60:
+                logging.info("Zeroconf szolgáltatás periodikus frissítése...")
+                try:
+                    current_ip = socket.gethostbyname(socket.gethostname())
+                    info.addresses = [socket.inet_aton(current_ip)]
+                    self.zeroconf.unregister_service(info)
+                    self.zeroconf.register_service(info)
+                    last_zeroconf_refresh = time.time()
+                    logging.info(f"Zeroconf szolgáltatás frissítve az új IP-vel: {current_ip}")
+                except Exception as e:
+                    logging.error("Hiba a Zeroconf frissítésekor: %s", e)
+
+            time.sleep(5)
+
+        logging.info("Adó szolgáltatás leállt.")
+
+    def start_main_hotkey_listener(self):
+        """Segédmetódus a globális gyorsbillentyű-figyelő indítására."""
+        if self.pynput_listeners:
+            return
+
+        current_pressed_vk = set()
+        numpad_pressed_vk = set()
+        
+        VK_F13, VK_F14, VK_F15 = 124, 125, 126
+
+        def handle_action(action_name):
+            logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
+            if "desktop" in action_name:
+                self.deactivate_kvm(switch_monitor=True, reason=action_name)
+            elif "laptop" in action_name:
+                self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+            elif "elitedesk" in action_name:
+                self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
+
+        def on_press(key):
+            if key == keyboard.Key.f13:
+                logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
+                self.deactivate_kvm(switch_monitor=True, reason="pico F13")
+                return
+            if key == keyboard.Key.f14:
+                logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
+                self.toggle_client_control('laptop', switch_monitor=False)
+                return
+            if key == keyboard.Key.f15:
+                logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
+                self.toggle_client_control('elitedesk', switch_monitor=True)
+                return
+
+            vk = getattr(key, 'vk', None)
+            if vk is None: return
+
+            current_pressed_vk.add(vk)
+            if getattr(key, '_flags', 0) == 0:
+                numpad_pressed_vk.add(vk)
+            
+            is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
+            if is_shift_pressed:
+                if VK_NUMPAD0 in current_pressed_vk or (VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk): handle_action("desktop")
+                elif VK_NUMPAD1 in current_pressed_vk or (VK_END in current_pressed_vk and VK_END in numpad_pressed_vk): handle_action("laptop")
+                elif VK_NUMPAD2 in current_pressed_vk or (VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk): handle_action("elitedesk")
+
+        def on_release(key):
+            vk = getattr(key, 'vk', None)
+            if vk is not None:
+                current_pressed_vk.discard(vk)
+                numpad_pressed_vk.discard(vk)
+
+        hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        self.pynput_listeners.append(hotkey_listener)
+        hotkey_listener.start()
+        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
+        
+    def _process_server_messages(self):
+        """Process raw messages received from clients on the server."""
+        logging.debug("Server message processor thread started")
+        buffers = {}
+        try:
+            while self._running:
+                try:
+                    sock, chunk = self.message_queue.get()
+                except Exception:
+                    break
+                if sock is None and chunk is None:
+                    break
+
+                if not isinstance(chunk, (bytes, bytearray)):
+                    continue
+
+                buffer = buffers.setdefault(sock, bytearray())
+                buffer.extend(chunk)
+                while len(buffer) >= 4:
+                    try:
+                        msg_len = struct.unpack('!I', buffer[:4])[0]
+                    except struct.error:
+                        logging.error("Invalid length header from %s", self.client_infos.get(sock, sock))
+                        buffers.pop(sock, None)
+                        break
+                    if len(buffer) < 4 + msg_len:
+                        break
+                    payload = bytes(buffer[4:4 + msg_len])
+                    del buffer[:4 + msg_len]
+                    try:
+                        data = msgpack.unpackb(payload, raw=False)
+                    except Exception as e:
+                        logging.error(
+                            "Failed to unpack message from %s: %s",
+                            self.client_infos.get(sock, sock),
+                            e,
+                            exc_info=True,
+                        )
+                        continue
+                    logging.debug(
+                        "Server handling message type '%s' from %s",
+                        data.get('type') or data.get('command'),
+                        self.client_infos.get(sock, sock),
+                    )
+
+                    cmd = data.get('command')
+                    if cmd == 'switch_elitedesk':
+                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        continue
+                    if cmd == 'switch_laptop':
+                        self.toggle_client_control('laptop', switch_monitor=False)
+                        continue
+
+                    if data.get('type') == 'clipboard_text':
+                        text = data.get('text', '')
+                        if text != self.last_clipboard:
+                            self._set_clipboard(text)
+                            self._broadcast_message(data, exclude=sock)
+                    else:
+                        self.file_handler.handle_network_message(data, sock)
+        finally:
+            buffers.clear()
+
+    def _process_client_messages(self):
+        """Process already unpacked messages received from the server."""
+        logging.debug("Client message processor thread started")
+        button_map = {
+            'left': mouse.Button.left,
+            'right': mouse.Button.right,
+            'middle': mouse.Button.middle,
+        }
+        while self._running:
+            try:
+                sock, data = self.message_queue.get()
+            except Exception:
+                break
+            if sock is None and data is None:
+                break
+            try:
+                logging.debug(
+                    "Client handling message type '%s'",
+                    data.get('type'),
+                )
+                msg_type = data.get('type')
+                if msg_type == 'move_relative':
+                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'click':
+                    btn = button_map.get(data.get('button'))
+                    if btn:
+                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
+                elif msg_type == 'scroll':
+                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'key':
+                    k_info = data.get('key')
+                    if data.get('key_type') == 'char':
+                        k_press = k_info
+                    elif data.get('key_type') == 'special':
+                        k_press = getattr(keyboard.Key, k_info, None)
+                    elif data.get('key_type') == 'vk':
+                        k_press = keyboard.KeyCode.from_vk(int(k_info))
+                    else:
+                        k_press = None
+                    if k_press:
+                        if data.get('pressed'):
+                            self.keyboard_controller.press(k_press)
+                            self._pressed_keys.add(k_press)
+                        else:
+                            self.keyboard_controller.release(k_press)
+                            self._pressed_keys.discard(k_press)
+                elif msg_type == 'clipboard_text':
+                    text = data.get('text', '')
+                    if text != self.last_clipboard:
+                        self._set_clipboard(text)
+                else:
+                    self.file_handler.handle_network_message(data, sock)
+            except Exception as e:
+                logging.error("Failed to process client message: %s", e, exc_info=True)
+
+
+    def accept_connections(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                server_socket.bind(('', self.settings['port']))
+                server_socket.listen(5)
+                logging.info(f"TCP szerver elindítva a {self.settings['port']} porton.")
+
+                while self._running:
+                    client_sock, addr = server_socket.accept()
+                    client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self.client_sockets.append(client_sock)
+                    if self.active_client is None:
+                        self.active_client = client_sock
+                    logging.info(f"Kliens csatlakozva: {addr}.")
+                    self.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
+
+                    threading.Thread(target=self.monitor_client, args=(client_sock, addr), daemon=True).start()
+        except Exception as e:
+            if self._running:
+                logging.error(f"Hiba a kliens fogadásakor: {e}", exc_info=True)
+
+    def monitor_client(self, sock, addr):
+        """Monitor a single client connection, handle commands and remove it on disconnect."""
+        sock.settimeout(30.0)
+        def recv_all(s, n):
+            data = b''
+            while len(data) < n:
+                chunk = s.recv(n - len(data))
+                if not chunk:
+                    return None
+                data += chunk
+            return data
+
+        # Expect an initial handshake with the client name
+        client_name = str(addr)
+        try:
+            raw_len = recv_all(sock, 4)
+            if raw_len:
+                msg_len = struct.unpack('!I', raw_len)[0]
+                payload = recv_all(sock, msg_len)
+                if payload:
+                    hello = msgpack.unpackb(payload, raw=False)
+                    client_name = hello.get('device_name', client_name)
+        except Exception:
+            pass
+        self.client_infos[sock] = client_name
+        logging.info(f"Client connected: {client_name} ({addr})")
+        logging.debug(
+            "monitor_client start for %s",
+            client_name,
+        )
+        # send current clipboard to newly connected client
+        if self.last_clipboard:
+            try:
+                self._send_message(sock, {'type': 'clipboard_text', 'text': self.last_clipboard})
+            except Exception:
+                pass
+        try:
+            buffer = bytearray()
+            logging.debug("monitor_client main loop starting for %s", client_name)
+            while self._running:
+                logging.debug("monitor_client waiting for data from %s", client_name)
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    buffer.extend(chunk)
+                    logging.debug("Received %d bytes from %s", len(chunk), client_name)
+                    while len(buffer) >= 4:
+                        msg_len = struct.unpack('!I', buffer[:4])[0]
+                        if len(buffer) < 4 + msg_len:
+                            break
+                        payload = bytes(buffer[4:4 + msg_len])
+                        del buffer[:4 + msg_len]
+                        try:
+                            data = msgpack.unpackb(payload, raw=False)
+                        except Exception as e:
+                            logging.error("Failed to unpack message from %s: %s", client_name, e, exc_info=True)
+                            continue
+                        logging.debug(
+                            "monitor_client processing message type '%s'", data.get('type') or data.get('command')
+                        )
+                        cmd = data.get('command')
+                        if cmd == 'switch_elitedesk':
+                            self.toggle_client_control('elitedesk', switch_monitor=True)
+                            continue
+                        if cmd == 'switch_laptop':
+                            self.toggle_client_control('laptop', switch_monitor=False)
+                            continue
+                        if data.get('type') == 'clipboard_text':
+                            text = data.get('text', '')
+                            if text != self.last_clipboard:
+                                self._set_clipboard(text)
+                                self._broadcast_message(data, exclude=sock)
+                        else:
+                            self.file_handler.handle_network_message(data, sock)
+                except socket.timeout:
+                    logging.debug(
+                        "Socket timeout waiting for data from %s (timeout=%s)",
+                        client_name,
+                        sock.gettimeout(),
+                    )
+                    if sock in self.file_handler.current_uploads:
+                        self.file_handler.handle_transfer_timeout(sock)
+                        break
+                    continue
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, socket.error):
+                    break
+                except Exception as e:
+                    logging.error(
+                        f"monitor_client recv error from {client_name}: {e}",
+                        exc_info=True,
+                    )
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
+            logging.warning(f"Hálózati hiba a kliensnél ({client_name}): {e}")
+        except Exception as e:
+            logging.error(f"Váratlan hiba a monitor_client-ben ({client_name}): {e}", exc_info=True)
+       # worker.py -> monitor_client metóduson belüli 'finally' blokk JAVÍTVA
+
+        # worker.py -> monitor_client metóduson belüli 'finally' blokk - VÉGLEGES JAVÍTÁS
+
+        finally:
+            logging.warning(f"Kliens lecsatlakozott: {client_name} ({addr}).")
+            try:
+                sock.close()
+            except Exception:
+                pass
+            
+            # --- ÚJ, EGYSZERŰBB ÉS HELYES LECSATLAKOZÁSI LOGIKA ---
+            self.file_handler.on_client_disconnected(sock)
+            
+            was_active_client = (sock == self.active_client)
+
+            # Eltávolítjuk a klienst a listákból, bárhol is volt.
+            if sock in self.client_sockets:
+                self.client_sockets.remove(sock)
+            if sock in self.client_infos:
+                del self.client_infos[sock]
+            
+            # FŐ LOGIKA: Ha a KVM aktív volt, és a lecsatlakozott kliens
+            # volt az aktív, akkor mindenképpen adjuk vissza az irányítást a hosztnak!
+            if was_active_client and self.kvm_active:
+                logging.info(f"Active client '{client_name}' disconnected. Deactivating KVM and returning control to host.")
+                # Itt hívjuk a deactivate_kvm-et, ami mindent elintéz:
+                # - leállítja a streaminget
+                # - visszaadja a billentyűzet/egér kontrollt
+                # - visszaállítja a monitort
+                self.deactivate_kvm(reason="active client disconnected")
+            
+            # Ha a lecsatlakozott kliens nem volt aktív, vagy a KVM inaktív volt,
+            # nincs különösebb teendő, csak a listákból való eltávolítás.
+            # Az 'active_client' változó vagy None lesz (ha nem maradt senki),
+            # vagy továbbra is a helyes, még csatlakoztatott kliensre mutat.
+            elif was_active_client:
+                # Ha a KVM nem volt aktív, csak nullázzuk az aktív klienst
+                self.active_client = None
+
+            logging.debug("monitor_client exit for %s", client_name)
+    def toggle_kvm_active(self, switch_monitor=True):
+        """Toggle KVM state with optional monitor switching."""
+        logging.info(
+            "toggle_kvm_active called. current_state=%s switch_monitor=%s active_client=%s",
+            self.kvm_active,
+            switch_monitor,
+            self.client_infos.get(self.active_client),
+        )
+        if self.active_client is None:
+            logging.warning("toggle_kvm_active invoked with no active_client")
+        if not self.kvm_active:
+            self.activate_kvm(switch_monitor=switch_monitor)
+        else:
+            self.deactivate_kvm(switch_monitor=switch_monitor, reason="toggle_kvm_active")
+        self.release_hotkey_keys()
+
+    def activate_kvm(self, switch_monitor=True):
+        logging.info(
+            "activate_kvm called. switch_monitor=%s active_client=%s",
+            switch_monitor,
+            self.client_infos.get(self.active_client, "unknown"),
+        )
+        if self.active_client is None and self.client_sockets:
+            self.active_client = self.client_sockets[0]
+            logging.info(
+                "No active client selected. Defaulting to %s",
+                self.client_infos.get(self.active_client, "ismeretlen"),
+            )
+        if not self.client_sockets:
+            self.status_update.emit("Hiba: Nincs csatlakozott kliens a váltáshoz!")
+            logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
+            return
+
+        self.switch_monitor = switch_monitor
+        self.kvm_active = True
+        self.status_update.emit("Állapot: Aktív...")
+        logging.info("KVM aktiválva.")
+        self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
+        self.streaming_thread.start()
+        logging.debug("Streaming thread started")
+
+    def _streaming_loop(self):
+        """Keep streaming active and restart if it stops unexpectedly."""
+        while self.kvm_active and self._running:
+            self.start_kvm_streaming()
+            if self.kvm_active and self._running:
+                logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
+                time.sleep(1)
+
+    # worker.py -> JAVÍTOTT deactivate_kvm metódus
+
+    def deactivate_kvm(
+        self,
+        switch_monitor=None,
+        *,
+        release_keys: bool = True,
+        reason: Optional[str] = None,
+    ):
+        # --- ÚJ, FONTOS ELLENŐRZÉS A METÓDUS ELEJÉN ---
+        # Ha a KVM már eleve inaktív, ne csináljunk semmit, csak naplózzuk az eseményt.
+        # Ez megakadályozza a felesleges hívásokat és a hibát.
+        if not self.kvm_active:
+            logging.info(
+                "deactivate_kvm called, but KVM was already inactive. Reason: %s. No action taken.",
+                reason or "unknown",
+            )
+            # Biztonsági okokból itt is elengedhetjük a billentyűket, ha beragadnának
+            if release_keys:
+                self.release_hotkey_keys()
+            return
+        # --- EDDIG TART AZ ÚJ RÉSZ ---
+
+        if reason:
+            logging.info(
+                "deactivate_kvm called. reason=%s switch_monitor=%s kvm_active=%s active_client=%s",
+                reason, switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
+            )
+        else:
+            logging.info(
+                "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
+                switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
+            )
+        
+        self.kvm_active = False # Most már biztosak lehetünk benne, hogy 'True'-ról váltunk 'False'-ra.
+        self.status_update.emit("Állapot: Inaktív...")
+        logging.info("KVM deaktiválva.")
+
+        switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
+        if switch:
+            time.sleep(0.2)
+            try:
+                with list(get_monitors())[0] as monitor:
+                    monitor.set_input_source(self.settings['monitor_codes']['host'])
+                    logging.info("Monitor sikeresen visszaváltva a hosztra.")
+            except Exception as e:
+                self.status_update.emit(f"Monitor hiba: {e}")
+                logging.error(f"Monitor hiba: {e}", exc_info=True)
+        
+        if release_keys:
+            self.release_hotkey_keys()
+
+        if hasattr(self, '_host_mouse_controller') and self._host_mouse_controller and hasattr(self, '_orig_mouse_pos'):
+            try:
+                self._host_mouse_controller.position = self._orig_mouse_pos
+            except Exception as e:
+                logging.error(f"Failed to restore mouse position: {e}", exc_info=True)
+        
+        self._host_mouse_controller = None
+        self._orig_mouse_pos = None
+
+        if self.active_client not in self.client_sockets:
+            if self.active_client is not None:
+                logging.warning("Active client disconnected during deactivation")
+            else:
+                logging.debug("No active client set after deactivation")
+            
+            if self.client_sockets:
+                self.active_client = self.client_sockets[0]
+                logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
+            else:
+                self.active_client = None
+    
+    def start_kvm_streaming(self):
+        logging.info("start_kvm_streaming: initiating control transfer")
+        if getattr(self, 'switch_monitor', True):
+            try:
+                with list(get_monitors())[0] as monitor:
+                    monitor.set_input_source(self.settings['monitor_codes']['client'])
+            except Exception as e:
+                logging.error(f"Monitor hiba: {e}", exc_info=True)
+                self.status_update.emit(f"Monitor hiba: {e}")
+                self.deactivate_kvm(reason="monitor switch failed")
+                return
+        
+        host_mouse_controller = mouse.Controller()
+        self._host_mouse_controller = host_mouse_controller
+        self._orig_mouse_pos = host_mouse_controller.position
+        try:
+            root = tkinter.Tk()
+            root.withdraw()
+            center_x, center_y = root.winfo_screenwidth()//2, root.winfo_screenheight()//2
+            root.destroy()
+        except:
+            center_x, center_y = 800, 600
+        
+        host_mouse_controller.position = (center_x, center_y)
+        last_pos = {'x': center_x, 'y': center_y}
+        is_warping = False
+
+        send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
+        unsent_events = []
+
+        def sender():
+            while self.kvm_active and self._running:
+                try:
+                    payload = send_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if payload is None:
+                    logging.debug("Sender thread exiting")
+                    break
+                if isinstance(payload, tuple):
+                    packed, event = payload
+                else:
+                    packed, event = payload, None
+                to_remove = []
+                active_lost = False
+                if self.active_client is None and self.client_sockets:
+                    self.active_client = self.client_sockets[0]
+                targets = [self.active_client] if self.active_client else []
+                for sock in list(targets):
+                    if sock not in self.client_sockets:
+                        continue
+                    try:
+                        prev_to = sock.gettimeout()
+                        sock.settimeout(0.1)
+                        sock.sendall(struct.pack('!I', len(packed)) + packed)
+                        sock.settimeout(prev_to)
+                        if event and event.get('type') == 'move_relative':
+                            logging.debug(
+                                "Mouse move sent to %s: dx=%s dy=%s",
+                                self.client_infos.get(sock, sock.getpeername()),
+                                event.get('dx'),
+                                event.get('dy'),
+                            )
+                        else:
+                            logging.debug(
+                                "Sent %d bytes to %s",
+                                len(packed),
+                                self.client_infos.get(sock, sock.getpeername()),
+                            )
+                    except (socket.timeout, BlockingIOError):
+                        logging.warning(
+                            "Client not reading, disconnecting %s",
+                            self.client_infos.get(sock, sock.getpeername()),
+                        )
+                        to_remove.append(sock)
+                    except Exception as e:
+                        try:
+                            event = msgpack.unpackb(packed, raw=False)
+                        except Exception:
+                            event = '<unpack failed>'
+                        logging.error(
+                            f"Failed sending event {event} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
+                            exc_info=True,
+                        )
+                        if event != '<unpack failed>':
+                            unsent_events.append(event)
+                        to_remove.append(sock)
+                for s in to_remove:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                    if s in self.client_sockets:
+                        self.client_sockets.remove(s)
+                    if s in self.client_infos:
+                        del self.client_infos[s]
+                    if s == self.active_client:
+                        self.active_client = None
+                        active_lost = True
+                        if self.client_sockets:
+                            self.active_client = self.client_sockets[0]
+                if active_lost:
+                    if self.active_client:
+                        self.status_update.emit(
+                            f"Kapcsolat megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
+                        )
+                    else:
+                        self.status_update.emit(
+                            "Kapcsolat megszakadt. Várakozás új kliensre..."
+                        )
+                if to_remove and not self.client_sockets:
+                    self.deactivate_kvm(reason="all clients disconnected")
+                    break
+
+        sender_thread = threading.Thread(target=sender, daemon=True)
+        sender_thread.start()
+
+        def send(data):
+            """Queue an event for sending and log the details."""
+            if not self.kvm_active:
+                logging.warning(
+                    "Send called while KVM inactive. Event=%s active_client=%s connected_clients=%d",
+                    data,
+                    self.client_infos.get(self.active_client),
+                    len(self.client_sockets),
+                )
+                unsent_events.append(data)
+                return False
+            try:
+                packed = msgpack.packb(data, use_bin_type=True)
+                if send_queue.full():
+                    try:
+                        send_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    logging.debug("Send queue full, dropping oldest event")
+                send_queue.put_nowait((packed, data))
+                if data.get('type') == 'move_relative':
+                    logging.debug(
+                        f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
+                    )
+                else:
+                    logging.debug(f"Queued event: {data}")
+                return True
+            except Exception as e:
+                logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
+                unsent_events.append(data)
+                self.deactivate_kvm(reason="queue error")
+                return False
+
+        def on_move(x, y):
+            nonlocal is_warping
+            if is_warping:
+                is_warping = False
+                return
+            dx = x - last_pos['x']
+            dy = y - last_pos['y']
+            if dx != 0 or dy != 0:
+                send({'type': 'move_relative', 'dx': dx, 'dy': dy})
+            is_warping = True
+            host_mouse_controller.position = (center_x, center_y)
+            last_pos['x'], last_pos['y'] = center_x, center_y
+
+        def on_click(x,y,b,p):
+            send({'type':'click','button':b.name,'pressed':p})
+
+        def on_scroll(x,y,dx,dy):
+            send({'type':'scroll','dx':dx,'dy':dy})
+        
+        pressed_keys = set()
+        current_vks = set()
+        numpad_vks = set()
+
+        def get_vk(key):
+            if hasattr(key, "vk") and key.vk is not None:
+                return key.vk
+            if hasattr(key, "value") and hasattr(key.value, "vk"):
+                return key.value.vk
+            return None
+
+        # worker.py -> start_kvm_streaming metóduson belüli on_key JAVÍTVA
+
+        def on_key(k, p):
+            """Forward keyboard events and handle Pico/host hotkeys DURING streaming."""
+            try:
+                # --- ÚJ, FONTOS RÉSZ: VEZÉRLÉS FIGYELÉSE STREAMING ALATT ---
+                # A billentyű lenyomásakor (p=True) ellenőrizzük a vezérlőgombokat.
+                if p: 
+                    if k == keyboard.Key.f13:
+                        logging.info("!!! Visszaváltás a hosztra (Pico F13) észlelve a streaming alatt !!!")
+                        self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
+                        return # Ne küldjük tovább az F13-at a kliensnek
+                    if k == keyboard.Key.f14:
+                        logging.info("!!! Váltás laptopra (Pico F14) észlelve a streaming alatt !!!")
+                        self.toggle_client_control('laptop', switch_monitor=False)
+                        return # Ne küldjük tovább
+                    if k == keyboard.Key.f15:
+                        logging.info("!!! Váltás EliteDeskre (Pico F15) észlelve a streaming alatt !!!")
+                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        return
+
+                # Itt jön a már meglévő logika a Shift+Numpad0 figyelésére is.
+                # Ezt is kiegészítjük, hogy a Pico gombokkal konzisztens legyen.
+                vk = get_vk(k)
+                if vk is not None:
+                    if p:
+                        current_vks.add(vk)
+                        if getattr(k, '_flags', 0) == 0:
+                            numpad_vks.add(vk)
+                    else:
+                        current_vks.discard(vk)
+                        numpad_vks.discard(vk)
+
+                is_shift = VK_LSHIFT in current_vks or VK_RSHIFT in current_vks
+                is_num0 = VK_NUMPAD0 in current_vks or (VK_INSERT in current_vks and VK_INSERT in numpad_vks)
+                
+                # Visszaváltás Shift+Num0-val
+                if is_shift and is_num0:
+                    logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
+                    # Elengedjük a billentyűket a kliensen, mielőtt megszakítjuk a kapcsolatot
+                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_INSERT]:
+                        if vk_code in current_vks:
+                            send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
+                    current_vks.clear()
+                    self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
+                    return
+                
+                # --- EDDIG TART AZ ÚJ ÉS MÓDOSÍTOTT LOGIKA ---
+
+                # Az eredeti billentyű-továbbító logika marad
+                if hasattr(k, "char") and k.char is not None:
+                    key_type = "char"
+                    key_val = k.char
+                elif hasattr(k, "name"):
+                    key_type = "special"
+                    key_val = k.name
+                elif hasattr(k, "vk"):
+                    key_type = "vk"
+                    key_val = k.vk
+                else:
+                    logging.warning(f"Ismeretlen billentyű: {k}")
+                    return False
+
+                key_id = (key_type, key_val)
+                if p:
+                    pressed_keys.add(key_id)
+                else:
+                    pressed_keys.discard(key_id)
+
+                if not send({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
+                    return False
+            except Exception as e:
+                logging.error(f"Hiba az on_key függvényben: {e}", exc_info=True)
+                return False
+
+        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
+        k_listener = keyboard.Listener(on_press=lambda k:on_key(k,True), on_release=lambda k:on_key(k,False), suppress=True)
+        
+        m_listener.start()
+        k_listener.start()
+        
+        while self.kvm_active and self._running:
+            time.sleep(STREAM_LOOP_DELAY)
+
+        for ktype, kval in list(pressed_keys):
+            send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
+        pressed_keys.clear()
+
+        m_listener.stop()
+        k_listener.stop()
+        send_queue.put(None)
+        sender_thread.join()
+        while not send_queue.empty():
+            leftover = send_queue.get()
+            if leftover and isinstance(leftover, tuple):
+                _, evt = leftover
+            else:
+                evt = None
+            if evt:
+                unsent_events.append(evt)
+
+        if unsent_events:
+            logging.warning("Unsent or failed events: %s", unsent_events)
+
         logging.info("Streaming listenerek leálltak.")
 
     def run_client(self):
@@ -467,4 +1281,3 @@ class KVMWorker(QObject):
                     logging.info(f"Újracsatlakozási kísérlet {retry_delay:.1f} másodperc múlva...")
                     time.sleep(retry_delay)
                     retry_delay = min(retry_delay * 1.5, max_retry_delay)
-
