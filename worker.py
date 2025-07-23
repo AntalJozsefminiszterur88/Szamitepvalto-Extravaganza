@@ -177,6 +177,24 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.error("Failed to broadcast message: %s", e)
 
+    def _handle_disconnect(self, sock, reason: str = "unknown") -> None:
+        """Centralised cleanup for a disconnected peer."""
+        try:
+            sock.close()
+        except Exception:
+            pass
+        self.file_handler.on_client_disconnected(sock)
+        was_active = sock == self.active_client
+        if sock in self.client_sockets:
+            self.client_sockets.remove(sock)
+        if sock in self.client_infos:
+            del self.client_infos[sock]
+        if was_active and self.kvm_active:
+            logging.info("Active client disconnected, deactivating KVM")
+            self.deactivate_kvm(reason=reason)
+        elif was_active:
+            self.active_client = None
+
     # ------------------------------------------------------------------
     # Clipboard synchronization
     # ------------------------------------------------------------------
@@ -195,6 +213,66 @@ class KVMWorker(QObject):
                 self.last_clipboard = text
                 self._send_message(sock, {'type': 'clipboard_text', 'text': text})
             time.sleep(0.5)
+
+    def _process_messages(self):
+        """Unified message handler for all peers."""
+        logging.debug("Message processor thread started")
+        button_map = {
+            'left': mouse.Button.left,
+            'right': mouse.Button.right,
+            'middle': mouse.Button.middle,
+        }
+        while self._running:
+            try:
+                sock, data = self.message_queue.get()
+            except Exception:
+                break
+            if sock is None and data is None:
+                break
+            try:
+                cmd = data.get('command')
+                if cmd == 'switch_elitedesk':
+                    self.toggle_client_control('elitedesk', switch_monitor=True)
+                    continue
+                if cmd == 'switch_laptop':
+                    self.toggle_client_control('laptop', switch_monitor=False)
+                    continue
+                msg_type = data.get('type')
+                if msg_type == 'move_relative':
+                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'click':
+                    btn = button_map.get(data.get('button'))
+                    if btn:
+                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
+                elif msg_type == 'scroll':
+                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
+                elif msg_type == 'key':
+                    k_info = data.get('key')
+                    if data.get('key_type') == 'char':
+                        k_press = k_info
+                    elif data.get('key_type') == 'special':
+                        k_press = getattr(keyboard.Key, k_info, None)
+                    elif data.get('key_type') == 'vk':
+                        k_press = keyboard.KeyCode.from_vk(int(k_info))
+                    else:
+                        k_press = None
+                    if k_press:
+                        if data.get('pressed'):
+                            self.keyboard_controller.press(k_press)
+                            self._pressed_keys.add(k_press)
+                        else:
+                            self.keyboard_controller.release(k_press)
+                            self._pressed_keys.discard(k_press)
+                elif msg_type == 'clipboard_text':
+                    text = data.get('text', '')
+                    if text != self.last_clipboard:
+                        self._set_clipboard(text)
+                        if sock in self.client_sockets:
+                            self._broadcast_message(data, exclude=sock)
+                else:
+                    self.file_handler.handle_network_message(data, sock)
+            except Exception as e:
+                logging.error("Failed to process message: %s", e, exc_info=True)
 
     # ------------------------------------------------------------------
     # File transfer delegation
@@ -281,76 +359,43 @@ class KVMWorker(QObject):
         self.release_hotkey_keys()
 
     def run(self):
-        logging.info(f"Worker elindítva {self.settings['role']} módban.")
-        if self.settings['role'] == 'ado':
-            self.run_server()
-        else:
-            self.run_client()
-        self.finished.emit()
+        """Unified entry point starting peer threads and services."""
+        logging.info("Worker starting in peer-to-peer mode")
 
-    # worker.py -> run_server metódus JAVÍTVA
-
-    # worker.py -> JAVÍTOTT run_server metódus
-
-    # worker.py -> JAVÍTOTT, VÉGLEGES run_server metódus
-
-     # --- EZT A KÓDBLOKKOT MÁSOLD BE A KITÖRÖLT RÉSZ HELYÉRE ---
-
-    def run_server(self):
-        # A szálakat most már a cikluson belül kezeljük, hogy újraindíthatók legyenek
-        accept_thread = None
-        
-        self.clipboard_thread = threading.Thread(
-            target=self._clipboard_loop_server, daemon=True, name="ClipboardSrv"
-        )
-        self.clipboard_thread.start()
-
-        # A Zeroconf szolgáltatás regisztrálása
         info = ServiceInfo(
             SERVICE_TYPE,
-            f"{SERVICE_NAME_PREFIX}.{SERVICE_TYPE}",
-            addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
-            port=self.settings['port']
+            f"{self.device_name}.{SERVICE_TYPE}",
+            addresses=[socket.inet_aton(self.local_ip)],
+            port=self.settings['port'],
         )
-        self.zeroconf.register_service(info)
-        last_zeroconf_refresh = time.time()
+        try:
+            self.zeroconf.register_service(info)
+        except Exception as e:
+            logging.error("Failed to register Zeroconf service: %s", e)
 
-        self.status_update.emit(
-            "Adó szolgáltatás regisztrálva. Gyorsbillentyűk aktívak."
+        self.message_processor_thread = threading.Thread(
+            target=self._process_messages,
+            daemon=True,
+            name="MsgProcessor",
         )
-        logging.info("Zeroconf szolgáltatás regisztrálva.")
+        self.message_processor_thread.start()
 
-        # A billentyűfigyelőt csak egyszer kell elindítani
-        self.start_main_hotkey_listener()
-        
-        # --- FŐ ÖNGYÓGYÍTÓ CIKLUS ---
+        threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread").start()
+        threading.Thread(target=self.discover_peers, daemon=True, name="DiscoverThread").start()
+
+        if self.settings.get('role') == 'ado':
+            self.clipboard_thread = threading.Thread(
+                target=self._clipboard_loop_server,
+                daemon=True,
+                name="ClipboardSrv",
+            )
+            self.clipboard_thread.start()
+            self.start_main_hotkey_listener()
+
         while self._running:
-            # 1. EGÉSZSÉGELLENŐRZÉS: Fut-e a kapcsolatfogadó szál?
-            if accept_thread is None or not accept_thread.is_alive():
-                if accept_thread is not None:
-                    logging.warning("A kapcsolatfogadó szál (AcceptThread) leállt. Újraindítás...")
-                else:
-                    logging.info("A kapcsolatfogadó szál (AcceptThread) indítása...")
-                
-                accept_thread = threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread")
-                accept_thread.start()
+            time.sleep(0.5)
+        self.finished.emit()
 
-            # 2. EGÉSZSÉGELLENŐRZÉS: Zeroconf frissítése 60 másodpercenként
-            if time.time() - last_zeroconf_refresh > 60:
-                logging.info("Zeroconf szolgáltatás periodikus frissítése...")
-                try:
-                    current_ip = socket.gethostbyname(socket.gethostname())
-                    info.addresses = [socket.inet_aton(current_ip)]
-                    self.zeroconf.unregister_service(info)
-                    self.zeroconf.register_service(info)
-                    last_zeroconf_refresh = time.time()
-                    logging.info(f"Zeroconf szolgáltatás frissítve az új IP-vel: {current_ip}")
-                except Exception as e:
-                    logging.error("Hiba a Zeroconf frissítésekor: %s", e)
-
-            time.sleep(5)
-
-        logging.info("Adó szolgáltatás leállt.")
 
     def start_main_hotkey_listener(self):
         """Segédmetódus a globális gyorsbillentyű-figyelő indítására."""
@@ -529,27 +574,55 @@ class KVMWorker(QObject):
 
 
     def accept_connections(self):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        while self._running:
+            try:
                 server_socket.bind(('', self.settings['port']))
-                server_socket.listen(5)
-                logging.info(f"TCP szerver elindítva a {self.settings['port']} porton.")
+                break
+            except OSError as e:
+                logging.error("Port bind failed: %s. Retrying...", e)
+                time.sleep(5)
+        server_socket.listen(5)
+        logging.info(f"TCP server listening on {self.settings['port']}.")
 
-                while self._running:
-                    client_sock, addr = server_socket.accept()
-                    client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    self.client_sockets.append(client_sock)
-                    if self.active_client is None:
-                        self.active_client = client_sock
-                    logging.info(f"Kliens csatlakozva: {addr}.")
-                    self.status_update.emit(f"Kliens csatlakozva: {addr}. Várakozás gyorsbillentyűre.")
+        while self._running:
+            try:
+                client_sock, addr = server_socket.accept()
+            except OSError:
+                break
+            client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-                    threading.Thread(target=self.monitor_client, args=(client_sock, addr), daemon=True).start()
-        except Exception as e:
-            if self._running:
-                logging.error(f"Hiba a kliens fogadásakor: {e}", exc_info=True)
+            # handshake: receive peer name then send ours
+            peer_name = str(addr)
+            try:
+                raw_len = client_sock.recv(4)
+                if raw_len:
+                    msg_len = struct.unpack('!I', raw_len)[0]
+                    payload = client_sock.recv(msg_len)
+                    hello = msgpack.unpackb(payload, raw=False)
+                    peer_name = hello.get('device_name', peer_name)
+            except Exception:
+                pass
+            try:
+                self._send_message(client_sock, {'device_name': self.device_name})
+            except Exception:
+                pass
+
+            self.client_sockets.append(client_sock)
+            self.client_infos[client_sock] = peer_name
+            if self.active_client is None:
+                self.active_client = client_sock
+            logging.info(f"Peer connected: {peer_name} ({addr})")
+            self.status_update.emit(f"Kliens csatlakozva: {peer_name}")
+
+            threading.Thread(target=self.monitor_client, args=(client_sock, peer_name), daemon=True).start()
+
+        try:
+            server_socket.close()
+        except Exception:
+            pass
 
     def monitor_client(self, sock, addr):
         """Monitor a single client connection, handle commands and remove it on disconnect."""
@@ -612,20 +685,7 @@ class KVMWorker(QObject):
                         logging.debug(
                             "monitor_client processing message type '%s'", data.get('type') or data.get('command')
                         )
-                        cmd = data.get('command')
-                        if cmd == 'switch_elitedesk':
-                            self.toggle_client_control('elitedesk', switch_monitor=True)
-                            continue
-                        if cmd == 'switch_laptop':
-                            self.toggle_client_control('laptop', switch_monitor=False)
-                            continue
-                        if data.get('type') == 'clipboard_text':
-                            text = data.get('text', '')
-                            if text != self.last_clipboard:
-                                self._set_clipboard(text)
-                                self._broadcast_message(data, exclude=sock)
-                        else:
-                            self.file_handler.handle_network_message(data, sock)
+                        self.message_queue.put((sock, data))
                 except socket.timeout:
                     logging.debug(
                         "Socket timeout waiting for data from %s (timeout=%s)",
@@ -653,40 +713,7 @@ class KVMWorker(QObject):
 
         finally:
             logging.warning(f"Kliens lecsatlakozott: {client_name} ({addr}).")
-            try:
-                sock.close()
-            except Exception:
-                pass
-            
-            # --- ÚJ, EGYSZERŰBB ÉS HELYES LECSATLAKOZÁSI LOGIKA ---
-            self.file_handler.on_client_disconnected(sock)
-            
-            was_active_client = (sock == self.active_client)
-
-            # Eltávolítjuk a klienst a listákból, bárhol is volt.
-            if sock in self.client_sockets:
-                self.client_sockets.remove(sock)
-            if sock in self.client_infos:
-                del self.client_infos[sock]
-            
-            # FŐ LOGIKA: Ha a KVM aktív volt, és a lecsatlakozott kliens
-            # volt az aktív, akkor mindenképpen adjuk vissza az irányítást a hosztnak!
-            if was_active_client and self.kvm_active:
-                logging.info(f"Active client '{client_name}' disconnected. Deactivating KVM and returning control to host.")
-                # Itt hívjuk a deactivate_kvm-et, ami mindent elintéz:
-                # - leállítja a streaminget
-                # - visszaadja a billentyűzet/egér kontrollt
-                # - visszaállítja a monitort
-                self.deactivate_kvm(reason="active client disconnected")
-            
-            # Ha a lecsatlakozott kliens nem volt aktív, vagy a KVM inaktív volt,
-            # nincs különösebb teendő, csak a listákból való eltávolítás.
-            # Az 'active_client' változó vagy None lesz (ha nem maradt senki),
-            # vagy továbbra is a helyes, még csatlakoztatott kliensre mutat.
-            elif was_active_client:
-                # Ha a KVM nem volt aktív, csak nullázzuk az aktív klienst
-                self.active_client = None
-
+            self._handle_disconnect(sock, "monitor_client")
             logging.debug("monitor_client exit for %s", client_name)
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
@@ -898,19 +925,11 @@ class KVMWorker(QObject):
                             unsent_events.append(event)
                         to_remove.append(sock)
                 for s in to_remove:
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
-                    if s in self.client_sockets:
-                        self.client_sockets.remove(s)
-                    if s in self.client_infos:
-                        del self.client_infos[s]
                     if s == self.active_client:
-                        self.active_client = None
                         active_lost = True
-                        if self.client_sockets:
-                            self.active_client = self.client_sockets[0]
+                    self._handle_disconnect(s, "sender error")
+                    if self.client_sockets and self.active_client is None:
+                        self.active_client = self.client_sockets[0]
                 if active_lost:
                     if self.active_client:
                         self.status_update.emit(
@@ -1097,65 +1116,13 @@ class KVMWorker(QObject):
         logging.info("Streaming listenerek leálltak.")
 
     def run_client(self):
-        class ServiceListener:
-            def __init__(self, worker):
-                self.worker = worker
-
-            def add_service(self, zc, type, name):
-                info = zc.get_service_info(type, name)
-                if info:
-                    ip = socket.inet_ntoa(info.addresses[0])
-                    if ip == self.worker.local_ip:
-                        return  # ignore our own service
-                    self.worker.server_ip = ip
-                    self.worker.last_server_ip = ip  # remember last found host
-                    logging.info(f"Adó szolgáltatás megtalálva a {ip} címen.")
-                    self.worker.status_update.emit(f"Adó megtalálva: {ip}. Csatlakozás...")
-                # Connection thread runs continuously, just update the server IP
-            def update_service(self, zc, type, name):
-                pass
-            def remove_service(self, zc, type, name):
-                self.worker.server_ip = None
-                self.worker.status_update.emit("Az Adó szolgáltatás eltűnt, újra keresem...")
-                logging.warning("Adó szolgáltatás eltűnt.")
-
-        settings_store = QSettings(ORG_NAME, APP_NAME)
-
-        # Start connection thread immediately using stored last IP if available
-        if self.last_server_ip and not self.server_ip:
-            self.server_ip = self.last_server_ip
-        if not self.connection_thread:
-            self.connection_thread = threading.Thread(
-                target=self.connect_to_server,
-                daemon=True,
-                name="ConnectThread",
-            )
-            self.connection_thread.start()
-
-        if not self.message_processor_thread:
-            self.message_processor_thread = threading.Thread(
-                target=self._process_client_messages,
-                daemon=True,
-                name="MsgProcessor",
-            )
-            self.message_processor_thread.start()
-
-        browser = ServiceBrowser(self.zeroconf, SERVICE_TYPE, ServiceListener(self))
-        self.status_update.emit("Vevő mód: Keresem az Adó szolgáltatást...")
-        while self._running:
-            time.sleep(0.5)
+        """Deprecated: client logic replaced by peer discovery."""
+        pass
 
     def connect_to_server(self):
+        """Deprecated: replaced by peer discovery."""
+        return
         """
-        Intelligens újracsatlakozási logikával ellátott metódus a szerverhez való csatlakozáshoz.
-        Kezeli a hálózat lassú felépülését induláskor (pl. Wi-Fi).
-        """
-        self._pressed_keys = set()
-        hk_listener = None
-
-        # Intelligens újrapróbálkozási logika változói
-        retry_delay = 3
-        max_retry_delay = 30
 
         # Egyszeri, 5 másodperces kezdeti várakozás a hálózat felépülésére.
         # Ez a metódus elején, a fő cikluson KÍVÜL van, így csak egyszer fut le.
@@ -1281,3 +1248,49 @@ class KVMWorker(QObject):
                     logging.info(f"Újracsatlakozási kísérlet {retry_delay:.1f} másodperc múlva...")
                     time.sleep(retry_delay)
                     retry_delay = min(retry_delay * 1.5, max_retry_delay)
+        """
+
+    def discover_peers(self):
+        """Continuously search for other KVM peers via Zeroconf."""
+        class Listener:
+            def __init__(self, worker):
+                self.worker = worker
+            def add_service(self, zc, type, name):
+                info = zc.get_service_info(type, name)
+                if info:
+                    ip = socket.inet_ntoa(info.addresses[0])
+                    port = info.port
+                    if ip == self.local_ip and port == self.settings['port']:
+                        return
+                    if not any(p.getpeername()[0] == ip for p in self.client_sockets if p):
+                        threading.Thread(target=self.connect_to_peer, args=(ip, port), daemon=True).start()
+            def update_service(self, zc, type, name):
+                pass
+            def remove_service(self, zc, type, name):
+                pass
+        ServiceBrowser(self.zeroconf, SERVICE_TYPE, Listener(self))
+        while self._running:
+            time.sleep(1)
+
+    def connect_to_peer(self, ip, port):
+        """Active outbound connection to another peer."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.connect((ip, port))
+            self._send_message(sock, {'device_name': self.device_name})
+            raw_len = sock.recv(4)
+            if raw_len:
+                msg_len = struct.unpack('!I', raw_len)[0]
+                payload = sock.recv(msg_len)
+                hello = msgpack.unpackb(payload, raw=False)
+                peer_name = hello.get('device_name', f'{ip}:{port}')
+            else:
+                peer_name = f'{ip}:{port}'
+            self.client_sockets.append(sock)
+            self.client_infos[sock] = peer_name
+            if self.active_client is None:
+                self.active_client = sock
+            threading.Thread(target=self.monitor_client, args=(sock, peer_name), daemon=True).start()
+        except Exception as e:
+            logging.error("Failed to connect to peer %s:%s: %s", ip, port, e)
