@@ -1255,17 +1255,20 @@ class KVMWorker(QObject):
         class Listener:
             def __init__(self, worker):
                 self.worker = worker
+
             def add_service(self, zc, type, name):
                 info = zc.get_service_info(type, name)
                 if info:
                     ip = socket.inet_ntoa(info.addresses[0])
                     port = info.port
-                    if ip == self.local_ip and port == self.settings['port']:
+                    if ip == self.worker.local_ip and port == self.worker.settings['port']:
                         return
-                    if not any(p.getpeername()[0] == ip for p in self.client_sockets if p):
-                        threading.Thread(target=self.connect_to_peer, args=(ip, port), daemon=True).start()
+                    if not any(p.getpeername()[0] == ip for p in self.worker.client_sockets if p):
+                        threading.Thread(target=self.worker.connect_to_peer, args=(ip, port), daemon=True).start()
+
             def update_service(self, zc, type, name):
                 pass
+
             def remove_service(self, zc, type, name):
                 pass
         ServiceBrowser(self.zeroconf, SERVICE_TYPE, Listener(self))
