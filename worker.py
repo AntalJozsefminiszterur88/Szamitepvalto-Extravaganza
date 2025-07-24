@@ -864,22 +864,47 @@ class KVMWorker(QObject):
         last_pos = {'x': center_x, 'y': center_y}
         is_warping = False
 
+        accumulated_movement = {'dx': 0, 'dy': 0}
+        movement_lock = threading.Lock()
+
         send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
         unsent_events = []
 
         def sender():
+            last_tick = time.time()
             while self.kvm_active and self._running:
+                events = []
                 try:
-                    payload = send_queue.get(timeout=0.1)
+                    payload = send_queue.get(timeout=0.01)
+                    got_q = True
                 except queue.Empty:
-                    continue
-                if payload is None:
+                    payload = None
+                    got_q = False
+
+                if got_q and payload is None:
                     logging.debug("Sender thread exiting")
                     break
-                if isinstance(payload, tuple):
-                    packed, event = payload
-                else:
-                    packed, event = payload, None
+                if got_q and payload is not None:
+                    if isinstance(payload, tuple):
+                        events.append(payload)
+                    else:
+                        events.append((payload, None))
+
+                now = time.time()
+                if now - last_tick >= 0.015:
+                    with movement_lock:
+                        dx = accumulated_movement['dx']
+                        dy = accumulated_movement['dy']
+                        accumulated_movement['dx'] = 0
+                        accumulated_movement['dy'] = 0
+                    if dx != 0 or dy != 0:
+                        move_evt = {'type': 'move_relative', 'dx': dx, 'dy': dy}
+                        events.append((msgpack.packb(move_evt, use_bin_type=True), move_evt))
+                    last_tick = now
+
+                if not events:
+                    continue
+
                 to_remove = []
                 active_lost = False
                 if self.active_client is None and self.client_sockets:
@@ -888,42 +913,45 @@ class KVMWorker(QObject):
                 for sock in list(targets):
                     if sock not in self.client_sockets:
                         continue
-                    try:
-                        prev_to = sock.gettimeout()
-                        sock.settimeout(0.1)
-                        sock.sendall(struct.pack('!I', len(packed)) + packed)
-                        sock.settimeout(prev_to)
-                        if event and event.get('type') == 'move_relative':
-                            logging.debug(
-                                "Mouse move sent to %s: dx=%s dy=%s",
-                                self.client_infos.get(sock, sock.getpeername()),
-                                event.get('dx'),
-                                event.get('dy'),
-                            )
-                        else:
-                            logging.debug(
-                                "Sent %d bytes to %s",
-                                len(packed),
-                                self.client_infos.get(sock, sock.getpeername()),
-                            )
-                    except (socket.timeout, BlockingIOError):
-                        logging.warning(
-                            "Client not reading, disconnecting %s",
-                            self.client_infos.get(sock, sock.getpeername()),
-                        )
-                        to_remove.append(sock)
-                    except Exception as e:
+                    for packed, event in events:
                         try:
-                            event = msgpack.unpackb(packed, raw=False)
-                        except Exception:
-                            event = '<unpack failed>'
-                        logging.error(
-                            f"Failed sending event {event} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
-                            exc_info=True,
-                        )
-                        if event != '<unpack failed>':
-                            unsent_events.append(event)
-                        to_remove.append(sock)
+                            prev_to = sock.gettimeout()
+                            sock.settimeout(0.1)
+                            sock.sendall(struct.pack('!I', len(packed)) + packed)
+                            sock.settimeout(prev_to)
+                            if event and event.get('type') == 'move_relative':
+                                logging.debug(
+                                    "Mouse move sent to %s: dx=%s dy=%s",
+                                    self.client_infos.get(sock, sock.getpeername()),
+                                    event.get('dx'),
+                                    event.get('dy'),
+                                )
+                            else:
+                                logging.debug(
+                                    "Sent %d bytes to %s",
+                                    len(packed),
+                                    self.client_infos.get(sock, sock.getpeername()),
+                                )
+                        except (socket.timeout, BlockingIOError):
+                            logging.warning(
+                                "Client not reading, disconnecting %s",
+                                self.client_infos.get(sock, sock.getpeername()),
+                            )
+                            to_remove.append(sock)
+                            break
+                        except Exception as e:
+                            try:
+                                event_dbg = msgpack.unpackb(packed, raw=False)
+                            except Exception:
+                                event_dbg = '<unpack failed>'
+                            logging.error(
+                                f"Failed sending event {event_dbg} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
+                                exc_info=True,
+                            )
+                            if event_dbg != '<unpack failed>':
+                                unsent_events.append(event_dbg)
+                            to_remove.append(sock)
+                            break
                 for s in to_remove:
                     if s == self.active_client:
                         active_lost = True
@@ -987,7 +1015,9 @@ class KVMWorker(QObject):
             dx = x - last_pos['x']
             dy = y - last_pos['y']
             if dx != 0 or dy != 0:
-                send({'type': 'move_relative', 'dx': dx, 'dy': dy})
+                with movement_lock:
+                    accumulated_movement['dx'] += dx
+                    accumulated_movement['dy'] += dy
             is_warping = True
             host_mouse_controller.position = (center_x, center_y)
             last_pos['x'], last_pos['y'] = center_x, center_y
