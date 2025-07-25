@@ -59,7 +59,7 @@ class KVMWorker(QObject):
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
-        'discovered_peers', 'connection_manager_thread'
+        'discovered_peers', 'connection_manager_thread', 'peers_lock'
     )
 
     finished = Signal()
@@ -104,6 +104,8 @@ class KVMWorker(QObject):
         self.pico_thread = None
         self.pico_handler = None
         self.discovered_peers = {}
+        # Lock protecting access to discovered_peers from multiple threads
+        self.peers_lock = threading.Lock()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -1305,16 +1307,15 @@ class KVMWorker(QObject):
                     port = info.port
                     if ip == self.worker.local_ip and port == self.worker.settings['port']:
                         return
-                    self.worker.discovered_peers[ip] = port
+                    with self.worker.peers_lock:
+                        self.worker.discovered_peers[name] = {'ip': ip, 'port': port}
 
             def update_service(self, zc, type, name):
                 self.add_service(zc, type, name)
 
             def remove_service(self, zc, type, name):
-                info = zc.get_service_info(type, name)
-                if info:
-                    ip = socket.inet_ntoa(info.addresses[0])
-                    self.worker.discovered_peers.pop(ip, None)
+                with self.worker.peers_lock:
+                    self.worker.discovered_peers.pop(name, None)
 
         ServiceBrowser(self.zeroconf, SERVICE_TYPE, Listener(self))
         while self._running:
@@ -1346,15 +1347,21 @@ class KVMWorker(QObject):
     def _connection_manager(self):
         """Ensure connections to all discovered peers."""
         while self._running:
-            current_ips = set()
+            connected_ips = set()
             for s in list(self.client_sockets):
                 try:
-                    current_ips.add(s.getpeername()[0])
+                    connected_ips.add(s.getpeername()[0])
                 except Exception:
                     pass
-            for ip, port in list(self.discovered_peers.items()):
+
+            with self.peers_lock:
+                peers_to_check = list(self.discovered_peers.values())
+
+            for peer in peers_to_check:
+                ip = peer['ip']
+                port = peer['port']
                 if ip == self.local_ip and port == self.settings['port']:
                     continue
-                if ip not in current_ips:
+                if ip not in connected_ips:
                     self.connect_to_peer(ip, port)
             time.sleep(5)
