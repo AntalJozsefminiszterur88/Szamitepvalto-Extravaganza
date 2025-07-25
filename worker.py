@@ -611,9 +611,11 @@ class KVMWorker(QObject):
 
 
     def accept_connections(self):
+        """Listen for incoming TCP connections."""
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         while self._running:
             try:
                 server_socket.bind(('', self.settings['port']))
@@ -621,6 +623,7 @@ class KVMWorker(QObject):
             except OSError as e:
                 logging.error("Port bind failed: %s. Retrying...", e)
                 time.sleep(5)
+
         server_socket.listen(5)
         logging.info(f"TCP server listening on {self.settings['port']}.")
 
@@ -631,7 +634,7 @@ class KVMWorker(QObject):
                 break
 
             threading.Thread(
-                target=self._handle_new_connection,
+                target=self.monitor_client,
                 args=(client_sock, addr),
                 daemon=True,
             ).start()
@@ -641,9 +644,10 @@ class KVMWorker(QObject):
         except Exception:
             pass
 
-    def monitor_client(self, sock, addr, *, handshake_done: bool = False):
-        """Monitor a single client connection, handle commands and remove it on disconnect."""
+    def monitor_client(self, sock, addr):
+        """Monitor a single connection. Handles lifecycle and incoming data."""
         sock.settimeout(30.0)
+
         def recv_all(s, n):
             data = b''
             while len(data) < n:
@@ -654,18 +658,29 @@ class KVMWorker(QObject):
             return data
 
         client_name = str(addr)
-        if not handshake_done:
+
+        # Exchange device names with the peer. Each side sends first then reads.
+        try:
+            self._send_message(sock, {'type': 'intro', 'device_name': self.device_name})
+            raw_len = recv_all(sock, 4)
+            if raw_len:
+                msg_len = struct.unpack('!I', raw_len)[0]
+                payload = recv_all(sock, msg_len)
+                if payload:
+                    hello = msgpack.unpackb(payload, raw=False)
+                    client_name = hello.get('device_name', client_name)
+        except Exception:
             try:
-                raw_len = recv_all(sock, 4)
-                if raw_len:
-                    msg_len = struct.unpack('!I', raw_len)[0]
-                    payload = recv_all(sock, msg_len)
-                    if payload:
-                        hello = msgpack.unpackb(payload, raw=False)
-                        client_name = hello.get('device_name', client_name)
+                sock.close()
             except Exception:
                 pass
-        self.client_infos[sock] = client_name
+            return
+
+        with self.clients_lock:
+            self.client_sockets.append(sock)
+            self.client_infos[sock] = client_name
+            if self.active_client is None:
+                self.active_client = sock
         logging.info(f"Client connected: {client_name} ({addr})")
         logging.debug(
             "monitor_client start for %s",
@@ -733,78 +748,6 @@ class KVMWorker(QObject):
             self._handle_disconnect(sock, "monitor_client")
             logging.debug("monitor_client exit for %s", client_name)
 
-    def _handle_new_connection(self, sock, peer_addr):
-        """Perform handshake with challenge and keep or drop the socket."""
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        my_challenge = random.getrandbits(64)
-
-        try:
-            self._send_message(
-                sock,
-                {
-                    "type": "handshake",
-                    "device_name": self.device_name,
-                    "challenge": my_challenge,
-                },
-            )
-        except Exception:
-            try:
-                sock.close()
-            except Exception:
-                pass
-            return
-
-        peer_name = str(peer_addr)
-        peer_challenge = -1
-        try:
-            sock.settimeout(5.0)
-            raw_len = sock.recv(4)
-            if not raw_len:
-                raise ConnectionError("no handshake")
-            msg_len = struct.unpack("!I", raw_len)[0]
-            payload = sock.recv(msg_len)
-            hello = msgpack.unpackb(payload, raw=False)
-            peer_name = hello.get("device_name", peer_name)
-            peer_challenge = int(hello.get("challenge", -1))
-        except Exception:
-            try:
-                sock.close()
-            except Exception:
-                pass
-            return
-        finally:
-            sock.settimeout(None)
-
-        keep = False
-        if my_challenge > peer_challenge:
-            keep = True
-        elif my_challenge < peer_challenge:
-            keep = False
-        else:
-            keep = self.local_ip > peer_addr[0]
-
-        if not keep:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            sock.close()
-            return
-
-        with self.clients_lock:
-            self.client_sockets.append(sock)
-            self.client_infos[sock] = peer_name
-            if self.active_client is None:
-                self.active_client = sock
-        logging.info(f"Peer connected: {peer_name} ({peer_addr})")
-        self.status_update.emit(f"Kliens csatlakozva: {peer_name}")
-
-        threading.Thread(
-            target=self.monitor_client,
-            args=(sock, peer_name),
-            kwargs={"handshake_done": True},
-            daemon=True,
-        ).start()
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
         logging.info(
@@ -1400,32 +1343,50 @@ class KVMWorker(QObject):
 
     def connect_to_peer(self, ip, port):
         """Active outbound connection to another peer."""
+        with self.clients_lock:
+            for s in self.client_sockets:
+                try:
+                    if s.getpeername()[0] == ip:
+                        return
+                except Exception:
+                    continue
+
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.connect((ip, port))
-            self._handle_new_connection(sock, (ip, port))
         except Exception as e:
             logging.error("Failed to connect to peer %s:%s: %s", ip, port, e)
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+
+        threading.Thread(
+            target=self.monitor_client,
+            args=(sock, (ip, port)),
+            daemon=True,
+        ).start()
 
     def _connection_manager(self):
         """Ensure connections to all discovered peers."""
         while self._running:
-            connected_ips = set()
-            for s in list(self.client_sockets):
-                try:
-                    connected_ips.add(s.getpeername()[0])
-                except Exception:
-                    pass
+            with self.clients_lock:
+                connected_ips = {
+                    s.getpeername()[0] for s in self.client_sockets
+                    if s.fileno() != -1
+                }
 
             with self.peers_lock:
-                peers_to_check = list(self.discovered_peers.values())
+                peers_snapshot = list(self.discovered_peers.values())
 
-            for peer in peers_to_check:
+            for peer in peers_snapshot:
                 ip = peer['ip']
                 port = peer['port']
                 if ip == self.local_ip and port == self.settings['port']:
                     continue
-                if ip not in connected_ips:
+                if ip not in connected_ips and self.local_ip < ip:
                     self.connect_to_peer(ip, port)
+
             time.sleep(5)
