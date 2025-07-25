@@ -629,7 +629,7 @@ class KVMWorker(QObject):
 
 
     def accept_connections(self):
-        """Listen for incoming TCP connections."""
+        """Accept connections from peers; keep only if our IP wins the tie."""
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -643,7 +643,7 @@ class KVMWorker(QObject):
                 time.sleep(5)
 
         server_socket.listen(5)
-        logging.info(f"TCP server listening on {self.settings['port']}.")
+        logging.info(f"TCP server listening on {self.settings['port']}")
 
         while self._running:
             try:
@@ -653,7 +653,9 @@ class KVMWorker(QObject):
 
             peer_ip = addr[0]
             try:
-                if ipaddress.ip_address(self.local_ip) > ipaddress.ip_address(peer_ip):
+                local_addr = ipaddress.ip_address(self.local_ip)
+                remote_addr = ipaddress.ip_address(peer_ip)
+                if local_addr > remote_addr:
                     client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     threading.Thread(
                         target=self.monitor_client,
@@ -1384,7 +1386,7 @@ class KVMWorker(QObject):
                 logging.debug("Resolver failed for %s: %s", name, e)
 
     def _connection_manager(self):
-        """Continuously probe known peers and initiate connections."""
+        """Continuously probe peers and attempt connections."""
         while self._running:
             with self.peers_lock:
                 peers = list(self.discovered_peers.values())
@@ -1393,11 +1395,13 @@ class KVMWorker(QObject):
                 port = peer['port']
                 with self.clients_lock:
                     already = any(
-                        s.getpeername()[0] == ip for s in self.client_sockets if s.fileno() != -1
+                        s.getpeername()[0] == ip
+                        for s in self.client_sockets
+                        if s.fileno() != -1
                     )
                 if not already:
                     self.connect_to_peer(ip, port)
-            time.sleep(1)
+            time.sleep(2)
 
     def connect_to_peer(self, ip, port):
         """Active outbound connection to another peer."""
