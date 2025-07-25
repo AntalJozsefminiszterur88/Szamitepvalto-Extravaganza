@@ -231,6 +231,8 @@ class MainWindow(QMainWindow):
             self.start_kvm_service()
 
     def start_kvm_service(self):
+        """Start the background KVM worker and temporarily disable the start
+        button to avoid duplicate launches from rapid clicks."""
         self.kvm_thread = QThread()
         self.kvm_worker = KVMWorker(self.get_settings())
         self.kvm_worker.moveToThread(self.kvm_thread)
@@ -242,6 +244,9 @@ class MainWindow(QMainWindow):
         self.kvm_worker.incoming_upload_started.connect(self.on_incoming_upload_started)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
+        # Prevent accidental double starts
+        self.start_button.setEnabled(False)
+        QTimer.singleShot(1000, lambda: self.start_button.setEnabled(True))
         self.set_controls_enabled(False)
 
     def stop_kvm_service(self):
