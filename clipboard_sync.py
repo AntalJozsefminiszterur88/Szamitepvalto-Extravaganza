@@ -92,17 +92,25 @@ def send_clip(conn, text):
     conn.sendall(size + data)
 
 
-def recv_clip(conn):
-    size_data = conn.recv(4)
-    if not size_data:
-        return None
-    size = int.from_bytes(size_data, 'big')
+def _recv_exact(conn, size):
+    """Receive exactly ``size`` bytes from the connection or return ``None``."""
     data = b''
     while len(data) < size:
-        chunk = conn.recv(min(BUFFER_SIZE, size - len(data)))
+        chunk = conn.recv(size - len(data))
         if not chunk:
             return None
         data += chunk
+    return data
+
+
+def recv_clip(conn):
+    size_data = _recv_exact(conn, 4)
+    if not size_data:
+        return None
+    size = int.from_bytes(size_data, 'big')
+    data = _recv_exact(conn, size)
+    if data is None:
+        return None
     return data.decode('utf-8')
 
 
