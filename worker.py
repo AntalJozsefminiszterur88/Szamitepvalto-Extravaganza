@@ -61,7 +61,7 @@ class KVMWorker(QObject):
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
         'discovered_peers', 'connection_manager_thread', 'peers_lock',
-        'clients_lock'
+        'clients_lock', 'resolve_queue', 'resolver_thread'
     )
 
     finished = Signal()
@@ -110,6 +110,8 @@ class KVMWorker(QObject):
         self.peers_lock = threading.Lock()
         # Lock protecting client_sockets and client_infos
         self.clients_lock = threading.Lock()
+        self.resolve_queue = queue.Queue()
+        self.resolver_thread = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -379,6 +381,8 @@ class KVMWorker(QObject):
             self.pico_thread.join(timeout=1)
         if self.connection_manager_thread and self.connection_manager_thread.is_alive():
             self.connection_manager_thread.join(timeout=1)
+        if self.resolver_thread and self.resolver_thread.is_alive():
+            self.resolver_thread.join(timeout=1)
         if self.message_processor_thread and self.message_processor_thread.is_alive():
             try:
                 self.message_queue.put_nowait((None, None))
@@ -413,6 +417,12 @@ class KVMWorker(QObject):
 
         threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread").start()
         threading.Thread(target=self.discover_peers, daemon=True, name="DiscoverThread").start()
+        self.resolver_thread = threading.Thread(
+            target=self._resolver_thread,
+            daemon=True,
+            name="ResolverThread",
+        )
+        self.resolver_thread.start()
         self.connection_manager_thread = threading.Thread(
             target=self._connection_manager,
             daemon=True,
@@ -1321,14 +1331,7 @@ class KVMWorker(QObject):
                 self.worker = worker
 
             def add_service(self, zc, type, name):
-                info = zc.get_service_info(type, name)
-                if info:
-                    ip = socket.inet_ntoa(info.addresses[0])
-                    port = info.port
-                    if ip == self.worker.local_ip and port == self.worker.settings['port']:
-                        return
-                    with self.worker.peers_lock:
-                        self.worker.discovered_peers[name] = {'ip': ip, 'port': port}
+                self.worker.resolve_queue.put(name)
 
             def update_service(self, zc, type, name):
                 self.add_service(zc, type, name)
@@ -1390,3 +1393,23 @@ class KVMWorker(QObject):
                     self.connect_to_peer(ip, port)
 
             time.sleep(5)
+
+    def _resolver_thread(self):
+        """Resolve service info asynchronously from the resolve_queue."""
+        while self._running:
+            try:
+                name = self.resolve_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                info = self.zeroconf.get_service_info(SERVICE_TYPE, name)
+                if not info:
+                    continue
+                ip = socket.inet_ntoa(info.addresses[0])
+                port = info.port
+                if ip == self.local_ip and port == self.settings['port']:
+                    continue
+                with self.peers_lock:
+                    self.discovered_peers[name] = {'ip': ip, 'port': port}
+            except Exception as e:
+                logging.error("Failed to resolve service %s: %s", name, e)
