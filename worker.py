@@ -60,8 +60,8 @@ class KVMWorker(QObject):
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
-        'discovered_peers', 'connection_manager_thread', 'peers_lock',
-        'clients_lock', 'resolve_queue', 'resolver_thread'
+        'discovered_peers', 'master_loop_thread', 'peers_lock',
+        'clients_lock'
     )
 
     finished = Signal()
@@ -88,7 +88,7 @@ class KVMWorker(QObject):
         self.local_ip = socket.gethostbyname(socket.gethostname())
         self.server_ip = None
         self.connection_thread = None
-        self.connection_manager_thread = None
+        self.master_loop_thread = None
         settings_store = QSettings(ORG_NAME, APP_NAME)
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
@@ -110,8 +110,6 @@ class KVMWorker(QObject):
         self.peers_lock = threading.Lock()
         # Lock protecting client_sockets and client_infos
         self.clients_lock = threading.Lock()
-        self.resolve_queue = queue.Queue()
-        self.resolver_thread = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -379,10 +377,8 @@ class KVMWorker(QObject):
             self.clipboard_thread.join(timeout=1)
         if self.pico_thread and self.pico_thread.is_alive():
             self.pico_thread.join(timeout=1)
-        if self.connection_manager_thread and self.connection_manager_thread.is_alive():
-            self.connection_manager_thread.join(timeout=1)
-        if self.resolver_thread and self.resolver_thread.is_alive():
-            self.resolver_thread.join(timeout=1)
+        if self.master_loop_thread and self.master_loop_thread.is_alive():
+            self.master_loop_thread.join(timeout=1)
         if self.message_processor_thread and self.message_processor_thread.is_alive():
             try:
                 self.message_queue.put_nowait((None, None))
@@ -417,18 +413,12 @@ class KVMWorker(QObject):
 
         threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread").start()
         threading.Thread(target=self.discover_peers, daemon=True, name="DiscoverThread").start()
-        self.resolver_thread = threading.Thread(
-            target=self._resolver_thread,
+        self.master_loop_thread = threading.Thread(
+            target=self._master_reconciliation_loop,
             daemon=True,
-            name="ResolverThread",
+            name="MasterLoop",
         )
-        self.resolver_thread.start()
-        self.connection_manager_thread = threading.Thread(
-            target=self._connection_manager,
-            daemon=True,
-            name="ConnMgr",
-        )
-        self.connection_manager_thread.start()
+        self.master_loop_thread.start()
 
         if self.settings.get('role') == 'ado':
             self.clipboard_thread = threading.Thread(
@@ -1324,17 +1314,17 @@ class KVMWorker(QObject):
         """
 
     def discover_peers(self):
-        """Continuously discover peers and maintain a list of their addresses."""
+        """Start a lightweight ServiceBrowser to track removed services."""
 
         class Listener:
             def __init__(self, worker):
                 self.worker = worker
 
             def add_service(self, zc, type, name):
-                self.worker.resolve_queue.put(name)
+                pass
 
             def update_service(self, zc, type, name):
-                self.add_service(zc, type, name)
+                pass
 
             def remove_service(self, zc, type, name):
                 with self.worker.peers_lock:
@@ -1372,44 +1362,41 @@ class KVMWorker(QObject):
             daemon=True,
         ).start()
 
-    def _connection_manager(self):
-        """Ensure connections to all discovered peers."""
+    def _master_reconciliation_loop(self):
+        """Proactively reconcile peer discovery and connections."""
         while self._running:
+            try:
+                names = [n for n in self.zeroconf.cache.names() if n.endswith(SERVICE_TYPE)]
+            except Exception:
+                names = []
+
+            snapshot = {}
+            for name in names:
+                try:
+                    info = self.zeroconf.get_service_info(SERVICE_TYPE, name)
+                    if not info:
+                        continue
+                    ip = socket.inet_ntoa(info.addresses[0])
+                    port = info.port
+                    if ip == self.local_ip and port == self.settings['port']:
+                        continue
+                    snapshot[name] = {'ip': ip, 'port': port}
+                except Exception as e:
+                    logging.error("Failed to resolve service %s: %s", name, e)
+
+            with self.peers_lock:
+                self.discovered_peers = snapshot
+
             with self.clients_lock:
                 connected_ips = {
                     s.getpeername()[0] for s in self.client_sockets
                     if s.fileno() != -1
                 }
 
-            with self.peers_lock:
-                peers_snapshot = list(self.discovered_peers.values())
-
-            for peer in peers_snapshot:
+            for peer in snapshot.values():
                 ip = peer['ip']
                 port = peer['port']
-                if ip == self.local_ip and port == self.settings['port']:
-                    continue
                 if ip not in connected_ips and self.local_ip < ip:
                     self.connect_to_peer(ip, port)
 
             time.sleep(5)
-
-    def _resolver_thread(self):
-        """Resolve service info asynchronously from the resolve_queue."""
-        while self._running:
-            try:
-                name = self.resolve_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            try:
-                info = self.zeroconf.get_service_info(SERVICE_TYPE, name)
-                if not info:
-                    continue
-                ip = socket.inet_ntoa(info.addresses[0])
-                port = info.port
-                if ip == self.local_ip and port == self.settings['port']:
-                    continue
-                with self.peers_lock:
-                    self.discovered_peers[name] = {'ip': ip, 'port': port}
-            except Exception as e:
-                logging.error("Failed to resolve service %s: %s", name, e)
