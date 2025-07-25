@@ -62,7 +62,8 @@ class KVMWorker(QObject):
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
         'discovered_peers', 'connection_manager_thread', 'resolver_thread',
-        'resolver_queue', 'service_info', 'peers_lock', 'clients_lock'
+        'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
+        'pending_activation_target'
     )
 
     finished = Signal()
@@ -114,6 +115,8 @@ class KVMWorker(QObject):
         self.peers_lock = threading.Lock()
         # Lock protecting client_sockets and client_infos
         self.clients_lock = threading.Lock()
+        # Remember if a KVM session was active when the connection dropped
+        self.pending_activation_target = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -222,9 +225,11 @@ class KVMWorker(QObject):
 
         if was_active and self.kvm_active:
             logging.info("Active client disconnected, deactivating KVM")
+            self.pending_activation_target = peer_name
             self.deactivate_kvm(reason=reason)
         elif was_active:
             self.active_client = None
+            self.pending_activation_target = None
         logging.debug("Peer cleanup completed; connection manager will attempt reconnection")
 
     # ------------------------------------------------------------------
@@ -356,6 +361,7 @@ class KVMWorker(QObject):
     def stop(self):
         logging.info("stop() metódus meghívva.")
         self._running = False
+        self.pending_activation_target = None
         if self.kvm_active:
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
         if self.service_info:
@@ -712,6 +718,15 @@ class KVMWorker(QObject):
             self.client_infos[sock] = client_name
             if self.active_client is None:
                 self.active_client = sock
+        if (
+            self.pending_activation_target
+            and self.pending_activation_target == client_name
+            and not self.kvm_active
+        ):
+            logging.info("Reconnected to %s, resuming KVM", client_name)
+            self.active_client = sock
+            self.pending_activation_target = None
+            self.activate_kvm(switch_monitor=self.switch_monitor)
         logging.info(f"Client connected: {client_name} ({addr})")
         logging.debug(
             "monitor_client start for %s",
@@ -801,6 +816,7 @@ class KVMWorker(QObject):
             switch_monitor,
             self.client_infos.get(self.active_client, "unknown"),
         )
+        self.pending_activation_target = None
         if self.active_client is None and self.client_sockets:
             self.active_client = self.client_sockets[0]
             logging.info(

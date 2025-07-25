@@ -64,7 +64,9 @@ stop the KVM service. The correct operating mode is selected automatically.
 The receiver continuously searches for the host using Zeroconf and
 also retries the last known IP address. This means that whether the
 host or any receiver is powered on first, they will automatically find
-each other and connect once both sides are running.
+each other and connect once both sides are running. If the connection
+is interrupted on either side, both peers keep searching and will
+reconnect automatically as soon as the other becomes available again.
 
 The desktop acting as the host can accept multiple client connections at once. Only the
 selected receiver will get the forwarded input events. Switch targets with the hotkeys to

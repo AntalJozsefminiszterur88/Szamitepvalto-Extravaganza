@@ -43,19 +43,19 @@ MB = 1024 * 1024
 
 def set_autostart(enabled: bool) -> None:
     """Enable or disable autostart using the Task Scheduler for higher priority."""
-    app_name = "MyKVM_Start" # A feladat neve a Feladatütemezőben
-    
+    app_name = "MyKVM_Start"  # A feladat neve a Feladatütemezőben
+
     try:
         if enabled:
             # Összeállítjuk az indítandó parancsot és az argumentumait
-            if getattr(sys, "frozen", False): # Ha PyInstaller exe-ként fut
+            if getattr(sys, "frozen", False):  # Ha PyInstaller exe-ként fut
                 executable = f'"{sys.executable}"'
                 arguments = '--tray'
-            else: # Ha sima python szkriptként fut
+            else:  # Ha sima python szkriptként fut
                 executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
                 script_path = os.path.join(os.path.dirname(__file__), "main.py")
                 arguments = f'"{script_path}" --tray'
-            
+
             # --- JAVÍTOTT RÉSZ ---
             # A teljes futtatandó parancs egyetlen stringként,
             # amit a schtasks helyesen tud értelmezni.
@@ -63,10 +63,10 @@ def set_autostart(enabled: bool) -> None:
 
             command = [
                 'schtasks', '/Create', '/TN', app_name,
-                '/TR', task_run_command, # Itt már a tiszta stringet adjuk át
+                '/TR', task_run_command,  # Itt már a tiszta stringet adjuk át
                 '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F'
             ]
-            
+
             logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
             # A shell=True itt fontos, hogy a Windows helyesen értelmezze a parancsot
             result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
