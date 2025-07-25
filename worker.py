@@ -58,7 +58,8 @@ class KVMWorker(QObject):
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
-        'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler'
+        'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
+        'discovered_peers', 'connection_manager_thread'
     )
 
     finished = Signal()
@@ -85,6 +86,7 @@ class KVMWorker(QObject):
         self.local_ip = socket.gethostbyname(socket.gethostname())
         self.server_ip = None
         self.connection_thread = None
+        self.connection_manager_thread = None
         settings_store = QSettings(ORG_NAME, APP_NAME)
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
@@ -101,6 +103,7 @@ class KVMWorker(QObject):
         self._pressed_keys = set()
         self.pico_thread = None
         self.pico_handler = None
+        self.discovered_peers = {}
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -348,6 +351,8 @@ class KVMWorker(QObject):
             self.clipboard_thread.join(timeout=1)
         if self.pico_thread and self.pico_thread.is_alive():
             self.pico_thread.join(timeout=1)
+        if self.connection_manager_thread and self.connection_manager_thread.is_alive():
+            self.connection_manager_thread.join(timeout=1)
         if self.message_processor_thread and self.message_processor_thread.is_alive():
             try:
                 self.message_queue.put_nowait((None, None))
@@ -382,6 +387,12 @@ class KVMWorker(QObject):
 
         threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread").start()
         threading.Thread(target=self.discover_peers, daemon=True, name="DiscoverThread").start()
+        self.connection_manager_thread = threading.Thread(
+            target=self._connection_manager,
+            daemon=True,
+            name="ConnMgr",
+        )
+        self.connection_manager_thread.start()
 
         if self.settings.get('role') == 'ado':
             self.clipboard_thread = threading.Thread(
@@ -1281,7 +1292,8 @@ class KVMWorker(QObject):
         """
 
     def discover_peers(self):
-        """Continuously search for other KVM peers via Zeroconf."""
+        """Continuously discover peers and maintain a list of their addresses."""
+
         class Listener:
             def __init__(self, worker):
                 self.worker = worker
@@ -1293,14 +1305,17 @@ class KVMWorker(QObject):
                     port = info.port
                     if ip == self.worker.local_ip and port == self.worker.settings['port']:
                         return
-                    if not any(p.getpeername()[0] == ip for p in self.worker.client_sockets if p):
-                        threading.Thread(target=self.worker.connect_to_peer, args=(ip, port), daemon=True).start()
+                    self.worker.discovered_peers[ip] = port
 
             def update_service(self, zc, type, name):
-                pass
+                self.add_service(zc, type, name)
 
             def remove_service(self, zc, type, name):
-                pass
+                info = zc.get_service_info(type, name)
+                if info:
+                    ip = socket.inet_ntoa(info.addresses[0])
+                    self.worker.discovered_peers.pop(ip, None)
+
         ServiceBrowser(self.zeroconf, SERVICE_TYPE, Listener(self))
         while self._running:
             time.sleep(1)
@@ -1327,3 +1342,19 @@ class KVMWorker(QObject):
             threading.Thread(target=self.monitor_client, args=(sock, peer_name), daemon=True).start()
         except Exception as e:
             logging.error("Failed to connect to peer %s:%s: %s", ip, port, e)
+
+    def _connection_manager(self):
+        """Ensure connections to all discovered peers."""
+        while self._running:
+            current_ips = set()
+            for s in list(self.client_sockets):
+                try:
+                    current_ips.add(s.getpeername()[0])
+                except Exception:
+                    pass
+            for ip, port in list(self.discovered_peers.items()):
+                if ip == self.local_ip and port == self.settings['port']:
+                    continue
+                if ip not in current_ips:
+                    self.connect_to_peer(ip, port)
+            time.sleep(5)
