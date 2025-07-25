@@ -60,7 +60,8 @@ class KVMWorker(QObject):
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
-        'discovered_peers', 'connection_manager_thread', 'peers_lock'
+        'discovered_peers', 'connection_manager_thread', 'peers_lock',
+        'clients_lock'
     )
 
     finished = Signal()
@@ -107,6 +108,8 @@ class KVMWorker(QObject):
         self.discovered_peers = {}
         # Lock protecting access to discovered_peers from multiple threads
         self.peers_lock = threading.Lock()
+        # Lock protecting client_sockets and client_infos
+        self.clients_lock = threading.Lock()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -184,17 +187,35 @@ class KVMWorker(QObject):
                 logging.error("Failed to broadcast message: %s", e)
 
     def _handle_disconnect(self, sock, reason: str = "unknown") -> None:
-        """Centralised cleanup for a disconnected peer."""
+        """Cleanup for a disconnected socket with peer-awareness."""
         try:
             sock.close()
         except Exception:
             pass
         self.file_handler.on_client_disconnected(sock)
-        was_active = sock == self.active_client
-        if sock in self.client_sockets:
-            self.client_sockets.remove(sock)
-        if sock in self.client_infos:
-            del self.client_infos[sock]
+
+        with self.clients_lock:
+            peer_name = self.client_infos.get(sock)
+            was_active = sock == self.active_client
+            if sock in self.client_sockets:
+                self.client_sockets.remove(sock)
+            if sock in self.client_infos:
+                del self.client_infos[sock]
+            peer_still_connected = (
+                peer_name is not None and peer_name in self.client_infos.values()
+            )
+            if peer_still_connected and was_active:
+                for s, name in self.client_infos.items():
+                    if name == peer_name:
+                        self.active_client = s
+                        break
+
+        if peer_still_connected:
+            logging.debug(
+                "Closed redundant connection to %s (%s)", peer_name, reason
+            )
+            return
+
         if was_active and self.kvm_active:
             logging.info("Active client disconnected, deactivating KVM")
             self.deactivate_kvm(reason=reason)
@@ -341,13 +362,15 @@ class KVMWorker(QObject):
                 listener.stop()
             except:
                 pass
-        for sock in list(getattr(self, 'client_sockets', [])):
-            try:
-                sock.close()
-            except Exception:
-                pass
-        self.client_infos.clear()
-        self.active_client = None
+        with self.clients_lock:
+            for sock in list(self.client_sockets):
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            self.client_sockets.clear()
+            self.client_infos.clear()
+            self.active_client = None
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
         if self.clipboard_thread and self.clipboard_thread.is_alive():
@@ -768,10 +791,11 @@ class KVMWorker(QObject):
             sock.close()
             return
 
-        self.client_sockets.append(sock)
-        self.client_infos[sock] = peer_name
-        if self.active_client is None:
-            self.active_client = sock
+        with self.clients_lock:
+            self.client_sockets.append(sock)
+            self.client_infos[sock] = peer_name
+            if self.active_client is None:
+                self.active_client = sock
         logging.info(f"Peer connected: {peer_name} ({peer_addr})")
         self.status_update.emit(f"Kliens csatlakozva: {peer_name}")
 
