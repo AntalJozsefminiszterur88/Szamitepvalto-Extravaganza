@@ -244,11 +244,16 @@ class KVMWorker(QObject):
             time.sleep(0.5)
 
     def _clipboard_loop_client(self, sock) -> None:
-        while self._running and self.server_socket is sock:
+        while self._running:
+            if sock.fileno() == -1:
+                break
             text = self._get_clipboard()
             if text != self.last_clipboard:
                 self.last_clipboard = text
-                self._send_message(sock, {'type': 'clipboard_text', 'text': text})
+                try:
+                    self._send_message(sock, {'type': 'clipboard_text', 'text': text})
+                except Exception:
+                    break
             time.sleep(0.5)
 
     def _process_messages(self):
@@ -732,6 +737,14 @@ class KVMWorker(QObject):
             "monitor_client start for %s",
             client_name,
         )
+        # Start clipboard synchronization thread for this connection
+        clipboard_thread = threading.Thread(
+            target=self._clipboard_loop_client,
+            args=(sock,),
+            daemon=True,
+            name=f"ClipboardCli-{client_name}"
+        )
+        clipboard_thread.start()
         # send current clipboard to newly connected client
         if self.last_clipboard:
             try:
