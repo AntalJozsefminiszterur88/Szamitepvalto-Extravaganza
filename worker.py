@@ -866,15 +866,15 @@ class KVMWorker(QObject):
         release_keys: bool = True,
         reason: Optional[str] = None,
     ):
-        # --- ÚJ, FONTOS ELLENŐRZÉS A METÓDUS ELEJÉN ---
-        # Ha a KVM már eleve inaktív, ne csináljunk semmit, csak naplózzuk az eseményt.
-        # Ez megakadályozza a felesleges hívásokat és a hibát.
+        # --- EZT A BLOKKOT ILLESZD BE A FÜGGVÉNY ELEJÉRE ---
+        # Védelmi feltétel: ha a KVM már eleve inaktív, ne csináljunk semmit.
+        # Ez megakadályozza a hibákat és a felesleges műveleteket.
         if not self.kvm_active:
             logging.info(
                 "deactivate_kvm called, but KVM was already inactive. Reason: %s. No action taken.",
                 reason or "unknown",
             )
-            # Biztonsági okokból itt is elengedhetjük a billentyűket, ha beragadnának
+            # Biztonsági okokból a billentyű-elengedést itt is lefuttathatjuk.
             if release_keys:
                 self.release_hotkey_keys()
             return
