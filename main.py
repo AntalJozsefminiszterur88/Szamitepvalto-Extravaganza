@@ -4,6 +4,7 @@
 import sys
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 import ctypes
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
@@ -11,11 +12,38 @@ from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
 
-# A naplózást itt, a legfelső szinten állítjuk be.
+# Dinamikus alapútvonal meghatározása (működik scriptként és EXE-ként is)
+if getattr(sys, 'frozen', False):
+    # Ha a program EXE-ként fut (le van fagyasztva)
+    application_path = os.path.dirname(sys.executable)
+else:
+    # Ha a program scriptként fut
+    application_path = os.path.dirname(os.path.abspath(__file__))
+
+# Log könyvtár létrehozása
+log_dir = os.path.join(application_path, "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file_path = os.path.join(log_dir, "kvm_app.log")
+
+# Naplózás beállítása fájlba, rotációval
+# 5 MB-onként új fájlt kezd, és 3 régi fájlt tart meg.
+file_handler = RotatingFileHandler(
+    log_file_path, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8'
+)
+file_handler.setFormatter(
+    logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+)
+
+# Konzolra író handler (fejlesztéshez hasznos marad)
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(
+    logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
+)
+
+# A gyökeres logger konfigurálása mindkét handlerrel
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    level=logging.INFO,  # Állítsd DEBUG-ra a részletesebb hibakereséshez
+    handlers=[file_handler, stream_handler]
 )
 
 
@@ -29,6 +57,7 @@ def set_high_priority():
             )
     except Exception as e:
         logging.warning("Failed to set high process priority: %s", e)
+
 
 if __name__ == "__main__":
     logging.info("Alkalmazás indítása...")
