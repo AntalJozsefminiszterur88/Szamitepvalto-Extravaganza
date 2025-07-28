@@ -16,8 +16,9 @@ python main.py
 
 This starts the Qt based interface defined in `gui.py` and launches the
 background worker defined in `worker.py` for handling networking and hotkeys.
-For troubleshooting, you can enable debug logging by setting the
-`logging` level to `DEBUG` in `main.py`.
+For troubleshooting, you can enable verbose logging by changing the `level`
+argument of `logging.basicConfig` to `DEBUG` in `main.py`. Log entries are
+stored in the `logs` directory beside the executable with automatic rotation.
 
 ## Building a Windows executable
 
@@ -91,9 +92,9 @@ also attempts to run with high process priority for smoother forwarding.
 ### Debug logging
 
 For troubleshooting, enable verbose debug logging by editing `main.py` and
-setting `logging.basicConfig(level=logging.DEBUG)`. Detailed information will
-then appear in the console about hotkey detection, network activity and event
-forwarding.
+setting the log level to `DEBUG`. Messages will appear in the console and in
+`logs/kvm_app.log` with rotation. This includes detailed information about
+hotkey detection, network activity and event forwarding.
 
 ### System tray
 
