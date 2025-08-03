@@ -1,4 +1,4 @@
-# pico_hid_switch.py - VÉGLEGES HID VERZIÓ (F13-F15 billentyűkkel)
+# pico_hid_switch.py - VÉGLEGES HID VERZIÓ (F13-F16 billentyűkkel)
 
 import time
 import board
@@ -27,6 +27,11 @@ button2_pin.pull = digitalio.Pull.UP
 button3_pin = digitalio.DigitalInOut(board.GP15)
 button3_pin.direction = digitalio.Direction.INPUT
 button3_pin.pull = digitalio.Pull.UP
+
+# ÚJ GOMB: Gomb 4 (Monitor HDMI-1) -> F16 billentyűt küld
+button4_pin = digitalio.DigitalInOut(board.GP1)
+button4_pin.direction = digitalio.Direction.INPUT
+button4_pin.pull = digitalio.Pull.UP
 
 print("Pico KVM Remote (HID F-Key Mode) is running...")
 
@@ -59,6 +64,15 @@ while True:
         time.sleep(0.1)
         kbd.release_all()
         while not button3_pin.value:
+            time.sleep(0.01)
+
+    # 4. Gomb (GP1)
+    if not button4_pin.value:
+        print("Gomb 4 (GP1) lenyomva -> F16 küldése...")
+        kbd.press(Keycode.F16)
+        time.sleep(0.1)
+        kbd.release_all()
+        while not button4_pin.value:
             time.sleep(0.01)
 
     time.sleep(0.1)

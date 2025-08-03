@@ -37,6 +37,7 @@ VK_END = 35
 VK_F13 = 124
 VK_F14 = 125
 VK_F15 = 126
+VK_F16 = 127
 
 
 def resource_path(relative_path: str) -> str:
