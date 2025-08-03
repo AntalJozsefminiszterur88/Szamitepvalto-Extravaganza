@@ -78,6 +78,9 @@ class PicoSerialHandler:
                             self.worker.toggle_client_control('laptop', switch_monitor=False)
                         elif char == '3':
                             self.worker.toggle_client_control('elitedesk', switch_monitor=True)
+                        elif char == '4':
+                            logging.info("Pico button 4 pressed: Switching monitor input.")
+                            self.worker.switch_monitor_input(17)
                         else:
                             logging.debug("Unknown Pico input: %r", data)
             except serial.SerialException:
