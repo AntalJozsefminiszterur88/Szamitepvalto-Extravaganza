@@ -359,6 +359,7 @@ class MainWindow(QMainWindow):
         self.hide()
 
     def quit_application(self):
+        logging.critical("Alkalmazás szabályos leállítása a felhasználó által (Kilépés menü).")
         logging.info("Kilépés menüpont kiválasztva. Program leállítása.")
         self.stop_kvm_service()
         time.sleep(0.2)
