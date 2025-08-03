@@ -5,3 +5,5 @@ monitorcontrol
 msgpack
 pyperclip
 pyserial
+psutil
+pywin32

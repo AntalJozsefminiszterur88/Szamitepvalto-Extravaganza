@@ -12,6 +12,8 @@ from typing import Optional
 import msgpack
 import random
 import pyperclip
+import psutil  # ÚJ IMPORT
+import os      # ÚJ IMPORT
 from clipboard_sync import safe_copy, safe_paste
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
@@ -416,6 +418,42 @@ class KVMWorker(QObject):
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
 
+    def _heartbeat_monitor(self):
+        """Logs detailed diagnostics every 30 seconds."""
+        process = psutil.Process(os.getpid())
+        logging.info("Heartbeat monitor thread started.")
+        while self._running:
+            try:
+                mem_usage = process.memory_info().rss / (1024 * 1024)
+                cpu_usage = process.cpu_percent(interval=1.0)
+                active_threads = threading.active_count()
+                stream_thread_alive = (
+                    self.streaming_thread.is_alive() if self.streaming_thread else "N/A"
+                )
+                msg_proc_alive = (
+                    self.message_processor_thread.is_alive() if self.message_processor_thread else "N/A"
+                )
+                with self.clients_lock:
+                    connected_clients_count = len(self.client_sockets)
+                    client_names = list(self.client_infos.values())
+                active_client_name = self.client_infos.get(self.active_client, "None")
+                log_message = (
+                    f"HEARTBEAT - "
+                    f"Mem: {mem_usage:.2f} MB, CPU: {cpu_usage:.1f}%, Threads: {active_threads} | "
+                    f"KVM Active: {self.kvm_active}, Target: {active_client_name} | "
+                    f"Clients: {connected_clients_count} {client_names} | "
+                    f"StreamThread: {stream_thread_alive}, MsgProc: {msg_proc_alive}"
+                )
+                logging.debug(log_message)
+                for _ in range(29):
+                    if not self._running:
+                        break
+                    time.sleep(1)
+            except Exception as e:
+                logging.error(f"Heartbeat monitor failed: {e}", exc_info=True)
+                time.sleep(30)
+        logging.info("Heartbeat monitor thread stopped.")
+
     def run(self):
         """Unified entry point starting peer threads and services."""
         logging.info("Worker starting in peer-to-peer mode")
@@ -461,6 +499,9 @@ class KVMWorker(QObject):
             )
             self.clipboard_thread.start()
             self.start_main_hotkey_listener()
+
+        heartbeat_thread = threading.Thread(target=self._heartbeat_monitor, daemon=True, name="Heartbeat")
+        heartbeat_thread.start()
 
         while self._running:
             time.sleep(0.5)

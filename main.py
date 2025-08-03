@@ -6,11 +6,21 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 import ctypes
+import signal  # ÚJ IMPORT
+import time    # ÚJ IMPORT
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
+
+# Windows-specifikus importok
+try:
+    import win32api
+    import win32con
+    IS_WINDOWS = True
+except ImportError:
+    IS_WINDOWS = False
 
 # Dinamikus alapútvonal meghatározása (működik scriptként és EXE-ként is)
 if getattr(sys, 'frozen', False):
@@ -45,6 +55,42 @@ logging.basicConfig(
     level=logging.INFO,  # Állítsd DEBUG-ra a részletesebb hibakereséshez
     handlers=[file_handler, stream_handler]
 )
+
+
+def setup_exit_handler(app_instance):
+    """Sets up handlers for graceful shutdown on signals."""
+
+    def signal_handler(signum, frame):
+        logging.critical(
+            f"Leállítási jel ({signal.Signals(signum).name}) kapva. Program leáll."
+        )
+        app_instance.quit()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    if IS_WINDOWS:
+        def win_event_handler(event):
+            if event in (
+                win32con.CTRL_C_EVENT,
+                win32con.CTRL_BREAK_EVENT,
+                win32con.CTRL_LOGOFF_EVENT,
+                win32con.CTRL_SHUTDOWN_EVENT,
+                win32con.CTRL_CLOSE_EVENT,
+            ):
+                logging.critical(
+                    f"Rendszer általi leállítási esemény ({event}) kapva. Alkalmazás leáll."
+                )
+                QApplication.instance().quit()
+                time.sleep(5)
+                return True
+            return False
+
+        try:
+            win32api.SetConsoleCtrlHandler(win_event_handler, True)
+            logging.info("Windows exit signal handler registered successfully.")
+        except Exception as e:
+            logging.error(f"Failed to register Windows exit handler: {e}")
 
 
 def set_high_priority():
@@ -82,6 +128,7 @@ if __name__ == "__main__":
             start_hidden = True
             auto_connect = True
     app = QApplication(sys.argv)
+    setup_exit_handler(app)
     # Prevent the application from quitting when the last window is closed.
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(ICON_PATH))
