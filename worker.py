@@ -974,6 +974,15 @@ class KVMWorker(QObject):
                 logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
             else:
                 self.active_client = None
+
+    def switch_monitor_input(self, input_code):
+        """Switch the primary monitor to the given input source."""
+        try:
+            with list(get_monitors())[0] as monitor:
+                monitor.set_input_source(input_code)
+                logging.info("Monitor input switched to %s", input_code)
+        except Exception as exc:
+            logging.error("Failed to switch monitor input: %s", exc)
     
     def start_kvm_streaming(self):
         logging.info("start_kvm_streaming: initiating control transfer")
