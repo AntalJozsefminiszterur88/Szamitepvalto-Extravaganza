@@ -172,6 +172,9 @@ The script relies on the `pyperclip` library for cross-platform clipboard access
 Install it with `pip install pyperclip`. On Linux, `pyperclip` also depends on
 either `xclip` or `xsel` (or `wl-clipboard` for Wayland) being available.
 Without these the script may not be able to read or write the clipboard.
+Only plain text clipboard contents are synchronized between computers; other
+clipboard formats are ignored to avoid interfering with local copy-paste
+operations.
 
 ## Formatting
 

@@ -12,6 +12,7 @@ from typing import Optional
 import msgpack
 import random
 import pyperclip
+from clipboard_sync import safe_copy, safe_paste
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
 from monitorcontrol import get_monitors
@@ -138,20 +139,23 @@ class KVMWorker(QObject):
     # Clipboard utilities
     # ------------------------------------------------------------------
     def _set_clipboard(self, text: str) -> None:
-        """Safely set the system clipboard."""
+        """Safely set the system clipboard if text is provided."""
+        if not text:
+            return
         try:
-            pyperclip.copy(text)
+            safe_copy(text)
             self.last_clipboard = text
         except Exception as e:
             logging.error("Failed to set clipboard: %s", e)
 
-    def _get_clipboard(self) -> str:
-        """Safely read the system clipboard."""
+    def _get_clipboard(self) -> Optional[str]:
+        """Safely read the system clipboard. Returns None if no text is available."""
         try:
-            return pyperclip.paste()
+            text = safe_paste()
         except Exception as e:
             logging.error("Failed to read clipboard: %s", e)
-            return self.last_clipboard
+            return None
+        return text if text else None
 
     # ------------------------------------------------------------------
     # Network helpers
@@ -238,7 +242,7 @@ class KVMWorker(QObject):
     def _clipboard_loop_server(self) -> None:
         while self._running:
             text = self._get_clipboard()
-            if text != self.last_clipboard:
+            if text is not None and text != self.last_clipboard:
                 self.last_clipboard = text
                 self._broadcast_message({'type': 'clipboard_text', 'text': text})
             time.sleep(0.5)
@@ -248,7 +252,7 @@ class KVMWorker(QObject):
             if sock.fileno() == -1:
                 break
             text = self._get_clipboard()
-            if text != self.last_clipboard:
+            if text is not None and text != self.last_clipboard:
                 self.last_clipboard = text
                 try:
                     self._send_message(sock, {'type': 'clipboard_text', 'text': text})
@@ -307,7 +311,7 @@ class KVMWorker(QObject):
                             self._pressed_keys.discard(k_press)
                 elif msg_type == 'clipboard_text':
                     text = data.get('text', '')
-                    if text != self.last_clipboard:
+                    if text and text != self.last_clipboard:
                         self._set_clipboard(text)
                         if sock in self.client_sockets:
                             self._broadcast_message(data, exclude=sock)
@@ -575,7 +579,7 @@ class KVMWorker(QObject):
 
                     if data.get('type') == 'clipboard_text':
                         text = data.get('text', '')
-                        if text != self.last_clipboard:
+                        if text and text != self.last_clipboard:
                             self._set_clipboard(text)
                             self._broadcast_message(data, exclude=sock)
                     else:
@@ -631,7 +635,7 @@ class KVMWorker(QObject):
                             self._pressed_keys.discard(k_press)
                 elif msg_type == 'clipboard_text':
                     text = data.get('text', '')
-                    if text != self.last_clipboard:
+                    if text and text != self.last_clipboard:
                         self._set_clipboard(text)
                 else:
                     self.file_handler.handle_network_message(data, sock)
