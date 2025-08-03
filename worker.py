@@ -516,7 +516,7 @@ class KVMWorker(QObject):
         current_pressed_vk = set()
         numpad_pressed_vk = set()
         
-        VK_F13, VK_F14, VK_F15 = 124, 125, 126
+        VK_F13, VK_F14, VK_F15, VK_F16 = 124, 125, 126, 127
 
         def handle_action(action_name):
             logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
@@ -539,6 +539,10 @@ class KVMWorker(QObject):
             if key == keyboard.Key.f15:
                 logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
                 self.toggle_client_control('elitedesk', switch_monitor=True)
+                return
+            if key == keyboard.Key.f16:
+                logging.info("!!! Pico gomb 4 (F16) észlelve !!!")
+                self.switch_monitor_input(17)
                 return
 
             vk = getattr(key, 'vk', None)
@@ -563,7 +567,7 @@ class KVMWorker(QObject):
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
         hotkey_listener.start()
-        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F15 billentyűkkel).")
+        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F16 billentyűkkel).")
         
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
