@@ -11,7 +11,6 @@ import struct
 from typing import Optional
 import msgpack
 import random
-import pyperclip
 import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
 from clipboard_sync import safe_copy, safe_paste
