@@ -60,6 +60,7 @@ class KVMWorker(QObject):
         'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
         'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
         'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
+        '_ignore_next_clipboard_change',
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
@@ -102,6 +103,7 @@ class KVMWorker(QObject):
         self.clipboard_thread = None
         self.last_clipboard = ""
         self.server_socket = None
+        self._ignore_next_clipboard_change = threading.Event()
         self.file_handler = FileTransferHandler(self)
         self.message_queue = queue.Queue()
         self.message_processor_thread = None
@@ -140,14 +142,17 @@ class KVMWorker(QObject):
     # Clipboard utilities
     # ------------------------------------------------------------------
     def _set_clipboard(self, text: str) -> None:
-        """Safely set the system clipboard if text is provided."""
-        if not text:
+        """Safely set the system clipboard and flag it to prevent feedback."""
+        if not text or text == self.last_clipboard:
             return
         try:
+            self._ignore_next_clipboard_change.set()
             safe_copy(text)
             self.last_clipboard = text
+            logging.debug("Clipboard set by application.")
         except Exception as e:
-            logging.error("Failed to set clipboard: %s", e)
+            logging.error(f"Failed to set clipboard: {e}", exc_info=True)
+            self._ignore_next_clipboard_change.clear()
 
     def _get_clipboard(self) -> Optional[str]:
         """Safely read the system clipboard. Returns None if no text is available."""
@@ -241,25 +246,42 @@ class KVMWorker(QObject):
     # Clipboard synchronization
     # ------------------------------------------------------------------
     def _clipboard_loop_server(self) -> None:
-        while self._running:
-            text = self._get_clipboard()
-            if text is not None and text != self.last_clipboard:
-                self.last_clipboard = text
-                self._broadcast_message({'type': 'clipboard_text', 'text': text})
-            time.sleep(0.5)
+        """Monitors clipboard ONLY when KVM is active (HOST)."""
+        logging.info("Clipboard server loop started.")
+        while self._running and self.kvm_active:
+            if self._ignore_next_clipboard_change.is_set():
+                self._ignore_next_clipboard_change.clear()
+                time.sleep(0.5)
+                continue
 
-    def _clipboard_loop_client(self, sock) -> None:
-        while self._running:
-            if sock.fileno() == -1:
-                break
             text = self._get_clipboard()
             if text is not None and text != self.last_clipboard:
                 self.last_clipboard = text
-                try:
-                    self._send_message(sock, {'type': 'clipboard_text', 'text': text})
-                except Exception:
-                    break
+                if self.active_client:
+                    self._send_message(self.active_client, {'type': 'clipboard_text', 'text': text})
             time.sleep(0.5)
+        logging.info("Clipboard server loop stopped.")
+
+    def _clipboard_loop_client(self) -> None:
+        """Monitors clipboard and syncs with server (CLIENT)."""
+        logging.info("Clipboard client loop started.")
+        while self._running:
+            if not self.kvm_active:
+                if self._ignore_next_clipboard_change.is_set():
+                    self._ignore_next_clipboard_change.clear()
+                    time.sleep(0.5)
+                    continue
+
+                text = self._get_clipboard()
+                if text is not None and text != self.last_clipboard:
+                    self.last_clipboard = text
+                    if self.server_socket:
+                        try:
+                            self._send_message(self.server_socket, {'type': 'clipboard_text', 'text': text})
+                        except Exception:
+                            logging.warning("Failed to send clipboard update to server.")
+            time.sleep(0.5)
+        logging.info("Clipboard client loop stopped.")
 
     def _process_messages(self):
         """Unified message handler for all peers."""
@@ -314,7 +336,7 @@ class KVMWorker(QObject):
                     text = data.get('text', '')
                     if text and text != self.last_clipboard:
                         self._set_clipboard(text)
-                        if sock in self.client_sockets:
+                        if self.settings.get('role') == 'ado':
                             self._broadcast_message(data, exclude=sock)
                 else:
                     self.file_handler.handle_network_message(data, sock)
@@ -491,13 +513,14 @@ class KVMWorker(QObject):
         self.connection_manager_thread.start()
 
         if self.settings.get('role') == 'ado':
+            self.start_main_hotkey_listener()
+        else:
             self.clipboard_thread = threading.Thread(
-                target=self._clipboard_loop_server,
+                target=self._clipboard_loop_client,
                 daemon=True,
-                name="ClipboardSrv",
+                name="ClipboardCli",
             )
             self.clipboard_thread.start()
-            self.start_main_hotkey_listener()
 
         heartbeat_thread = threading.Thread(target=self._heartbeat_monitor, daemon=True, name="Heartbeat")
         heartbeat_thread.start()
@@ -785,14 +808,6 @@ class KVMWorker(QObject):
             "monitor_client start for %s",
             client_name,
         )
-        # Start clipboard synchronization thread for this connection
-        clipboard_thread = threading.Thread(
-            target=self._clipboard_loop_client,
-            args=(sock,),
-            daemon=True,
-            name=f"ClipboardCli-{client_name}"
-        )
-        clipboard_thread.start()
         # send current clipboard to newly connected client
         if self.last_clipboard:
             try:
@@ -891,6 +906,16 @@ class KVMWorker(QObject):
 
         self.switch_monitor = switch_monitor
         self.kvm_active = True
+
+        if self.settings.get('role') == 'ado':
+            if self.clipboard_thread is None or not self.clipboard_thread.is_alive():
+                self.clipboard_thread = threading.Thread(
+                    target=self._clipboard_loop_server,
+                    daemon=True,
+                    name="ClipboardSrv"
+                )
+                self.clipboard_thread.start()
+
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
         self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
@@ -940,6 +965,9 @@ class KVMWorker(QObject):
             )
         
         self.kvm_active = False # Most már biztosak lehetünk benne, hogy 'True'-ról váltunk 'False'-ra.
+        if self.settings.get('role') == 'ado' and self.clipboard_thread:
+            self.clipboard_thread.join(timeout=1)
+            self.clipboard_thread = None
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
 
@@ -1350,11 +1378,6 @@ class KVMWorker(QObject):
                 # Sikeres csatlakozás után visszaállítjuk a várakozási időt
                 retry_delay = 3
 
-                self.clipboard_thread = threading.Thread(
-                    target=self._clipboard_loop_client, args=(s,), daemon=True, name="ClipboardCli"
-                )
-                self.clipboard_thread.start()
-
                 # Tiszta, egyértelmű státusz üzenet a siker után
                 self.status_update.emit("Csatlakozva. Irányítás átvételre kész.")
                 
@@ -1408,7 +1431,6 @@ class KVMWorker(QObject):
             finally:
                 logging.info("Szerverkapcsolat lezárult vagy sikertelen volt.")
                 if hb_thread: hb_thread.join(timeout=0.1)
-                if self.clipboard_thread: self.clipboard_thread.join(timeout=0.1)
                 
                 # A többi cleanup kód
                 for k in list(self._pressed_keys):
