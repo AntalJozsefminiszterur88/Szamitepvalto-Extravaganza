@@ -478,56 +478,68 @@ class KVMWorker(QObject):
     def run(self):
         """Unified entry point starting peer threads and services."""
         logging.info("Worker starting in peer-to-peer mode")
-
-        self.service_info = ServiceInfo(
-            SERVICE_TYPE,
-            f"{self.device_name}.{SERVICE_TYPE}",
-            addresses=[socket.inet_aton(self.local_ip)],
-            port=self.settings['port'],
-        )
         try:
-            self.zeroconf.register_service(self.service_info)
-        except Exception as e:
-            logging.error("Failed to register Zeroconf service: %s", e)
-
-        self.message_processor_thread = threading.Thread(
-            target=self._process_messages,
-            daemon=True,
-            name="MsgProcessor",
-        )
-        self.message_processor_thread.start()
-
-        threading.Thread(target=self.accept_connections, daemon=True, name="AcceptThread").start()
-        self.resolver_thread = threading.Thread(
-            target=self._resolver_thread,
-            daemon=True,
-            name="Resolver",
-        )
-        self.resolver_thread.start()
-        threading.Thread(target=self.discover_peers, daemon=True, name="DiscoverThread").start()
-        self.connection_manager_thread = threading.Thread(
-            target=self._connection_manager,
-            daemon=True,
-            name="ConnMgr",
-        )
-        self.connection_manager_thread.start()
-
-        if self.settings.get('role') == 'ado':
-            self.start_main_hotkey_listener()
-        else:
-            self.clipboard_thread = threading.Thread(
-                target=self._clipboard_loop_client,
-                daemon=True,
-                name="ClipboardCli",
+            self.service_info = ServiceInfo(
+                SERVICE_TYPE,
+                f"{self.device_name}.{SERVICE_TYPE}",
+                addresses=[socket.inet_aton(self.local_ip)],
+                port=self.settings['port'],
             )
-            self.clipboard_thread.start()
+            try:
+                self.zeroconf.register_service(self.service_info)
+            except Exception as e:
+                logging.error("Failed to register Zeroconf service: %s", e)
 
-        heartbeat_thread = threading.Thread(target=self._heartbeat_monitor, daemon=True, name="Heartbeat")
-        heartbeat_thread.start()
+            self.message_processor_thread = threading.Thread(
+                target=self._process_messages,
+                daemon=True,
+                name="MsgProcessor",
+            )
+            self.message_processor_thread.start()
 
-        while self._running:
-            time.sleep(0.5)
-        self.finished.emit()
+            threading.Thread(
+                target=self.accept_connections, daemon=True, name="AcceptThread"
+            ).start()
+            self.resolver_thread = threading.Thread(
+                target=self._resolver_thread,
+                daemon=True,
+                name="Resolver",
+            )
+            self.resolver_thread.start()
+            threading.Thread(
+                target=self.discover_peers, daemon=True, name="DiscoverThread"
+            ).start()
+            self.connection_manager_thread = threading.Thread(
+                target=self._connection_manager,
+                daemon=True,
+                name="ConnMgr",
+            )
+            self.connection_manager_thread.start()
+
+            if self.settings.get('role') == 'ado':
+                self.start_main_hotkey_listener()
+            else:
+                self.clipboard_thread = threading.Thread(
+                    target=self._clipboard_loop_client,
+                    daemon=True,
+                    name="ClipboardCli",
+                )
+                self.clipboard_thread.start()
+
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_monitor, daemon=True, name="Heartbeat"
+            )
+            heartbeat_thread.start()
+
+            while self._running:
+                time.sleep(0.5)
+        except Exception as e:
+            logging.critical("Worker encountered fatal error: %s", e, exc_info=True)
+            self.status_update.emit(
+                "Állapot: Hiba - a KVM szolgáltatás leállt"
+            )
+        finally:
+            self.finished.emit()
 
 
     def start_main_hotkey_listener(self):

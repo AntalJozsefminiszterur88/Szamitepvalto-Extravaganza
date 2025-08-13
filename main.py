@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 import ctypes
 import signal  # ÚJ IMPORT
 import time    # ÚJ IMPORT
+import threading
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
@@ -55,6 +56,29 @@ logging.basicConfig(
     level=logging.INFO,  # Állítsd DEBUG-ra a részletesebb hibakereséshez
     handlers=[file_handler, stream_handler]
 )
+
+
+def _log_thread_exception(args):
+    """Globálisan naplózza a kezeletlen szálhibákat, hogy ne záródjon be csendben az alkalmazás."""
+    logging.critical(
+        "Unhandled exception in thread %s: %s",
+        args.thread.name,
+        args.exc_value,
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+    )
+
+
+threading.excepthook = _log_thread_exception
+
+
+def _log_unhandled_exception(exc_type, exc_value, exc_traceback):
+    """Fő szál kivételeinek naplózása."""
+    logging.critical(
+        "Unhandled exception: %s", exc_value, exc_info=(exc_type, exc_value, exc_traceback)
+    )
+
+
+sys.excepthook = _log_unhandled_exception
 
 
 def setup_exit_handler(app_instance):
