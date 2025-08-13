@@ -15,7 +15,7 @@ import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
 from clipboard_sync import safe_copy, safe_paste
 from pynput import mouse, keyboard
-from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser
+from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
 from file_transfer import FileTransferHandler
@@ -87,10 +87,10 @@ class KVMWorker(QObject):
         # Currently selected client to forward events to
         self.active_client = None
         self.pynput_listeners = []
-        self.zeroconf = Zeroconf()
+        self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
         self.streaming_thread = None
         self.switch_monitor = True
-        self.local_ip = socket.gethostbyname(socket.gethostname())
+        self.local_ip = self._detect_primary_ipv4()
         self.server_ip = None
         self.connection_thread = None
         self.connection_manager_thread = None
@@ -205,6 +205,57 @@ class KVMWorker(QObject):
                 )
             except Exception as e:
                 logging.error("Failed to broadcast message: %s", e)
+
+    def _detect_primary_ipv4(self) -> str:
+        """Determine the primary IPv4 address for outgoing connections."""
+        ip = None
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+        except Exception:
+            ip = None
+        if not ip or ip.startswith("127."):
+            try:
+                host = socket.gethostname()
+                for res in socket.getaddrinfo(host, None):
+                    if res[0] == socket.AF_INET:
+                        candidate = res[4][0]
+                        if not candidate.startswith("127."):
+                            ip = candidate
+                            break
+            except Exception:
+                pass
+        return ip or "127.0.0.1"
+
+    def _ip_watchdog(self):
+        """Periodically check for IP changes and re-register Zeroconf service."""
+        while self._running:
+            time.sleep(5)
+            try:
+                new_ip = self._detect_primary_ipv4()
+                if not new_ip or new_ip == self.local_ip:
+                    continue
+                logging.info("Local IP changed from %s to %s", self.local_ip, new_ip)
+                if self.service_info:
+                    try:
+                        self.zeroconf.unregister_service(self.service_info)
+                    except Exception as e:
+                        logging.debug("Failed to unregister Zeroconf service: %s", e)
+                self.local_ip = new_ip
+                try:
+                    addr = socket.inet_aton(self.local_ip)
+                    self.service_info = ServiceInfo(
+                        SERVICE_TYPE,
+                        f"{self.device_name}.{SERVICE_TYPE}",
+                        addresses=[addr],
+                        port=self.settings['port'],
+                    )
+                    self.zeroconf.register_service(self.service_info)
+                except Exception as e:
+                    logging.error("Failed to register Zeroconf service: %s", e)
+            except Exception as e:
+                logging.debug("IP watchdog error: %s", e)
 
     def _handle_disconnect(self, sock, reason: str = "unknown") -> None:
         """Cleanup for a disconnected socket with peer-awareness."""
@@ -513,16 +564,26 @@ class KVMWorker(QObject):
         """Unified entry point starting peer threads and services."""
         logging.info("Worker starting in peer-to-peer mode")
         try:
-            self.service_info = ServiceInfo(
-                SERVICE_TYPE,
-                f"{self.device_name}.{SERVICE_TYPE}",
-                addresses=[socket.inet_aton(self.local_ip)],
-                port=self.settings['port'],
-            )
+            register_ok = False
             try:
+                addr = socket.inet_aton(self.local_ip)
+                self.service_info = ServiceInfo(
+                    SERVICE_TYPE,
+                    f"{self.device_name}.{SERVICE_TYPE}",
+                    addresses=[addr],
+                    port=self.settings['port'],
+                )
                 self.zeroconf.register_service(self.service_info)
+                register_ok = True
             except Exception as e:
                 logging.error("Failed to register Zeroconf service: %s", e)
+
+            if register_ok:
+                threading.Thread(
+                    target=self._ip_watchdog,
+                    daemon=True,
+                    name="IPWatchdog",
+                ).start()
 
             self.message_processor_thread = threading.Thread(
                 target=self._process_messages,
@@ -1530,7 +1591,13 @@ class KVMWorker(QObject):
                 info = self.zeroconf.get_service_info(SERVICE_TYPE, name, 3000)
                 if not info:
                     continue
-                ip = socket.inet_ntoa(info.addresses[0])
+                ip = None
+                for addr in info.addresses:
+                    if isinstance(addr, bytes) and len(addr) == 4:
+                        ip = socket.inet_ntoa(addr)
+                        break
+                if not ip:
+                    continue
                 port = info.port
                 if ip == self.local_ip and port == self.settings['port']:
                     continue
