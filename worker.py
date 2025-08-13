@@ -121,6 +121,9 @@ class KVMWorker(QObject):
         self.clients_lock = threading.Lock()
         # Remember if a KVM session was active when the connection dropped
         self.pending_activation_target = None
+        # Track ongoing reconnect attempts to avoid duplicates
+        self.reconnect_threads = {}
+        self.reconnect_lock = threading.Lock()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -205,6 +208,11 @@ class KVMWorker(QObject):
 
     def _handle_disconnect(self, sock, reason: str = "unknown") -> None:
         """Cleanup for a disconnected socket with peer-awareness."""
+        addr = None
+        try:
+            addr = sock.getpeername()
+        except Exception:
+            pass
         try:
             sock.close()
         except Exception:
@@ -241,6 +249,32 @@ class KVMWorker(QObject):
             self.active_client = None
             self.pending_activation_target = None
         logging.debug("Peer cleanup completed; connection manager will attempt reconnection")
+        if addr and self._running:
+            self._schedule_reconnect(addr[0], self.settings['port'])
+
+    def _schedule_reconnect(self, ip: str, port: int) -> None:
+        """Spawn a background thread that keeps trying to reconnect."""
+
+        def _attempt():
+            while self._running:
+                with self.clients_lock:
+                    if any(
+                        s.getpeername()[0] == ip
+                        for s in self.client_sockets
+                        if s.fileno() != -1
+                    ):
+                        break
+                self.connect_to_peer(ip, port)
+                time.sleep(5)
+            with self.reconnect_lock:
+                self.reconnect_threads.pop((ip, port), None)
+
+        with self.reconnect_lock:
+            if (ip, port) in self.reconnect_threads:
+                return
+            t = threading.Thread(target=_attempt, daemon=True, name=f"Reconnect-{ip}")
+            self.reconnect_threads[(ip, port)] = t
+            t.start()
 
     # ------------------------------------------------------------------
     # Clipboard synchronization
