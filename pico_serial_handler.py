@@ -73,11 +73,11 @@ class PicoSerialHandler:
                             continue
                         logging.info("Pico button pressed: %s", char)
                         if char == '1':
-                            self.worker.deactivate_kvm(switch_monitor=True, reason="pico button 1")
+                            self.worker.set_control_target('desktop')
                         elif char == '2':
-                            self.worker.toggle_client_control('laptop', switch_monitor=False)
+                            self.worker.set_control_target('laptop')
                         elif char == '3':
-                            self.worker.toggle_client_control('elitedesk', switch_monitor=True)
+                            self.worker.set_control_target('elitedesk')
                         elif char == '4':
                             logging.info("Pico button 4 pressed: Switching monitor input.")
                             self.worker.switch_monitor_input(17)

@@ -391,10 +391,10 @@ class KVMWorker(QObject):
             try:
                 cmd = data.get('command')
                 if cmd == 'switch_elitedesk':
-                    self.toggle_client_control('elitedesk', switch_monitor=True)
+                    self.set_control_target('elitedesk')
                     continue
                 if cmd == 'switch_laptop':
-                    self.toggle_client_control('laptop', switch_monitor=False)
+                    self.set_control_target('laptop')
                     continue
                 msg_type = data.get('type')
                 sender = self.client_infos.get(sock)
@@ -403,9 +403,9 @@ class KVMWorker(QObject):
                     and sender == 'desktop'
                     and msg_type in {'move_relative', 'click', 'scroll', 'key'}
                 ):
-                    if self.active_client and self.active_client != sock:
+                    if self.active_client:
                         self._send_message(self.active_client, data)
-                    continue
+                        continue
                 if msg_type == 'move_relative':
                     self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
                 elif msg_type == 'click':
@@ -466,28 +466,36 @@ class KVMWorker(QObject):
         logging.warning(f"No client matching '{name}' found")
         return False
 
-    def toggle_client_control(self, name: str, *, switch_monitor: bool = True, release_keys: bool = True) -> None:
-        """Activate or deactivate control for a specific client."""
-        current = self.client_infos.get(self.active_client, "").lower()
-        target = name.lower()
-        logging.info(
-            "toggle_client_control start: target=%s current=%s kvm_active=%s switch_monitor=%s",
-            target,
-            current,
-            self.kvm_active,
-            switch_monitor,
-        )
-        if self.kvm_active and current.startswith(target):
-            logging.debug("Deactivating KVM because active client matches target")
-            self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control same client")
+    def set_control_target(self, target_name: str) -> None:
+        """Set the current control target and switch the monitor accordingly."""
+        target = target_name.lower()
+        logging.info("Setting control target to %s", target)
+        # Always mark session as active
+        self.kvm_active = True
+
+        # Handle switching back to the server itself
+        if target == 'elitedesk':
+            self.active_client = None
+            try:
+                code = self.settings['monitor_codes']['host']
+                if self.switch_monitor:
+                    self.switch_monitor_input(code)
+            except Exception as e:
+                logging.warning("Failed to switch monitor to host: %s", e)
             return
-        if self.kvm_active:
-            logging.debug("Deactivating current KVM session before switching client")
-            self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control switch")
-        if self.set_active_client_by_name(name):
-            logging.debug("Activating KVM for client %s", name)
-            self.activate_kvm(switch_monitor=switch_monitor)
-        logging.info("toggle_client_control end")
+
+        # For any other target we expect a remote client
+        if self.set_active_client_by_name(target_name):
+            if self.switch_monitor:
+                try:
+                    # Use the 'client' monitor code for desktop; optional for laptop
+                    code = self.settings['monitor_codes'].get('client')
+                    if code is not None and target in {'desktop', 'laptop'}:
+                        self.switch_monitor_input(code)
+                except Exception as e:
+                    logging.warning("Failed to switch monitor to client: %s", e)
+        else:
+            logging.warning("Control target '%s' not found", target_name)
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -725,24 +733,24 @@ class KVMWorker(QObject):
         def handle_action(action_name):
             logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
             if "desktop" in action_name:
-                self.deactivate_kvm(switch_monitor=True, reason=action_name)
+                self.set_control_target('desktop')
             elif "laptop" in action_name:
-                self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
+                self.set_control_target('laptop')
             elif "elitedesk" in action_name:
-                self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
+                self.set_control_target('elitedesk')
 
         def on_press(key):
             if key == keyboard.Key.f13:
                 logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
-                self.deactivate_kvm(switch_monitor=True, reason="pico F13")
+                self.set_control_target('desktop')
                 return
             if key == keyboard.Key.f14:
                 logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
-                self.toggle_client_control('laptop', switch_monitor=False)
+                self.set_control_target('laptop')
                 return
             if key == keyboard.Key.f15:
                 logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
-                self.toggle_client_control('elitedesk', switch_monitor=True)
+                self.set_control_target('elitedesk')
                 return
             if key == keyboard.Key.f16:
                 logging.info("!!! Pico gomb 4 (F16) észlelve !!!")
@@ -820,10 +828,10 @@ class KVMWorker(QObject):
 
                     cmd = data.get('command')
                     if cmd == 'switch_elitedesk':
-                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        self.set_control_target('elitedesk')
                         continue
                     if cmd == 'switch_laptop':
-                        self.toggle_client_control('laptop', switch_monitor=False)
+                        self.set_control_target('laptop')
                         continue
 
                     if data.get('type') == 'clipboard_text':
@@ -1414,18 +1422,18 @@ class KVMWorker(QObject):
             try:
                 # --- ÚJ, FONTOS RÉSZ: VEZÉRLÉS FIGYELÉSE STREAMING ALATT ---
                 # A billentyű lenyomásakor (p=True) ellenőrizzük a vezérlőgombokat.
-                if p: 
+                if p:
                     if k == keyboard.Key.f13:
                         logging.info("!!! Visszaváltás a hosztra (Pico F13) észlelve a streaming alatt !!!")
-                        self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
-                        return # Ne küldjük tovább az F13-at a kliensnek
+                        self.set_control_target('desktop')
+                        return  # Ne küldjük tovább az F13-at a kliensnek
                     if k == keyboard.Key.f14:
                         logging.info("!!! Váltás laptopra (Pico F14) észlelve a streaming alatt !!!")
-                        self.toggle_client_control('laptop', switch_monitor=False)
-                        return # Ne küldjük tovább
+                        self.set_control_target('laptop')
+                        return  # Ne küldjük tovább
                     if k == keyboard.Key.f15:
                         logging.info("!!! Váltás EliteDeskre (Pico F15) észlelve a streaming alatt !!!")
-                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        self.set_control_target('elitedesk')
                         return
 
                 # Itt jön a már meglévő logika a Shift+Numpad0 figyelésére is.
@@ -1451,7 +1459,7 @@ class KVMWorker(QObject):
                         if vk_code in current_vks:
                             send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
                     current_vks.clear()
-                    self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
+                    self.set_control_target('desktop')
                     return
                 
                 # --- EDDIG TART AZ ÚJ ÉS MÓDOSÍTOTT LOGIKA ---
