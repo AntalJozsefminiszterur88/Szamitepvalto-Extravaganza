@@ -64,7 +64,8 @@ class KVMWorker(QObject):
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
         'discovered_peers', 'connection_manager_thread', 'resolver_thread',
         'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
-        'pending_activation_target', '_input_mouse_listener', '_input_keyboard_listener'
+        'pending_activation_target', '_input_mouse_listener', '_input_keyboard_listener',
+        'current_target', '_monitor_check_thread'
     )
 
     finished = Signal()
@@ -118,6 +119,8 @@ class KVMWorker(QObject):
         self.clients_lock = threading.Lock()
         # Remember if a KVM session was active when the connection dropped
         self.pending_activation_target = None
+        self.current_target = 'elitedesk'
+        self._monitor_check_thread = None
         # Pynput listeners used for input_provider streaming
         self._input_mouse_listener = None
         self._input_keyboard_listener = None
@@ -592,6 +595,34 @@ class KVMWorker(QObject):
                 time.sleep(30)
         logging.info("Heartbeat monitor thread stopped.")
 
+    def _monitor_input_checker(self):
+        """Continuously ensure the monitor input matches the current target."""
+        logging.info("Monitor input checker thread started.")
+        while self._running:
+            try:
+                if not self.switch_monitor:
+                    time.sleep(1)
+                    continue
+                target = getattr(self, 'current_target', None)
+                if target == 'desktop':
+                    expected = self.settings['monitor_codes']['client']
+                elif target == 'elitedesk':
+                    expected = self.settings['monitor_codes']['host']
+                else:
+                    expected = None
+                if expected is not None:
+                    with list(get_monitors())[0] as monitor:
+                        current = monitor.get_input_source()
+                        if current != expected:
+                            monitor.set_input_source(expected)
+                            logging.info(
+                                "Monitor input corrected for target %s", target
+                            )
+            except Exception as exc:
+                logging.error("Monitor input checker error: %s", exc, exc_info=True)
+            time.sleep(1)
+        logging.info("Monitor input checker thread stopped.")
+
     def run(self):
         """Unified entry point starting peer threads and services."""
         logging.info("Worker starting in peer-to-peer mode")
@@ -660,6 +691,13 @@ class KVMWorker(QObject):
                 target=self._heartbeat_monitor, daemon=True, name="Heartbeat"
             )
             heartbeat_thread.start()
+
+            self._monitor_check_thread = threading.Thread(
+                target=self._monitor_input_checker,
+                daemon=True,
+                name="MonitorCheck",
+            )
+            self._monitor_check_thread.start()
 
             while self._running:
                 time.sleep(0.5)
@@ -1244,6 +1282,7 @@ class KVMWorker(QObject):
         'elitedesk' -> HDMI 2  (settings['monitor_codes']['host'])
         Any other target leaves the monitor unchanged.
         """
+        self.current_target = target_name
         try:
             if target_name == 'desktop':
                 code = self.settings['monitor_codes']['client']
