@@ -64,7 +64,7 @@ class KVMWorker(QObject):
         'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
         'discovered_peers', 'connection_manager_thread', 'resolver_thread',
         'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
-        'pending_activation_target'
+        'pending_activation_target', '_input_mouse_listener', '_input_keyboard_listener'
     )
 
     finished = Signal()
@@ -118,6 +118,9 @@ class KVMWorker(QObject):
         self.clients_lock = threading.Lock()
         # Remember if a KVM session was active when the connection dropped
         self.pending_activation_target = None
+        # Pynput listeners used for input_provider streaming
+        self._input_mouse_listener = None
+        self._input_keyboard_listener = None
         # Track ongoing reconnect attempts to avoid duplicates
         self.reconnect_threads = {}
         self.reconnect_lock = threading.Lock()
@@ -404,7 +407,15 @@ class KVMWorker(QObject):
                         self._send_message(self.active_client, data)
                         continue
                 if msg_type == 'move_relative':
-                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+                    try:
+                        current_pos = self.mouse_controller.position
+                        new_pos = (
+                            current_pos[0] + data.get('dx', 0),
+                            current_pos[1] + data.get('dy', 0),
+                        )
+                        self.mouse_controller.position = new_pos
+                    except Exception as e:
+                        logging.error("Failed to move mouse: %s", e, exc_info=True)
                 elif msg_type == 'click':
                     btn = button_map.get(data.get('button'))
                     if btn:
@@ -434,6 +445,8 @@ class KVMWorker(QObject):
                         self._set_clipboard(text)
                         if self.settings.get('role') == 'ado':
                             self._broadcast_message(data, exclude=sock)
+                elif msg_type == 'set_suppress_state':
+                    self.restart_input_listeners(bool(data.get('suppress')))
                 else:
                     self.file_handler.handle_network_message(data, sock)
             except Exception as e:
@@ -482,6 +495,20 @@ class KVMWorker(QObject):
             return
 
         self._switch_monitor_to_target(target)
+
+        # Notify input provider about suppression state
+        suppress = target != 'desktop'
+        desktop_sock = None
+        with self.clients_lock:
+            for sock, name in self.client_infos.items():
+                if name == 'desktop':
+                    desktop_sock = sock
+                    break
+        if desktop_sock:
+            self._send_message(
+                desktop_sock,
+                {'type': 'set_suppress_state', 'suppress': suppress},
+            )
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -658,13 +685,40 @@ class KVMWorker(QObject):
         ).start()
 
     def _start_permanent_input_streaming(self):
+        self.restart_input_listeners(suppress=False)
+        try:
+            while self._running:
+                time.sleep(STREAM_LOOP_DELAY)
+        finally:
+            if self._input_mouse_listener:
+                self._input_mouse_listener.stop()
+            if self._input_keyboard_listener:
+                self._input_keyboard_listener.stop()
+
+    def restart_input_listeners(self, suppress: bool) -> None:
+        """Restart pynput listeners with the given suppress state."""
+        if self._input_mouse_listener:
+            try:
+                self._input_mouse_listener.stop()
+            except Exception:
+                pass
+            self._input_mouse_listener = None
+        if self._input_keyboard_listener:
+            try:
+                self._input_keyboard_listener.stop()
+            except Exception:
+                pass
+            self._input_keyboard_listener = None
+
         last_pos = self.mouse_controller.position
+
         def safe_send(data):
             if self.server_socket:
                 try:
                     self._send_message(self.server_socket, data)
                 except Exception as e:
                     logging.error(f"Failed to send input event: {e}", exc_info=True)
+
         def on_move(x, y):
             nonlocal last_pos
             dx = x - last_pos[0]
@@ -672,10 +726,13 @@ class KVMWorker(QObject):
             last_pos = (x, y)
             if dx or dy:
                 safe_send({'type': 'move_relative', 'dx': dx, 'dy': dy})
+
         def on_click(x, y, button, pressed):
             safe_send({'type': 'click', 'button': button.name, 'pressed': pressed})
+
         def on_scroll(x, y, dx, dy):
             safe_send({'type': 'scroll', 'dx': dx, 'dy': dy})
+
         def on_key(key, pressed):
             try:
                 if isinstance(key, keyboard.Key):
@@ -692,16 +749,20 @@ class KVMWorker(QObject):
                 safe_send({'type': 'key', 'key_type': key_type, 'key': key_val, 'pressed': pressed})
             except Exception as e:
                 logging.error(f"Error in on_key: {e}", exc_info=True)
-        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
-        k_listener = keyboard.Listener(on_press=lambda k: on_key(k, True), on_release=lambda k: on_key(k, False), suppress=True)
-        m_listener.start()
-        k_listener.start()
-        try:
-            while self._running:
-                time.sleep(STREAM_LOOP_DELAY)
-        finally:
-            m_listener.stop()
-            k_listener.stop()
+
+        self._input_mouse_listener = mouse.Listener(
+            on_move=on_move,
+            on_click=on_click,
+            on_scroll=on_scroll,
+            suppress=suppress,
+        )
+        self._input_keyboard_listener = keyboard.Listener(
+            on_press=lambda k: on_key(k, True),
+            on_release=lambda k: on_key(k, False),
+            suppress=suppress,
+        )
+        self._input_mouse_listener.start()
+        self._input_keyboard_listener.start()
 
     def start_main_hotkey_listener(self):
         """Segédmetódus a globális gyorsbillentyű-figyelő indítására."""
