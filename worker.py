@@ -481,8 +481,7 @@ class KVMWorker(QObject):
             logging.warning("Control target '%s' not found", target_name)
             return
 
-        if self.switch_monitor:
-            self._switch_monitor_to_target(target)
+        self._switch_monitor_to_target(target)
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -1142,13 +1141,7 @@ class KVMWorker(QObject):
         switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
         if switch:
             time.sleep(0.2)
-            try:
-                with list(get_monitors())[0] as monitor:
-                    monitor.set_input_source(self.settings['monitor_codes']['host'])
-                    logging.info("Monitor sikeresen visszaváltva a hosztra.")
-            except Exception as e:
-                self.status_update.emit(f"Monitor hiba: {e}")
-                logging.error(f"Monitor hiba: {e}", exc_info=True)
+            self._switch_monitor_to_target('elitedesk')
         
         if release_keys:
             self.release_hotkey_keys()
@@ -1184,18 +1177,23 @@ class KVMWorker(QObject):
             logging.error("Failed to switch monitor input: %s", exc)
 
     def _switch_monitor_to_target(self, target_name: str) -> None:
-        """Switch monitor input based on the specified control target."""
+        """Switch the physical monitor input to match the active control target.
+
+        'desktop'   -> HDMI 1  (settings['monitor_codes']['client'])
+        'elitedesk' -> HDMI 2  (settings['monitor_codes']['host'])
+        Any other target leaves the monitor unchanged.
+        """
         try:
-            if target_name == 'elitedesk':
-                code = self.settings['monitor_codes']['host']
-            elif target_name == 'desktop':
+            if target_name == 'desktop':
                 code = self.settings['monitor_codes']['client']
+            elif target_name == 'elitedesk':
+                code = self.settings['monitor_codes']['host']
             else:
                 logging.debug("No monitor switch required for target: %s", target_name)
                 return
             with list(get_monitors())[0] as monitor:
                 monitor.set_input_source(code)
-                logging.info("Monitor switched to target %s", target_name)
+            logging.info("Monitor switched to target %s", target_name)
         except Exception as exc:
             logging.error("Failed to switch monitor for %s: %s", target_name, exc, exc_info=True)
             self.status_update.emit(f"Monitor hiba: {exc}")
