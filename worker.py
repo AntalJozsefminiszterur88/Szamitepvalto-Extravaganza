@@ -269,6 +269,11 @@ class KVMWorker(QObject):
         except Exception:
             pass
         self.file_handler.on_client_disconnected(sock)
+        if sock == self.server_socket:
+            self.server_socket = None
+            logging.info(
+                "A központi vezérlővel való kapcsolat megszakadt, a server_socket törölve."
+            )
 
         with self.clients_lock:
             peer_name = self.client_infos.get(sock)
@@ -971,6 +976,11 @@ class KVMWorker(QObject):
             self.client_infos[sock] = client_name
             if self.active_client is None:
                 self.active_client = sock
+        if self.settings.get('role') == 'input_provider' and client_name == 'elitedesk':
+            self.server_socket = sock
+            logging.info(
+                f"Input provider sikeresen hozzárendelve a központi vezérlőhöz ({client_name})."
+            )
         if (
             self.pending_activation_target
             and self.pending_activation_target == client_name
