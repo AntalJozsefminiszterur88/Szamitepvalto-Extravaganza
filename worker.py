@@ -392,6 +392,15 @@ class KVMWorker(QObject):
                     self.toggle_client_control('laptop', switch_monitor=False)
                     continue
                 msg_type = data.get('type')
+                sender = self.client_infos.get(sock)
+                if (
+                    self.settings.get('role') == 'ado'
+                    and sender == 'desktop'
+                    and msg_type in {'move_relative', 'click', 'scroll', 'key'}
+                ):
+                    if self.active_client and self.active_client != sock:
+                        self._send_message(self.active_client, data)
+                    continue
                 if msg_type == 'move_relative':
                     self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
                 elif msg_type == 'click':
@@ -563,6 +572,7 @@ class KVMWorker(QObject):
     def run(self):
         """Unified entry point starting peer threads and services."""
         logging.info("Worker starting in peer-to-peer mode")
+        role = self.settings.get('role')
         try:
             register_ok = False
             try:
@@ -611,8 +621,10 @@ class KVMWorker(QObject):
             )
             self.connection_manager_thread.start()
 
-            if self.settings.get('role') == 'ado':
+            if role == 'ado':
                 self.start_main_hotkey_listener()
+            elif role == 'input_provider':
+                self.run_input_provider()
             else:
                 self.clipboard_thread = threading.Thread(
                     target=self._clipboard_loop_client,
@@ -636,6 +648,64 @@ class KVMWorker(QObject):
         finally:
             self.finished.emit()
 
+    def run_input_provider(self):
+        self.clipboard_thread = threading.Thread(
+            target=self._clipboard_loop_client,
+            daemon=True,
+            name="ClipboardCli",
+        )
+        self.clipboard_thread.start()
+        threading.Thread(
+            target=self._start_permanent_input_streaming,
+            daemon=True,
+            name="InputProviderStream",
+        ).start()
+
+    def _start_permanent_input_streaming(self):
+        last_pos = self.mouse_controller.position
+        def safe_send(data):
+            if self.server_socket:
+                try:
+                    self._send_message(self.server_socket, data)
+                except Exception as e:
+                    logging.error(f"Failed to send input event: {e}", exc_info=True)
+        def on_move(x, y):
+            nonlocal last_pos
+            dx = x - last_pos[0]
+            dy = y - last_pos[1]
+            last_pos = (x, y)
+            if dx or dy:
+                safe_send({'type': 'move_relative', 'dx': dx, 'dy': dy})
+        def on_click(x, y, button, pressed):
+            safe_send({'type': 'click', 'button': button.name, 'pressed': pressed})
+        def on_scroll(x, y, dx, dy):
+            safe_send({'type': 'scroll', 'dx': dx, 'dy': dy})
+        def on_key(key, pressed):
+            try:
+                if isinstance(key, keyboard.Key):
+                    key_type = 'special'
+                    key_val = key.name
+                elif isinstance(key, keyboard.KeyCode) and key.vk:
+                    key_type = 'vk'
+                    key_val = key.vk
+                elif hasattr(key, 'char') and key.char is not None:
+                    key_type = 'char'
+                    key_val = key.char
+                else:
+                    return
+                safe_send({'type': 'key', 'key_type': key_type, 'key': key_val, 'pressed': pressed})
+            except Exception as e:
+                logging.error(f"Error in on_key: {e}", exc_info=True)
+        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=False)
+        k_listener = keyboard.Listener(on_press=lambda k: on_key(k, True), on_release=lambda k: on_key(k, False), suppress=False)
+        m_listener.start()
+        k_listener.start()
+        try:
+            while self._running:
+                time.sleep(STREAM_LOOP_DELAY)
+        finally:
+            m_listener.stop()
+            k_listener.stop()
 
     def start_main_hotkey_listener(self):
         """Segédmetódus a globális gyorsbillentyű-figyelő indítására."""
@@ -1025,9 +1095,10 @@ class KVMWorker(QObject):
 
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
-        self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
-        self.streaming_thread.start()
-        logging.debug("Streaming thread started")
+        if self.settings.get('role') != 'ado':
+            self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
+            self.streaming_thread.start()
+            logging.debug("Streaming thread started")
 
     def _streaming_loop(self):
         """Keep streaming active and restart if it stops unexpectedly."""
@@ -1124,6 +1195,8 @@ class KVMWorker(QObject):
     
     def start_kvm_streaming(self):
         logging.info("start_kvm_streaming: initiating control transfer")
+        if self.settings.get('role') == 'ado':
+            return
         if getattr(self, 'switch_monitor', True):
             try:
                 with list(get_monitors())[0] as monitor:

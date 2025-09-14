@@ -118,9 +118,9 @@ class MainWindow(QMainWindow):
         role_layout = QHBoxLayout()
         role_layout.setSpacing(15)
         role_layout.setContentsMargins(10, 10, 10, 10)
-        self.radio_desktop = QRadioButton("Asztali gép (irányít)")
+        self.radio_desktop = QRadioButton("Asztali gép (Bemeneti forrás és kliens)")
         self.radio_laptop = QRadioButton("Laptop")
-        self.radio_elitedesk = QRadioButton("ElitDesk")
+        self.radio_elitedesk = QRadioButton("HP EliteDesk (Központi vezérlő)")
         role_layout.addWidget(self.radio_desktop)
         role_layout.addWidget(self.radio_laptop)
         role_layout.addWidget(self.radio_elitedesk)
@@ -204,17 +204,17 @@ class MainWindow(QMainWindow):
         self.load_settings()
 
     def get_settings(self):
-        if self.radio_desktop.isChecked():
-            mode = 'ado'
-            device = 'desktop'
-        elif self.radio_laptop.isChecked():
-            mode = 'vevo'
-            device = 'laptop'
-        else:
-            mode = 'vevo'
+        if self.radio_elitedesk.isChecked():
+            role = 'ado'
             device = 'elitedesk'
+        elif self.radio_desktop.isChecked():
+            role = 'input_provider'
+            device = 'desktop'
+        else:
+            role = 'vevo'
+            device = 'laptop'
         return {
-            'role': mode,
+            'role': role,
             'device_name': device,
             'port': int(self.port.text()),
             'monitor_codes': {
