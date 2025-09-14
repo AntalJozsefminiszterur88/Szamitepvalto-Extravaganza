@@ -469,33 +469,40 @@ class KVMWorker(QObject):
     def set_control_target(self, target_name: str) -> None:
         """Set the current control target and switch the monitor accordingly."""
         target = target_name.lower()
-        logging.info("Setting control target to %s", target)
+        logging.info("Setting control target to: %s", target)
         # Always mark session as active
         self.kvm_active = True
 
-        # Handle switching back to the server itself
         if target == 'elitedesk':
+            # Switch back to the host machine
             self.active_client = None
-            try:
-                code = self.settings['monitor_codes']['host']
-                if self.switch_monitor:
-                    self.switch_monitor_input(code)
-            except Exception as e:
-                logging.warning("Failed to switch monitor to host: %s", e)
-            return
-
-        # For any other target we expect a remote client
-        if self.set_active_client_by_name(target_name):
             if self.switch_monitor:
                 try:
-                    # Use the 'client' monitor code for desktop; optional for laptop
-                    code = self.settings['monitor_codes'].get('client')
-                    if code is not None and target in {'desktop', 'laptop'}:
-                        self.switch_monitor_input(code)
+                    with list(get_monitors())[0] as monitor:
+                        monitor.set_input_source(self.settings['monitor_codes']['host'])
                 except Exception as e:
-                    logging.warning("Failed to switch monitor to client: %s", e)
-        else:
-            logging.warning("Control target '%s' not found", target_name)
+                    logging.error(f"Failed to switch monitor to host (EliteDesk): {e}")
+            return
+
+        if target == 'desktop':
+            if self.set_active_client_by_name(target):
+                if self.switch_monitor:
+                    try:
+                        with list(get_monitors())[0] as monitor:
+                            monitor.set_input_source(self.settings['monitor_codes']['client'])
+                    except Exception as e:
+                        logging.error(f"Failed to switch monitor to client (Desktop): {e}")
+            else:
+                logging.warning("Control target '%s' not found", target_name)
+            return
+
+        if target == 'laptop':
+            if not self.set_active_client_by_name(target):
+                logging.warning("Control target '%s' not found", target_name)
+            # Intentionally no monitor switch for laptop
+            return
+
+        logging.warning("Control target '%s' not found", target_name)
 
     def stop(self):
         logging.info("stop() metódus meghívva.")
@@ -709,8 +716,8 @@ class KVMWorker(QObject):
                 safe_send({'type': 'key', 'key_type': key_type, 'key': key_val, 'pressed': pressed})
             except Exception as e:
                 logging.error(f"Error in on_key: {e}", exc_info=True)
-        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=False)
-        k_listener = keyboard.Listener(on_press=lambda k: on_key(k, True), on_release=lambda k: on_key(k, False), suppress=False)
+        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
+        k_listener = keyboard.Listener(on_press=lambda k: on_key(k, True), on_release=lambda k: on_key(k, False), suppress=True)
         m_listener.start()
         k_listener.start()
         try:
