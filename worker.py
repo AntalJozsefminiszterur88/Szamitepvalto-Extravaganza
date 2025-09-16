@@ -430,9 +430,9 @@ class KVMWorker(QObject):
     # Clipboard synchronization
     # ------------------------------------------------------------------
     def _clipboard_loop_server(self) -> None:
-        """Monitors clipboard ONLY when KVM is active (HOST)."""
+        """Continuously monitor the host clipboard and broadcast changes."""
         logging.info("Clipboard server loop started.")
-        while self._running and self.kvm_active:
+        while self._running:
             if self._ignore_next_clipboard_change.is_set():
                 self._ignore_next_clipboard_change.clear()
                 time.sleep(0.5)
@@ -441,29 +441,31 @@ class KVMWorker(QObject):
             text = self._get_clipboard()
             if text is not None and text != self.last_clipboard:
                 self.last_clipboard = text
-                if self.active_client:
-                    self._send_message(self.active_client, {'type': 'clipboard_text', 'text': text})
+                payload = {'type': 'clipboard_text', 'text': text}
+                if self.input_provider_socket:
+                    if not self._send_to_provider(payload):
+                        logging.warning("Failed to forward clipboard update to input provider.")
+                if self.client_sockets:
+                    self._broadcast_message(payload, exclude=self.input_provider_socket)
             time.sleep(0.5)
         logging.info("Clipboard server loop stopped.")
 
     def _clipboard_loop_client(self) -> None:
-        """Monitors clipboard and syncs with server (CLIENT)."""
+        """Monitor local clipboard changes and forward them to the server."""
         logging.info("Clipboard client loop started.")
         while self._running:
-            if not self.kvm_active:
-                if self._ignore_next_clipboard_change.is_set():
-                    self._ignore_next_clipboard_change.clear()
-                    time.sleep(0.5)
-                    continue
+            if self._ignore_next_clipboard_change.is_set():
+                self._ignore_next_clipboard_change.clear()
+                time.sleep(0.5)
+                continue
 
-                text = self._get_clipboard()
-                if text is not None and text != self.last_clipboard:
-                    self.last_clipboard = text
-                    if self.server_socket:
-                        try:
-                            self._send_message(self.server_socket, {'type': 'clipboard_text', 'text': text})
-                        except Exception:
-                            logging.warning("Failed to send clipboard update to server.")
+            text = self._get_clipboard()
+            if text is not None and text != self.last_clipboard:
+                self.last_clipboard = text
+                sock = self.server_socket
+                if sock:
+                    if not self._send_message(sock, {'type': 'clipboard_text', 'text': text}):
+                        logging.warning("Failed to send clipboard update to server.")
             time.sleep(0.5)
         logging.info("Clipboard client loop stopped.")
 
@@ -954,6 +956,12 @@ class KVMWorker(QObject):
             self.connection_manager_thread.start()
 
             if self.settings.get('role') == 'ado':
+                self.clipboard_thread = threading.Thread(
+                    target=self._clipboard_loop_server,
+                    daemon=True,
+                    name="ClipboardSrv",
+                )
+                self.clipboard_thread.start()
                 self.start_main_hotkey_listener()
             else:
                 self.clipboard_thread = threading.Thread(
@@ -1393,13 +1401,6 @@ class KVMWorker(QObject):
             else:
                 self.status_update.emit("Állapot: Laptop vezérlése aktív")
                 self._switch_monitor_for_target('desktop', allow_switch=False)
-            if self.clipboard_thread is None or not self.clipboard_thread.is_alive():
-                self.clipboard_thread = threading.Thread(
-                    target=self._clipboard_loop_server,
-                    daemon=True,
-                    name="ClipboardSrv"
-                )
-                self.clipboard_thread.start()
             if not self._send_to_provider({'command': 'start_stream', 'target': target}):
                 logging.error("Failed to start input streaming for target %s", target)
                 if target == 'elitedesk':
@@ -1407,9 +1408,6 @@ class KVMWorker(QObject):
                 self.current_target = 'desktop'
                 self.kvm_active = False
                 self.status_update.emit("Hiba: nem érhető el az input szolgáltató")
-                if self.clipboard_thread and self.clipboard_thread.is_alive():
-                    self.clipboard_thread.join(timeout=1)
-                    self.clipboard_thread = None
                 return
             logging.info("Controller activated for %s", target)
             return
@@ -1433,15 +1431,6 @@ class KVMWorker(QObject):
 
         self.switch_monitor = switch_monitor
         self.kvm_active = True
-
-        if self.settings.get('role') == 'ado':
-            if self.clipboard_thread is None or not self.clipboard_thread.is_alive():
-                self.clipboard_thread = threading.Thread(
-                    target=self._clipboard_loop_server,
-                    daemon=True,
-                    name="ClipboardSrv"
-                )
-                self.clipboard_thread.start()
 
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
@@ -1477,9 +1466,6 @@ class KVMWorker(QObject):
             self.current_target = 'desktop'
             if self.input_provider_socket:
                 self._send_to_provider({'command': 'stop_stream'})
-            if self.clipboard_thread and self.clipboard_thread.is_alive():
-                self.clipboard_thread.join(timeout=1)
-                self.clipboard_thread = None
             host_code = self.settings['monitor_codes']['host']
             need_switch = self.current_monitor_input != host_code
             do_switch = switch_monitor
@@ -1516,9 +1502,6 @@ class KVMWorker(QObject):
             )
 
         self.kvm_active = False
-        if self.settings.get('role') == 'ado' and self.clipboard_thread:
-            self.clipboard_thread.join(timeout=1)
-            self.clipboard_thread = None
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
 
