@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QSystemTrayIcon,
     QMenu,
+    QToolTip,
 )
-from PySide6.QtGui import QIcon, QAction
+from PySide6.QtGui import QIcon, QAction, QCursor
 from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
@@ -89,7 +90,7 @@ class MainWindow(QMainWindow):
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
-        'tray_icon'
+        'tray_icon', 'tray_hover_timer', '_tray_hover_visible'
     )
 
     # A MainWindow többi része változatlan...
@@ -312,6 +313,44 @@ class MainWindow(QMainWindow):
             if reason == QSystemTrayIcon.ActivationReason.Trigger
             else None
         )
+        self._tray_hover_visible = False
+        self.tray_hover_timer = QTimer(self)
+        self.tray_hover_timer.setInterval(200)
+        self.tray_hover_timer.timeout.connect(self._update_tray_hover_tooltip)
+        self.tray_hover_timer.start()
+
+    def _update_tray_hover_tooltip(self):
+        """Ensure the tray tooltip is shown even for synthetic hover events."""
+        if not self.tray_icon or not self.tray_icon.isVisible():
+            if self._tray_hover_visible:
+                QToolTip.hideText()
+                self._tray_hover_visible = False
+            return
+
+        geometry_func = getattr(self.tray_icon, 'geometry', None)
+        if not callable(geometry_func):
+            if self._tray_hover_visible:
+                QToolTip.hideText()
+                self._tray_hover_visible = False
+            return
+
+        tray_rect = geometry_func()
+        if tray_rect is None or tray_rect.isNull():
+            if self._tray_hover_visible:
+                QToolTip.hideText()
+                self._tray_hover_visible = False
+            return
+
+        cursor_pos = QCursor.pos()
+        if tray_rect.contains(cursor_pos):
+            if not self._tray_hover_visible:
+                tooltip_text = self.tray_icon.toolTip()
+                if tooltip_text:
+                    QToolTip.showText(cursor_pos, tooltip_text)
+                self._tray_hover_visible = True
+        elif self._tray_hover_visible:
+            QToolTip.hideText()
+            self._tray_hover_visible = False
 
     def closeEvent(self, event):
         """Minimize the window to the tray on close."""
@@ -321,6 +360,10 @@ class MainWindow(QMainWindow):
     def quit_application(self):
         logging.critical("Alkalmazás szabályos leállítása a felhasználó által (Kilépés menü).")
         logging.info("Kilépés menüpont kiválasztva. Program leállítása.")
+        if hasattr(self, 'tray_hover_timer') and self.tray_hover_timer:
+            self.tray_hover_timer.stop()
+        if self._tray_hover_visible:
+            QToolTip.hideText()
         self.stop_kvm_service()
         time.sleep(0.2)
         QApplication.instance().quit()
