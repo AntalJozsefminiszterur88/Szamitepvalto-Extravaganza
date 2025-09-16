@@ -214,6 +214,9 @@ class KVMWorker(QObject):
             'right': mouse.Button.right,
             'middle': mouse.Button.middle,
         }
+        extra_button = getattr(mouse.Button, 'x1', None)
+        if extra_button is not None:
+            button_map['x1'] = extra_button
         msg_type = data.get('type')
         if msg_type == 'move_relative':
             self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
@@ -1112,6 +1115,9 @@ class KVMWorker(QObject):
             'right': mouse.Button.right,
             'middle': mouse.Button.middle,
         }
+        extra_button = getattr(mouse.Button, 'x1', None)
+        if extra_button is not None:
+            button_map['x1'] = extra_button
         while self._running:
             try:
                 sock, data = self.message_queue.get()
