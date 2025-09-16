@@ -763,8 +763,15 @@ class KVMWorker(QObject):
                 return
             if self.kvm_active:
                 prior_was_elitedesk = self.current_target == 'elitedesk'
+                switching_between_main_targets = (
+                    self.current_target in {'laptop', 'elitedesk'}
+                    and target in {'laptop', 'elitedesk'}
+                    and self.current_target != target
+                )
+                if switching_between_main_targets:
+                    switch_monitor = False
                 self.deactivate_kvm(
-                    switch_monitor=prior_was_elitedesk,
+                    switch_monitor=False if switching_between_main_targets else prior_was_elitedesk,
                     release_keys=release_keys,
                     reason="controller switch",
                 )
