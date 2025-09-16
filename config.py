@@ -10,13 +10,6 @@ ORG_NAME = "MyKVM"
 # Branding
 BRAND_NAME = "UMKGL Solutions"
 
-# Base folder structure for temporary files under the selected drive
-TEMP_DIR_PARTS = [
-    "UMKGL Solutions",
-    "Szamitepvalto-Extravaganza",
-    "Ideiglenes fájlok",
-]
-
 # Hálózati beállítások
 DEFAULT_PORT = 65432
 SERVICE_TYPE = "_kvmswitch._tcp.local."

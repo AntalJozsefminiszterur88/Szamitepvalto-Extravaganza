@@ -24,19 +24,13 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QSystemTrayIcon,
     QMenu,
-    QFileDialog,
-    QProgressDialog,
-    QInputDialog,
-    QMessageBox,
 )
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer, QStandardPaths
+from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
 from worker import KVMWorker
-from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH, TEMP_DIR_PARTS
-
-MB = 1024 * 1024
+from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
 
 
 # gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
@@ -95,8 +89,7 @@ class MainWindow(QMainWindow):
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
-        'tray_icon', 'share_button', 'cut_share_button', 'paste_button', 'progress_dialog',
-        'temp_path_edit', 'browse_temp_path_button'
+        'tray_icon'
     )
 
     # A MainWindow többi része változatlan...
@@ -158,34 +151,8 @@ class MainWindow(QMainWindow):
             "Automatikus indulás a rendszerrel"
         )
         other_layout.addWidget(self.autostart_check, 1, 0, 1, 2)
-
-        other_layout.addWidget(QLabel("Ideiglenes mappa:"), 2, 0)
-        temp_path_layout = QHBoxLayout()
-        self.temp_path_edit = QLineEdit()
-        self.temp_path_edit.setReadOnly(True)
-        temp_path_layout.addWidget(self.temp_path_edit)
-
-        self.browse_temp_path_button = QPushButton("Tallózás...")
-        self.browse_temp_path_button.clicked.connect(self.browse_temp_directory)
-        temp_path_layout.addWidget(self.browse_temp_path_button)
-
-        other_layout.addLayout(temp_path_layout, 2, 1)
         other_box.setLayout(other_layout)
         main_layout.addWidget(other_box)
-
-        file_box = QGroupBox("Hálózati Fájl Vágólap")
-        file_layout = QHBoxLayout()
-        self.share_button = QPushButton("Megosztás")
-        self.share_button.clicked.connect(self.share_network_file)
-        self.cut_share_button = QPushButton("Kivágás")
-        self.cut_share_button.clicked.connect(lambda: self.share_network_file(cut=True))
-        self.paste_button = QPushButton("Beillesztés")
-        self.paste_button.clicked.connect(self.paste_network_file)
-        file_layout.addWidget(self.share_button)
-        file_layout.addWidget(self.cut_share_button)
-        file_layout.addWidget(self.paste_button)
-        file_box.setLayout(file_layout)
-        main_layout.addWidget(file_box)
 
         self.start_button = QPushButton("KVM Szolgáltatás Indítása")
         self.start_button.clicked.connect(self.toggle_kvm_service)
@@ -199,7 +166,6 @@ class MainWindow(QMainWindow):
 
         self.kvm_thread = None
         self.kvm_worker = None
-        self.progress_dialog = None
         self.init_tray_icon()
         self.load_settings()
 
@@ -221,7 +187,6 @@ class MainWindow(QMainWindow):
                 'host': int(self.host_code.text()),
                 'client': int(self.client_code.text()),
             },
-            'temp_path': self.temp_path_edit.text(),
         }
 
     def toggle_kvm_service(self):
@@ -239,9 +204,6 @@ class MainWindow(QMainWindow):
         self.kvm_thread.started.connect(self.kvm_worker.run)
         self.kvm_worker.finished.connect(self.on_service_stopped)
         self.kvm_worker.status_update.connect(self.on_status_update)
-        self.kvm_worker.update_progress_display.connect(self.update_progress_display)
-        self.kvm_worker.file_transfer_error.connect(self.on_transfer_error)
-        self.kvm_worker.incoming_upload_started.connect(self.on_incoming_upload_started)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         # Prevent accidental double starts
@@ -281,7 +243,6 @@ class MainWindow(QMainWindow):
         settings.setValue("monitor/client_code", self.client_code.text())
         autostart_enabled = self.autostart_check.isChecked()
         settings.setValue("other/autostart", autostart_enabled)
-        settings.setValue("other/temp_path", self.temp_path_edit.text())
         # JAVÍTÁS: Itt hívjuk meg a registry-kezelő függvényt
         try:
             set_autostart(autostart_enabled)
@@ -307,9 +268,6 @@ class MainWindow(QMainWindow):
                 set_autostart(True)
             except Exception as e:
                 logging.error("Nem sikerült az autostart frissítése: %s", e)
-        default_temp_path = QStandardPaths.writableLocation(QStandardPaths.TempLocation)
-        self.temp_path_edit.setText(settings.value("other/temp_path", default_temp_path))
-        self.temp_path_edit.textChanged.connect(self.save_settings)
         self.radio_desktop.toggled.connect(self.save_settings)
         self.radio_laptop.toggled.connect(self.save_settings)
         self.radio_elitedesk.toggled.connect(self.save_settings)
@@ -366,132 +324,3 @@ class MainWindow(QMainWindow):
         self.stop_kvm_service()
         time.sleep(0.2)
         QApplication.instance().quit()
-
-    def browse_temp_directory(self):
-        """Allow selecting only drive roots and create the temp folder."""
-        import string
-
-        # Detect available drives on Windows
-        drives = [f"{d}:\\" for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
-
-        if not drives:
-            QMessageBox.warning(self, "Hiba", "Nem találhatók elérhető meghajtók.")
-            return
-
-        drive, ok = QInputDialog.getItem(
-            self,
-            "Lemez kiválasztása",
-            "Válassz meghajtót az ideiglenes fájlokhoz:",
-            drives,
-            editable=False,
-        )
-
-        if ok and drive:
-            target_dir = os.path.join(drive, *TEMP_DIR_PARTS)
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except OSError as e:
-                QMessageBox.warning(
-                    self,
-                    "Hiba",
-                    f"Nem sikerült a mappát létrehozni: {e}"
-                )
-                return
-
-            self.temp_path_edit.setText(target_dir)
-            self.save_settings()
-
-    def share_network_file(self, cut: bool = False):
-        if not self.kvm_worker:
-            return
-        files, _ = QFileDialog.getOpenFileNames(self, "Fájlok kiválasztása")
-        if not files:
-            folder = QFileDialog.getExistingDirectory(self, "Mappa kiválasztása")
-            if not folder:
-                return
-            files = [folder]
-        self.show_progress_dialog("Fájl küldése")
-        op = 'cut' if cut else 'copy'
-        self.kvm_worker.share_files(files, op)
-
-    def paste_network_file(self):
-        if not self.kvm_worker:
-            return
-        dest = QFileDialog.getExistingDirectory(self, "Cél mappa kiválasztása")
-        if not dest:
-            return
-        self.show_progress_dialog("Fájl fogadása")
-        self.kvm_worker.request_paste(dest)
-
-    def show_progress_dialog(self, title: str):
-        if self.progress_dialog:
-            self.progress_dialog.close()
-        self.progress_dialog = QProgressDialog("", "Mégse", 0, 100, self)
-        self.progress_dialog.setWindowTitle(title)
-        self.progress_dialog.canceled.connect(self.cancel_transfer)
-        self.progress_dialog.setAutoClose(False)
-        self.progress_dialog.setAutoReset(False)
-        self.progress_dialog.setMinimumDuration(0)
-        logging.info(
-            "[GUI_DEBUG] show_progress_dialog called with title: %s. Current worker role: %s",
-            title,
-            self.kvm_worker.settings.get('role') if self.kvm_worker else 'N/A',
-        )
-        self.progress_dialog.setLabelText(f"{title} előkészítése...")
-        logging.info("[GUI_DEBUG] show_progress_dialog: Label set to: %s", self.progress_dialog.labelText())
-        self.progress_dialog.show()
-
-    def on_incoming_upload_started(self, filename: str, total_size: float):
-        logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started triggered. Filename: %s, Size: %d",
-            filename,
-            int(total_size),
-        )
-        self.show_progress_dialog("Fájl fogadása")
-        logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started: Progress dialog shown. Current label: %s",
-            self.progress_dialog.labelText() if self.progress_dialog else "N/A",
-        )
-        logging.info(
-            "[GUI_DEBUG] on_incoming_upload_started: initial 0%% progress emitted",
-        )
-
-    def update_progress_display(self, percentage: int, label: str):
-        """Receives a pre-calculated percentage and label, and applies them directly."""
-        if not self.progress_dialog or not self.progress_dialog.isVisible():
-            return
-
-        logging.info("[GUI_DEBUG] update_progress_display: Percent: %d, Label: %s", percentage, label)
-
-        self.progress_dialog.setMaximum(100)
-        self.progress_dialog.setValue(percentage)
-        self.progress_dialog.setLabelText(label)
-
-        if percentage >= 100:
-            logging.info("[GUI_DEBUG] Progress complete. Starting 5s close timer.")
-            try:
-                cancel_button = self.progress_dialog.findChild(QPushButton)
-                if cancel_button:
-                    cancel_button.setEnabled(False)
-                    cancel_button.setText("Kész")
-            except Exception:
-                pass
-            QTimer.singleShot(5000, self._close_progress_dialog_if_exists)
-
-    def _close_progress_dialog_if_exists(self):
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-
-    def cancel_transfer(self):
-        if self.kvm_worker:
-            self.kvm_worker.cancel_file_transfer()
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None
-
-    def on_transfer_error(self, msg: str):
-        self.on_status_update(f"Hiba: {msg}")
-        if self.progress_dialog:
-            self.progress_dialog.close()
-            self.progress_dialog = None

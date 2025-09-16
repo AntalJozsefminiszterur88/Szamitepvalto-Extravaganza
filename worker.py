@@ -18,7 +18,6 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
 from monitorcontrol import get_monitors
 from PySide6.QtCore import QObject, Signal, QSettings
-from file_transfer import FileTransferHandler
 import ipaddress
 from config import (
     SERVICE_TYPE,
@@ -26,7 +25,6 @@ from config import (
     APP_NAME,
     ORG_NAME,
     BRAND_NAME,
-    TEMP_DIR_PARTS,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -44,16 +42,6 @@ from config import (
 STREAM_LOOP_DELAY = 0.05
 # Maximum number of events queued for sending before old ones are dropped
 SEND_QUEUE_MAXSIZE = 200
-# File transfer chunk size
-FILE_CHUNK_SIZE = 65536
-# Socket timeout (seconds) during file transfers
-# Timeout while waiting for file transfer data
-# Increased from 30 to 90 seconds to handle slower networks
-TRANSFER_TIMEOUT = 90
-# Minimum delay between progress updates
-PROGRESS_UPDATE_INTERVAL = 0.5
-
-
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
@@ -61,7 +49,7 @@ class KVMWorker(QObject):
         'streaming_thread', 'switch_monitor', 'local_ip', 'server_ip',
         'connection_thread', 'device_name', 'clipboard_thread', 'last_clipboard',
         'server_socket', 'input_provider_socket', '_ignore_next_clipboard_change',
-        'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
+        'last_server_ip', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
         'keyboard_controller', '_pressed_keys', '_provider_pressed_keys',
         'pico_thread', 'pico_handler', 'discovered_peers', 'connection_manager_thread',
@@ -72,9 +60,6 @@ class KVMWorker(QObject):
 
     finished = Signal()
     status_update = Signal(str)
-    update_progress_display = Signal(int, str)  # percentage, label text
-    file_transfer_error = Signal(str)
-    incoming_upload_started = Signal(str, float)
 
     def __init__(self, settings):
         super().__init__()
@@ -108,7 +93,6 @@ class KVMWorker(QObject):
         self.server_socket = None
         self.input_provider_socket = None
         self._ignore_next_clipboard_change = threading.Event()
-        self.file_handler = FileTransferHandler(self)
         self.message_queue = queue.Queue()
         self.message_processor_thread = None
         self._host_mouse_controller = None
@@ -368,7 +352,6 @@ class KVMWorker(QObject):
             sock.close()
         except Exception:
             pass
-        self.file_handler.on_client_disconnected(sock)
 
         with self.clients_lock:
             peer_name = self.client_infos.get(sock)
@@ -514,7 +497,11 @@ class KVMWorker(QObject):
                                 self._send_to_provider(clipboard_msg)
                             self._broadcast_message(clipboard_msg, exclude=sock)
                         continue
-                    self.file_handler.handle_network_message(data, sock)
+                    logging.debug(
+                        "Unhandled message type '%s' in controller context from %s",
+                        data.get('type') or data.get('command'),
+                        self.client_infos.get(sock, sock),
+                    )
                     continue
 
                 if role == 'input_provider':
@@ -531,7 +518,10 @@ class KVMWorker(QObject):
                         if text and text != self.last_clipboard:
                             self._set_clipboard(text)
                         continue
-                    self.file_handler.handle_network_message(data, sock)
+                    logging.debug(
+                        "Unhandled message type '%s' in input provider context",
+                        data.get('type') or data.get('command'),
+                    )
                     continue
 
                 msg_type = data.get('type')
@@ -542,7 +532,10 @@ class KVMWorker(QObject):
                     if text and text != self.last_clipboard:
                         self._set_clipboard(text)
                 else:
-                    self.file_handler.handle_network_message(data, sock)
+                    logging.debug(
+                        "Unhandled message type '%s' in peer message processor",
+                        data.get('type') or data.get('command'),
+                    )
             except Exception as e:
                 logging.error("Failed to process message: %s", e, exc_info=True)
 
@@ -736,19 +729,6 @@ class KVMWorker(QObject):
         self.provider_stop_event.set()
         logging.info("Input provider stream loop exited")
 
-    # ------------------------------------------------------------------
-    # File transfer delegation
-    # ------------------------------------------------------------------
-    def share_files(self, paths, operation='copy') -> None:
-        self.file_handler.share_files(paths, operation)
-
-    def request_paste(self, dest_dir) -> None:
-        self.file_handler.request_paste(dest_dir)
-
-    def cancel_file_transfer(self):
-        self.file_handler.cancel_file_transfer()
-
-    # ------------------------------------------------------------------
     def set_active_client_by_name(self, name):
         """Select a connected client by name as the active target."""
         logging.debug(f"set_active_client_by_name called with name={name}")
@@ -873,7 +853,6 @@ class KVMWorker(QObject):
             except Exception:
                 pass
             self.message_processor_thread.join(timeout=1)
-        self.file_handler.cleanup()
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
 
@@ -1110,7 +1089,11 @@ class KVMWorker(QObject):
                             self._set_clipboard(text)
                             self._broadcast_message(data, exclude=sock)
                     else:
-                        self.file_handler.handle_network_message(data, sock)
+                        logging.debug(
+                            "Unhandled server message type '%s' from %s",
+                            data.get('type') or data.get('command'),
+                            self.client_infos.get(sock, sock),
+                        )
         finally:
             buffers.clear()
 
@@ -1165,7 +1148,10 @@ class KVMWorker(QObject):
                     if text and text != self.last_clipboard:
                         self._set_clipboard(text)
                 else:
-                    self.file_handler.handle_network_message(data, sock)
+                    logging.debug(
+                        "Unhandled client message type '%s'",
+                        data.get('type') or data.get('command'),
+                    )
             except Exception as e:
                 logging.error("Failed to process client message: %s", e, exc_info=True)
 
@@ -1327,9 +1313,6 @@ class KVMWorker(QObject):
                         client_name,
                         sock.gettimeout(),
                     )
-                    if sock in self.file_handler.current_uploads:
-                        self.file_handler.handle_transfer_timeout(sock)
-                        break
                     continue
                 except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, socket.error):
                     break
@@ -1918,7 +1901,6 @@ class KVMWorker(QObject):
                 settings_store = QSettings(ORG_NAME, APP_NAME)
                 settings_store.setValue('network/last_server_ip', ip)
                 self.last_server_ip = ip
-                self.file_handler._cancel_transfer.clear()
                 logging.info("Sikeres csatlakozás!")
 
                 # Sikeres csatlakozás után visszaállítjuk a várakozási időt
@@ -1986,8 +1968,6 @@ class KVMWorker(QObject):
                 if hk_listener: hk_listener.stop()
                 self.release_hotkey_keys()
                 # Biztonságos hívás, csak akkor fut le, ha 's' létezik és létrejött a kapcsolat
-                if s: self.file_handler.on_client_disconnected(s)
-
                 self.server_socket = None
                 
                 if self._running:
