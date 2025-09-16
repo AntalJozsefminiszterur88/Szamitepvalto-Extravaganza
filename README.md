@@ -60,6 +60,14 @@ application logs activity to the console and stores settings via
 computer this instance represents (Desktop, Laptop or EliteDesk) and start or
 stop the KVM service. The correct operating mode is selected automatically.
 
+The software now follows a centralized control model. The EliteDesk runs the
+controller (`ado`) service and acts as the single decision point. The desktop
+machine is configured as an `input_provider` that forwards physical keyboard and
+mouse events only when instructed, while the laptop continues to operate as a
+simple `vevo` receiver. This keeps local control snappy and avoids sending
+unnecessary traffic across the network when you are working on the desktop
+itself.
+
 ### Automatic connection
 
 The receiver continuously searches for the host using Zeroconf and
@@ -69,20 +77,24 @@ each other and connect once both sides are running. If the connection
 is interrupted on either side, both peers keep searching and will
 reconnect automatically as soon as the other becomes available again.
 
-The desktop acting as the host can accept multiple client connections at once. Only the
-selected receiver will get the forwarded input events. Switch targets with the hotkeys to
-transfer control exclusively.
+The EliteDesk controller accepts connections from both the desktop input provider and any
+remote receivers. The desktop streams keyboard and mouse events only when the controller
+explicitly instructs it to do so, ensuring there is no unnecessary network traffic while
+you are working locally. When control is transferred to the EliteDesk the monitor input is
+switched to the secondary HDMI port, and it is switched back to HDMI1 as soon as you return
+to the desktop. Switching to the laptop never touches the monitor input.
 
-### Host hotkeys
+### Controller hotkeys
 
-While running on the desktop, use the following shortcuts to control the connected machines:
+While running on the EliteDesk controller you can switch targets either with the Pico
+hardware buttons (F13–F15) or by using the keyboard hotkeys:
 
-- **Shift + Numpad 1** – Take control of the laptop
-- **Shift + Numpad 2** – Take control of the EliteDesk and switch the monitor input
-- **Shift + Numpad 0** – Return control to the desktop and restore the monitor input
+- **Shift + Numpad 0 / F13** – Return control to the desktop input provider
+- **Shift + Numpad 1 / F14** – Route control to the laptop client (no monitor switch)
+- **Shift + Numpad 2 / F15** – Take control of the EliteDesk itself and switch the monitor to HDMI2
 
-Switching directly between the laptop and EliteDesk is disabled. Press `Shift + Numpad 0` first to
-return to the desktop before activating the other client.
+The controller always returns to the desktop before activating a different remote target so
+that the monitor state remains consistent.
 
 Slow clients that cannot keep up with the stream are disconnected after a short
 send timeout so they no longer cause lag for others. Input events are queued up
