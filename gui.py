@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
         'tray_icon', 'tray_hover_timer', '_tray_hover_visible',
         'stack', 'main_view', 'file_transfer_widget', 'file_transfer_button',
-        '_main_view_size', '_initial_show_done', '_file_transfer_centered'
+        '_main_view_size', '_initial_show_done'
     )
 
     # A MainWindow többi része változatlan...
@@ -104,7 +104,6 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(ICON_PATH))
         self._main_view_size = QSize(450, 560)
         self._initial_show_done = False
-        self._file_transfer_centered = False
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -195,19 +194,20 @@ class MainWindow(QMainWindow):
         return central_widget
 
     def show_file_transfer(self):
+        top_left = self.frameGeometry().topLeft()
         self.stack.setCurrentWidget(self.file_transfer_widget)
         self.setMinimumSize(QSize(900, 600))
         self.setMaximumSize(QSize(16777215, 16777215))
         self.resize(980, 680)
-        if not self._file_transfer_centered:
-            self._center_on_screen()
-            self._file_transfer_centered = True
+        self.move(top_left)
 
     def show_main_view(self):
+        top_left = self.frameGeometry().topLeft()
         self.stack.setCurrentWidget(self.main_view)
         self.setMinimumSize(self._main_view_size)
         self.setMaximumSize(self._main_view_size)
         self.resize(self._main_view_size)
+        self.move(top_left)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
