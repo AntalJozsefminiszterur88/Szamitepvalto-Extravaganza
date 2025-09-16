@@ -828,6 +828,7 @@ class KVMWorker(QObject):
         """Activate or deactivate control for a specific client."""
         if self.settings.get('role') == 'ado':
             target = name.lower()
+            desired_switch_monitor = switch_monitor
             logging.info(
                 "Controller toggle requested for target=%s current=%s active=%s",
                 target,
@@ -852,10 +853,9 @@ class KVMWorker(QObject):
                     and target in {'laptop', 'elitedesk'}
                     and self.current_target != target
                 )
-                if switching_between_main_targets:
-                    switch_monitor = False
+                deactivate_switch_monitor = False if switching_between_main_targets else prior_was_elitedesk
                 self.deactivate_kvm(
-                    switch_monitor=False if switching_between_main_targets else prior_was_elitedesk,
+                    switch_monitor=deactivate_switch_monitor,
                     release_keys=release_keys,
                     reason="controller switch",
                 )
@@ -867,7 +867,7 @@ class KVMWorker(QObject):
                     return
             else:
                 self.active_client = None
-            self.activate_kvm(switch_monitor=switch_monitor, target=target)
+            self.activate_kvm(switch_monitor=desired_switch_monitor, target=target)
             return
 
         current = self.client_infos.get(self.active_client, "").lower()
