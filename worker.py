@@ -1476,10 +1476,15 @@ class KVMWorker(QObject):
             if self.clipboard_thread and self.clipboard_thread.is_alive():
                 self.clipboard_thread.join(timeout=1)
                 self.clipboard_thread = None
+            host_code = self.settings['monitor_codes']['host']
+            need_switch = self.current_monitor_input != host_code
             do_switch = switch_monitor
             if do_switch is None:
-                do_switch = prev_target == 'elitedesk'
-            self._switch_monitor_for_target('desktop', allow_switch=bool(do_switch and prev_target == 'elitedesk'))
+                do_switch = prev_target == 'elitedesk' or need_switch
+            self._switch_monitor_for_target(
+                'desktop',
+                allow_switch=bool(do_switch and need_switch),
+            )
             self.status_update.emit("Állapot: Asztali gép irányít")
             if release_keys:
                 self.release_hotkey_keys()
