@@ -92,6 +92,7 @@ hardware buttons (F13–F15) or by using the keyboard hotkeys:
 - **Shift + Numpad 0 / F13** – Return control to the desktop input provider
 - **Shift + Numpad 1 / F14** – Route control to the laptop client (no monitor switch)
 - **Shift + Numpad 2 / F15** – Take control of the EliteDesk itself and switch the monitor to HDMI2
+- **F17** – Manually switch the primary monitor input to HDMI2 without changing the active client
 
 The controller always returns to the desktop before activating a different remote target so
 that the monitor state remains consistent.
