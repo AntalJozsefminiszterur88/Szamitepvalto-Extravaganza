@@ -75,6 +75,8 @@ class KVMWorker(QObject):
     update_progress_display = Signal(int, str)  # percentage, label text
     file_transfer_error = Signal(str)
     incoming_upload_started = Signal(str, float)
+    sync_cursor_update = Signal(int, int)
+    sync_cursor_reset = Signal()
 
     def __init__(self, settings):
         super().__init__()
@@ -591,6 +593,7 @@ class KVMWorker(QObject):
             logging.error("Provider stream loop started without a server socket")
             self.provider_stop_event.set()
             self.kvm_active = False
+            self.sync_cursor_reset.emit()
             return
 
         host_mouse = mouse.Controller()
@@ -599,17 +602,36 @@ class KVMWorker(QObject):
         try:
             root = tkinter.Tk()
             root.withdraw()
-            center_x = root.winfo_screenwidth() // 2
-            center_y = root.winfo_screenheight() // 2
+            screen_width = root.winfo_screenwidth()
+            screen_height = root.winfo_screenheight()
+            center_x = screen_width // 2
+            center_y = screen_height // 2
             root.destroy()
         except Exception:
-            center_x, center_y = 800, 600
+            screen_width, screen_height = 1600, 1200
+            center_x, center_y = screen_width // 2, screen_height // 2
+
+        def clamp(val: int, minimum: int, maximum: int) -> int:
+            if maximum < minimum:
+                return minimum
+            return max(minimum, min(maximum, val))
+
+        start_pos = self._orig_mouse_pos
+        if isinstance(start_pos, tuple) and len(start_pos) == 2:
+            start_x = clamp(int(start_pos[0]), 0, screen_width - 1)
+            start_y = clamp(int(start_pos[1]), 0, screen_height - 1)
+        else:
+            start_x, start_y = center_x, center_y
+
+        virtual_pos = {'x': start_x, 'y': start_y}
 
         host_mouse.position = (center_x, center_y)
         last_pos = {'x': center_x, 'y': center_y}
         is_warping = False
         movement_lock = threading.Lock()
         pending_move = {'dx': 0, 'dy': 0}
+
+        self.sync_cursor_update.emit(virtual_pos['x'], virtual_pos['y'])
 
         def send_event(payload: dict) -> bool:
             if not self._running:
@@ -646,12 +668,15 @@ class KVMWorker(QObject):
             if is_warping:
                 is_warping = False
                 return
-            dx = x - last_pos['x']
-            dy = y - last_pos['y']
+            dx = int(x - last_pos['x'])
+            dy = int(y - last_pos['y'])
             if dx or dy:
                 with movement_lock:
                     pending_move['dx'] += dx
                     pending_move['dy'] += dy
+                virtual_pos['x'] = clamp(virtual_pos['x'] + dx, 0, screen_width - 1)
+                virtual_pos['y'] = clamp(virtual_pos['y'] + dy, 0, screen_height - 1)
+                self.sync_cursor_update.emit(int(virtual_pos['x']), int(virtual_pos['y']))
             is_warping = True
             try:
                 host_mouse.position = (center_x, center_y)
@@ -733,6 +758,7 @@ class KVMWorker(QObject):
                 pass
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
+        self.sync_cursor_reset.emit()
         self.provider_stop_event.set()
         logging.info("Input provider stream loop exited")
 

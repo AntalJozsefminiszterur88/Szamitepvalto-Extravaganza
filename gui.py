@@ -29,8 +29,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMessageBox,
 )
-from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer, QStandardPaths
+from PySide6.QtGui import QAction, QEnterEvent, QHoverEvent, QIcon
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, QStandardPaths, QSize, QThread, Qt, QTimer
 
 
 from worker import KVMWorker
@@ -96,7 +96,7 @@ class MainWindow(QMainWindow):
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
         'tray_icon', 'share_button', 'cut_share_button', 'paste_button', 'progress_dialog',
-        'temp_path_edit', 'browse_temp_path_button'
+        'temp_path_edit', 'browse_temp_path_button', '_sync_hover_widget', '_sync_last_pos'
     )
 
     # A MainWindow többi része változatlan...
@@ -201,6 +201,8 @@ class MainWindow(QMainWindow):
         self.kvm_worker = None
         self.progress_dialog = None
         self.init_tray_icon()
+        self._sync_hover_widget = None
+        self._sync_last_pos = None
         self.load_settings()
 
     def get_settings(self):
@@ -242,6 +244,8 @@ class MainWindow(QMainWindow):
         self.kvm_worker.update_progress_display.connect(self.update_progress_display)
         self.kvm_worker.file_transfer_error.connect(self.on_transfer_error)
         self.kvm_worker.incoming_upload_started.connect(self.on_incoming_upload_started)
+        self.kvm_worker.sync_cursor_update.connect(self.on_sync_cursor_update)
+        self.kvm_worker.sync_cursor_reset.connect(self.on_sync_cursor_reset)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         # Prevent accidental double starts
@@ -259,6 +263,7 @@ class MainWindow(QMainWindow):
             self.kvm_thread.wait()
         self.kvm_thread = None
         self.kvm_worker = None
+        self._clear_sync_hover()
         self.start_button.setText("KVM Szolgáltatás Indítása")
         self.on_status_update("Állapot: Inaktív")
         self.set_controls_enabled(True)
@@ -495,3 +500,39 @@ class MainWindow(QMainWindow):
         if self.progress_dialog:
             self.progress_dialog.close()
             self.progress_dialog = None
+
+    def on_sync_cursor_update(self, x: int, y: int):
+        global_pos = QPoint(x, y)
+        widget = QApplication.widgetAt(global_pos)
+        if not widget or widget.window() is not self:
+            self._clear_sync_hover()
+            return
+
+        local_point = widget.mapFromGlobal(global_pos)
+        local_fp = QPointF(local_point)
+        previous = self._sync_last_pos if self._sync_last_pos is not None else local_fp
+
+        if widget is not self._sync_hover_widget:
+            if self._sync_hover_widget is not None:
+                leave_event = QEvent(QEvent.Leave)
+                QApplication.sendEvent(self._sync_hover_widget, leave_event)
+            widget.setAttribute(Qt.WA_Hover, True)
+            window_point = widget.mapTo(self, local_point)
+            enter_event = QEnterEvent(local_fp, QPointF(window_point), QPointF(global_pos))
+            QApplication.sendEvent(widget, enter_event)
+            self._sync_hover_widget = widget
+            previous = local_fp
+
+        hover_event = QHoverEvent(QEvent.HoverMove, local_fp, previous)
+        QApplication.sendEvent(widget, hover_event)
+        self._sync_last_pos = local_fp
+
+    def on_sync_cursor_reset(self):
+        self._clear_sync_hover()
+
+    def _clear_sync_hover(self):
+        if self._sync_hover_widget is not None:
+            leave_event = QEvent(QEvent.Leave)
+            QApplication.sendEvent(self._sync_hover_widget, leave_event)
+            self._sync_hover_widget = None
+        self._sync_last_pos = None
