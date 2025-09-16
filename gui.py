@@ -118,9 +118,9 @@ class MainWindow(QMainWindow):
         role_layout = QHBoxLayout()
         role_layout.setSpacing(15)
         role_layout.setContentsMargins(10, 10, 10, 10)
-        self.radio_desktop = QRadioButton("Asztali gép (irányít)")
-        self.radio_laptop = QRadioButton("Laptop")
-        self.radio_elitedesk = QRadioButton("ElitDesk")
+        self.radio_desktop = QRadioButton("Asztali gép (bemeneti forrás)")
+        self.radio_laptop = QRadioButton("Laptop (kliens)")
+        self.radio_elitedesk = QRadioButton("EliteDesk (központi vezérlő)")
         role_layout.addWidget(self.radio_desktop)
         role_layout.addWidget(self.radio_laptop)
         role_layout.addWidget(self.radio_elitedesk)
@@ -150,8 +150,8 @@ class MainWindow(QMainWindow):
         other_layout = QGridLayout()
         other_layout.addWidget(QLabel("Gyorsbillentyű:"), 0, 0)
         self.hotkey_label = QLabel(
-            "Asztal: Shift + Numpad 0 | Laptop: Shift + Numpad 1 | "
-            "ElitDesk: Shift + Numpad 2 (NumLock-tól független)"
+            "Pico gombok: F13 → Asztali gép | F14 → Laptop | F15 → EliteDesk. "
+            "Billentyűzet: Shift + Num0 vissza asztalra, Shift + Num1 laptop, Shift + Num2 EliteDesk."
         )
         other_layout.addWidget(self.hotkey_label, 0, 1)
         self.autostart_check = QCheckBox(
@@ -204,15 +204,15 @@ class MainWindow(QMainWindow):
         self.load_settings()
 
     def get_settings(self):
-        if self.radio_desktop.isChecked():
+        if self.radio_elitedesk.isChecked():
             mode = 'ado'
+            device = 'elitedesk'
+        elif self.radio_desktop.isChecked():
+            mode = 'input_provider'
             device = 'desktop'
-        elif self.radio_laptop.isChecked():
-            mode = 'vevo'
-            device = 'laptop'
         else:
             mode = 'vevo'
-            device = 'elitedesk'
+            device = 'laptop'
         return {
             'role': mode,
             'device_name': device,
@@ -265,14 +265,16 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         settings = QSettings(ORG_NAME, APP_NAME)
-        if self.radio_desktop.isChecked():
-            device = 'desktop'
-        elif self.radio_laptop.isChecked():
-            device = 'laptop'
-        else:
+        if self.radio_elitedesk.isChecked():
             device = 'elitedesk'
+            mode = 'ado'
+        elif self.radio_desktop.isChecked():
+            device = 'desktop'
+            mode = 'input_provider'
+        else:
+            device = 'laptop'
+            mode = 'vevo'
         settings.setValue("device/name", device)
-        mode = 'ado' if device == 'desktop' else 'vevo'
         settings.setValue("role/mode", mode)
         settings.setValue("network/port", self.port.text())
         settings.setValue("monitor/host_code", self.host_code.text())

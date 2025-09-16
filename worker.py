@@ -57,16 +57,17 @@ PROGRESS_UPDATE_INTERVAL = 0.5
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
-        'active_client', 'pynput_listeners', 'zeroconf', 'streaming_thread',
-        'switch_monitor', 'local_ip', 'server_ip', 'connection_thread',
-        'device_name', 'clipboard_thread', 'last_clipboard', 'server_socket',
-        '_ignore_next_clipboard_change',
+        'client_roles', 'active_client', 'pynput_listeners', 'zeroconf',
+        'streaming_thread', 'switch_monitor', 'local_ip', 'server_ip',
+        'connection_thread', 'device_name', 'clipboard_thread', 'last_clipboard',
+        'server_socket', 'input_provider_socket', '_ignore_next_clipboard_change',
         'last_server_ip', 'file_handler', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
-        'keyboard_controller', '_pressed_keys', 'pico_thread', 'pico_handler',
-        'discovered_peers', 'connection_manager_thread', 'resolver_thread',
-        'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
-        'pending_activation_target'
+        'keyboard_controller', '_pressed_keys', '_provider_pressed_keys',
+        'pico_thread', 'pico_handler', 'discovered_peers', 'connection_manager_thread',
+        'resolver_thread', 'resolver_queue', 'service_info', 'peers_lock',
+        'clients_lock', 'pending_activation_target', 'provider_stop_event',
+        'provider_target', 'current_target', 'current_monitor_input'
     )
 
     finished = Signal()
@@ -84,6 +85,8 @@ class KVMWorker(QObject):
         self.client_sockets = []
         # Mapping from socket to human readable client name
         self.client_infos = {}
+        # Mapping from socket to declared remote role
+        self.client_roles = {}
         # Currently selected client to forward events to
         self.active_client = None
         self.pynput_listeners = []
@@ -103,6 +106,7 @@ class KVMWorker(QObject):
         self.clipboard_thread = None
         self.last_clipboard = ""
         self.server_socket = None
+        self.input_provider_socket = None
         self._ignore_next_clipboard_change = threading.Event()
         self.file_handler = FileTransferHandler(self)
         self.message_queue = queue.Queue()
@@ -112,6 +116,7 @@ class KVMWorker(QObject):
         self.mouse_controller = mouse.Controller()
         self.keyboard_controller = keyboard.Controller()
         self._pressed_keys = set()
+        self._provider_pressed_keys = set()
         self.pico_thread = None
         self.pico_handler = None
         self.discovered_peers = {}
@@ -124,6 +129,10 @@ class KVMWorker(QObject):
         # Track ongoing reconnect attempts to avoid duplicates
         self.reconnect_threads = {}
         self.reconnect_lock = threading.Lock()
+        self.provider_stop_event = threading.Event()
+        self.provider_target = None
+        self.current_target = 'desktop'
+        self.current_monitor_input = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -206,6 +215,97 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.error("Failed to broadcast message: %s", e)
 
+    def _send_to_provider(self, payload: dict) -> bool:
+        """Send a command to the connected input provider if available."""
+        sock = self.input_provider_socket
+        if not sock:
+            logging.warning("No input provider socket available for payload %s", payload)
+            return False
+        return self._send_message(sock, payload)
+
+    def _apply_event_locally(self, data: dict) -> None:
+        """Apply a remote input event to the local controllers."""
+        button_map = {
+            'left': mouse.Button.left,
+            'right': mouse.Button.right,
+            'middle': mouse.Button.middle,
+        }
+        msg_type = data.get('type')
+        if msg_type == 'move_relative':
+            self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+        elif msg_type == 'click':
+            btn = button_map.get(data.get('button'))
+            if btn:
+                (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
+        elif msg_type == 'scroll':
+            self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
+        elif msg_type == 'key':
+            k_info = data.get('key')
+            key_type = data.get('key_type')
+            if key_type == 'char':
+                k_press = k_info
+            elif key_type == 'special':
+                k_press = getattr(keyboard.Key, k_info, None)
+            elif key_type == 'vk':
+                try:
+                    k_press = keyboard.KeyCode.from_vk(int(k_info))
+                except Exception:
+                    k_press = None
+            else:
+                k_press = None
+            if k_press:
+                if data.get('pressed'):
+                    self.keyboard_controller.press(k_press)
+                    self._pressed_keys.add(k_press)
+                else:
+                    self.keyboard_controller.release(k_press)
+                    self._pressed_keys.discard(k_press)
+        elif msg_type == 'clipboard_text':
+            text = data.get('text', '')
+            if text and text != self.last_clipboard:
+                self._set_clipboard(text)
+        else:
+            logging.debug("Unhandled local event type: %s", msg_type)
+
+    def _handle_provider_event(self, data: dict) -> None:
+        """Route events coming from the input provider based on the active target."""
+        target = self.current_target
+        if target == 'laptop':
+            if self.active_client is None:
+                logging.debug("No active laptop client to forward provider event %s", data)
+                return
+            if not self._send_message(self.active_client, data):
+                logging.warning("Failed to forward provider event to laptop; deactivating KVM")
+                self.deactivate_kvm(reason="forward_failed", switch_monitor=False)
+        elif target == 'elitedesk':
+            self._apply_event_locally(data)
+        else:
+            logging.debug(
+                "Dropping provider event %s because current target is %s",
+                data,
+                target,
+            )
+
+    def _switch_monitor_for_target(self, target: str, *, allow_switch: bool) -> None:
+        """Switch the monitor input according to the current control target."""
+        if not allow_switch:
+            return
+        desired = None
+        if target == 'elitedesk':
+            desired = self.settings['monitor_codes']['client']
+        elif target == 'desktop':
+            desired = self.settings['monitor_codes']['host']
+        if desired is None or desired == self.current_monitor_input:
+            return
+        try:
+            with list(get_monitors())[0] as monitor:
+                monitor.set_input_source(desired)
+            self.current_monitor_input = desired
+            logging.info("Monitor input switched to %s for target %s", desired, target)
+        except Exception as exc:
+            logging.error("Failed to switch monitor input for %s: %s", target, exc)
+            self.status_update.emit(f"Monitor hiba: {exc}")
+
     def _detect_primary_ipv4(self) -> str:
         """Determine the primary IPv4 address for outgoing connections."""
         ip = None
@@ -277,6 +377,7 @@ class KVMWorker(QObject):
                 self.client_sockets.remove(sock)
             if sock in self.client_infos:
                 del self.client_infos[sock]
+            self.client_roles.pop(sock, None)
             peer_still_connected = (
                 peer_name is not None and peer_name in self.client_infos.values()
             )
@@ -291,6 +392,18 @@ class KVMWorker(QObject):
                 "Closed redundant connection to %s (%s)", peer_name, reason
             )
             return
+
+        if self.settings.get('role') == 'ado' and sock == self.input_provider_socket:
+            if self.kvm_active:
+                self.deactivate_kvm(
+                    switch_monitor=self.current_target == 'elitedesk',
+                    reason="input provider disconnect",
+                )
+            self.input_provider_socket = None
+            self.pending_activation_target = None
+        if self.settings.get('role') == 'input_provider' and sock == self.server_socket:
+            self.server_socket = None
+            self._stop_input_provider_stream()
 
         if was_active and self.kvm_active:
             logging.info("Active client disconnected, deactivating KVM")
@@ -371,11 +484,7 @@ class KVMWorker(QObject):
     def _process_messages(self):
         """Unified message handler for all peers."""
         logging.debug("Message processor thread started")
-        button_map = {
-            'left': mouse.Button.left,
-            'right': mouse.Button.right,
-            'middle': mouse.Button.middle,
-        }
+        role = self.settings.get('role')
         while self._running:
             try:
                 sock, data = self.message_queue.get()
@@ -385,48 +494,247 @@ class KVMWorker(QObject):
                 break
             try:
                 cmd = data.get('command')
-                if cmd == 'switch_elitedesk':
-                    self.toggle_client_control('elitedesk', switch_monitor=True)
+                if role == 'ado':
+                    if cmd == 'switch_elitedesk':
+                        self.toggle_client_control('elitedesk', switch_monitor=True)
+                        continue
+                    if cmd == 'switch_laptop':
+                        self.toggle_client_control('laptop', switch_monitor=False)
+                        continue
+                    msg_type = data.get('type')
+                    if msg_type in {'move_relative', 'click', 'scroll', 'key', 'clipboard_text'} and sock == self.input_provider_socket:
+                        self._handle_provider_event(data)
+                        continue
+                    if msg_type == 'clipboard_text':
+                        text = data.get('text', '')
+                        if text and text != self.last_clipboard:
+                            self._set_clipboard(text)
+                            clipboard_msg = {'type': 'clipboard_text', 'text': text}
+                            if sock != self.input_provider_socket:
+                                self._send_to_provider(clipboard_msg)
+                            self._broadcast_message(clipboard_msg, exclude=sock)
+                        continue
+                    self.file_handler.handle_network_message(data, sock)
                     continue
-                if cmd == 'switch_laptop':
-                    self.toggle_client_control('laptop', switch_monitor=False)
+
+                if role == 'input_provider':
+                    if cmd == 'start_stream':
+                        target = data.get('target', 'elitedesk')
+                        self._start_input_provider_stream(target)
+                        continue
+                    if cmd == 'stop_stream':
+                        self._stop_input_provider_stream()
+                        continue
+                    msg_type = data.get('type')
+                    if msg_type == 'clipboard_text':
+                        text = data.get('text', '')
+                        if text and text != self.last_clipboard:
+                            self._set_clipboard(text)
+                        continue
+                    self.file_handler.handle_network_message(data, sock)
                     continue
+
                 msg_type = data.get('type')
-                if msg_type == 'move_relative':
-                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
-                elif msg_type == 'click':
-                    btn = button_map.get(data.get('button'))
-                    if btn:
-                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
-                elif msg_type == 'scroll':
-                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
-                elif msg_type == 'key':
-                    k_info = data.get('key')
-                    if data.get('key_type') == 'char':
-                        k_press = k_info
-                    elif data.get('key_type') == 'special':
-                        k_press = getattr(keyboard.Key, k_info, None)
-                    elif data.get('key_type') == 'vk':
-                        k_press = keyboard.KeyCode.from_vk(int(k_info))
-                    else:
-                        k_press = None
-                    if k_press:
-                        if data.get('pressed'):
-                            self.keyboard_controller.press(k_press)
-                            self._pressed_keys.add(k_press)
-                        else:
-                            self.keyboard_controller.release(k_press)
-                            self._pressed_keys.discard(k_press)
+                if msg_type in {'move_relative', 'click', 'scroll', 'key'}:
+                    self._apply_event_locally(data)
                 elif msg_type == 'clipboard_text':
                     text = data.get('text', '')
                     if text and text != self.last_clipboard:
                         self._set_clipboard(text)
-                        if self.settings.get('role') == 'ado':
-                            self._broadcast_message(data, exclude=sock)
                 else:
                     self.file_handler.handle_network_message(data, sock)
             except Exception as e:
                 logging.error("Failed to process message: %s", e, exc_info=True)
+
+    def _start_input_provider_stream(self, target: str) -> None:
+        """Start streaming local input toward the controller when requested."""
+        if self.settings.get('role') != 'input_provider':
+            return
+        if not self.server_socket:
+            logging.error("Cannot start input streaming without server connection")
+            self.status_update.emit("Hiba: Nincs kapcsolat a vezérlővel")
+            return
+        if self.streaming_thread and self.streaming_thread.is_alive():
+            self.provider_target = target
+            self.status_update.emit(f"Állapot: Továbbítás aktív ({target})")
+            return
+        self.provider_target = target
+        self.provider_stop_event.clear()
+        self._provider_pressed_keys.clear()
+        self.kvm_active = True
+        self.status_update.emit(f"Állapot: Továbbítás aktív ({target})")
+        self.streaming_thread = threading.Thread(
+            target=self._provider_stream_loop,
+            daemon=True,
+            name="InputProviderStream",
+        )
+        self.streaming_thread.start()
+        logging.info("Input provider streaming started toward %s", target)
+
+    def _stop_input_provider_stream(self) -> None:
+        """Stop forwarding events to the controller and restore local control."""
+        if self.settings.get('role') != 'input_provider':
+            return
+        self.provider_stop_event.set()
+        if self.streaming_thread and self.streaming_thread.is_alive():
+            self.streaming_thread.join(timeout=1.5)
+        self.streaming_thread = None
+        self.provider_target = None
+        self.kvm_active = False
+        self.status_update.emit("Állapot: Helyi vezérlés aktív")
+        logging.info("Input provider streaming stopped")
+
+    def _provider_stream_loop(self) -> None:
+        """Capture local mouse and keyboard events and forward them to the server."""
+        controller_sock = self.server_socket
+        if not controller_sock:
+            logging.error("Provider stream loop started without a server socket")
+            self.provider_stop_event.set()
+            self.kvm_active = False
+            return
+
+        host_mouse = mouse.Controller()
+        self._host_mouse_controller = host_mouse
+        self._orig_mouse_pos = host_mouse.position
+        try:
+            root = tkinter.Tk()
+            root.withdraw()
+            center_x = root.winfo_screenwidth() // 2
+            center_y = root.winfo_screenheight() // 2
+            root.destroy()
+        except Exception:
+            center_x, center_y = 800, 600
+
+        host_mouse.position = (center_x, center_y)
+        last_pos = {'x': center_x, 'y': center_y}
+        is_warping = False
+        movement_lock = threading.Lock()
+        pending_move = {'dx': 0, 'dy': 0}
+
+        def send_event(payload: dict) -> bool:
+            if not self._running:
+                return False
+            sock = self.server_socket
+            if not sock:
+                logging.error("Lost server socket while sending provider event")
+                return False
+            if not self._send_message(sock, payload):
+                logging.error("Failed to send provider event %s", payload)
+                return False
+            return True
+
+        def aggregator():
+            while self._running and not self.provider_stop_event.is_set():
+                time.sleep(0.01)
+                with movement_lock:
+                    dx = pending_move['dx']
+                    dy = pending_move['dy']
+                    pending_move['dx'] = 0
+                    pending_move['dy'] = 0
+                if dx or dy:
+                    if not send_event({'type': 'move_relative', 'dx': dx, 'dy': dy}):
+                        self.provider_stop_event.set()
+                        break
+
+        agg_thread = threading.Thread(target=aggregator, daemon=True, name="InputMoveAgg")
+        agg_thread.start()
+
+        def on_move(x, y):
+            nonlocal is_warping
+            if self.provider_stop_event.is_set():
+                return False
+            if is_warping:
+                is_warping = False
+                return
+            dx = x - last_pos['x']
+            dy = y - last_pos['y']
+            if dx or dy:
+                with movement_lock:
+                    pending_move['dx'] += dx
+                    pending_move['dy'] += dy
+            is_warping = True
+            try:
+                host_mouse.position = (center_x, center_y)
+            except Exception:
+                pass
+            last_pos['x'] = center_x
+            last_pos['y'] = center_y
+
+        def on_click(x, y, button, pressed):
+            if self.provider_stop_event.is_set():
+                return False
+            send_event({'type': 'click', 'button': getattr(button, 'name', 'left'), 'pressed': pressed})
+
+        def on_scroll(x, y, dx, dy):
+            if self.provider_stop_event.is_set():
+                return False
+            send_event({'type': 'scroll', 'dx': dx, 'dy': dy})
+
+        def on_key(key, pressed):
+            if self.provider_stop_event.is_set():
+                return False
+            try:
+                if hasattr(key, 'char') and key.char is not None:
+                    key_type = 'char'
+                    key_val = key.char
+                elif hasattr(key, 'name') and key.name is not None:
+                    key_type = 'special'
+                    key_val = key.name
+                elif hasattr(key, 'vk') and key.vk is not None:
+                    key_type = 'vk'
+                    key_val = key.vk
+                else:
+                    return True
+                key_id = (key_type, key_val)
+                if pressed:
+                    self._provider_pressed_keys.add(key_id)
+                else:
+                    self._provider_pressed_keys.discard(key_id)
+                send_event({'type': 'key', 'key_type': key_type, 'key': key_val, 'pressed': pressed})
+            except Exception as exc:
+                logging.error("Error while handling provider key event: %s", exc, exc_info=True)
+            return True
+
+        mouse_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
+        keyboard_listener = keyboard.Listener(
+            on_press=lambda k: on_key(k, True),
+            on_release=lambda k: on_key(k, False),
+            suppress=True,
+        )
+        mouse_listener.start()
+        keyboard_listener.start()
+
+        while self._running and not self.provider_stop_event.is_set():
+            time.sleep(0.05)
+
+        mouse_listener.stop()
+        keyboard_listener.stop()
+        agg_thread.join(timeout=1.0)
+
+        if self._provider_pressed_keys:
+            sock = self.server_socket
+            if sock:
+                for key_type, key_val in list(self._provider_pressed_keys):
+                    try:
+                        self._send_message(sock, {
+                            'type': 'key',
+                            'key_type': key_type,
+                            'key': key_val,
+                            'pressed': False,
+                        })
+                    except Exception:
+                        break
+            self._provider_pressed_keys.clear()
+
+        if self._host_mouse_controller and self._orig_mouse_pos:
+            try:
+                self._host_mouse_controller.position = self._orig_mouse_pos
+            except Exception:
+                pass
+        self._host_mouse_controller = None
+        self._orig_mouse_pos = None
+        self.provider_stop_event.set()
+        logging.info("Input provider stream loop exited")
 
     # ------------------------------------------------------------------
     # File transfer delegation
@@ -454,6 +762,43 @@ class KVMWorker(QObject):
 
     def toggle_client_control(self, name: str, *, switch_monitor: bool = True, release_keys: bool = True) -> None:
         """Activate or deactivate control for a specific client."""
+        if self.settings.get('role') == 'ado':
+            target = name.lower()
+            logging.info(
+                "Controller toggle requested for target=%s current=%s active=%s",
+                target,
+                self.current_target,
+                self.kvm_active,
+            )
+            if target not in {'laptop', 'elitedesk'}:
+                logging.warning("Unknown controller target: %s", target)
+                return
+            if self.kvm_active and self.current_target == target:
+                self.deactivate_kvm(
+                    switch_monitor=True if target == 'elitedesk' else False,
+                    release_keys=release_keys,
+                    reason="toggle same target",
+                )
+                self.pending_activation_target = None
+                return
+            if self.kvm_active:
+                prior_was_elitedesk = self.current_target == 'elitedesk'
+                self.deactivate_kvm(
+                    switch_monitor=prior_was_elitedesk,
+                    release_keys=release_keys,
+                    reason="controller switch",
+                )
+                self.pending_activation_target = None
+            if target == 'laptop':
+                if not self.set_active_client_by_name('laptop'):
+                    self.status_update.emit("Hiba: a laptop nem érhető el")
+                    self.pending_activation_target = None
+                    return
+            else:
+                self.active_client = None
+            self.activate_kvm(switch_monitor=switch_monitor, target=target)
+            return
+
         current = self.client_infos.get(self.active_client, "").lower()
         target = name.lower()
         logging.info(
@@ -479,7 +824,9 @@ class KVMWorker(QObject):
         logging.info("stop() metódus meghívva.")
         self._running = False
         self.pending_activation_target = None
-        if self.kvm_active:
+        if self.settings.get('role') == 'input_provider':
+            self._stop_input_provider_stream()
+        elif self.kvm_active:
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
         if self.service_info:
             try:
@@ -503,7 +850,13 @@ class KVMWorker(QObject):
                     pass
             self.client_sockets.clear()
             self.client_infos.clear()
+            self.client_roles.clear()
             self.active_client = None
+        self.server_socket = None if self.settings.get('role') != 'ado' else self.server_socket
+        if self.settings.get('role') == 'ado':
+            self.input_provider_socket = None
+            self.current_target = 'desktop'
+            self.kvm_active = False
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
         if self.clipboard_thread and self.clipboard_thread.is_alive():
@@ -881,7 +1234,14 @@ class KVMWorker(QObject):
 
         # Exchange device names with the peer. Each side sends first then reads.
         try:
-            self._send_message(sock, {'type': 'intro', 'device_name': self.device_name})
+            self._send_message(
+                sock,
+                {
+                    'type': 'intro',
+                    'device_name': self.device_name,
+                    'role': self.settings.get('role'),
+                },
+            )
             raw_len = recv_all(sock, 4)
             if raw_len:
                 msg_len = struct.unpack('!I', raw_len)[0]
@@ -889,6 +1249,11 @@ class KVMWorker(QObject):
                 if payload:
                     hello = msgpack.unpackb(payload, raw=False)
                     client_name = hello.get('device_name', client_name)
+                    client_role = hello.get('role')
+                else:
+                    client_role = None
+            else:
+                client_role = None
         except Exception:
             try:
                 sock.close()
@@ -899,8 +1264,17 @@ class KVMWorker(QObject):
         with self.clients_lock:
             self.client_sockets.append(sock)
             self.client_infos[sock] = client_name
-            if self.active_client is None:
+            if 'client_role' in locals():
+                self.client_roles[sock] = client_role
+            if self.active_client is None and client_role != 'input_provider':
                 self.active_client = sock
+
+        if self.settings.get('role') == 'ado' and client_role == 'input_provider':
+            self.input_provider_socket = sock
+            logging.info("Input provider connected: %s", client_name)
+        if self.settings.get('role') == 'input_provider' and client_role == 'ado':
+            self.server_socket = sock
+            logging.info("Controller connection established: %s", client_name)
         if (
             self.pending_activation_target
             and self.pending_activation_target == client_name
@@ -985,6 +1359,14 @@ class KVMWorker(QObject):
             switch_monitor,
             self.client_infos.get(self.active_client),
         )
+        if self.settings.get('role') == 'ado':
+            target = self.current_target if self.current_target != 'desktop' else 'elitedesk'
+            if not self.kvm_active:
+                self.activate_kvm(switch_monitor=switch_monitor, target=target)
+            else:
+                self.deactivate_kvm(switch_monitor=switch_monitor, reason="toggle_kvm_active")
+            self.release_hotkey_keys()
+            return
         if self.active_client is None:
             logging.warning("toggle_kvm_active invoked with no active_client")
         if not self.kvm_active:
@@ -993,7 +1375,45 @@ class KVMWorker(QObject):
             self.deactivate_kvm(switch_monitor=switch_monitor, reason="toggle_kvm_active")
         self.release_hotkey_keys()
 
-    def activate_kvm(self, switch_monitor=True):
+    def activate_kvm(self, switch_monitor=True, target: Optional[str] = None):
+        if self.settings.get('role') == 'ado':
+            if not self.input_provider_socket:
+                self.status_update.emit("Hiba: Nincs input szolgáltató")
+                logging.error("Activation requested without connected input provider")
+                return
+            if target is None:
+                target = 'laptop' if self.active_client else 'elitedesk'
+            self.switch_monitor = switch_monitor
+            self.current_target = target
+            self.pending_activation_target = None
+            self.kvm_active = True
+            if target == 'elitedesk':
+                self.status_update.emit("Állapot: EliteDesk irányítása aktív")
+                self._switch_monitor_for_target('elitedesk', allow_switch=switch_monitor)
+            else:
+                self.status_update.emit("Állapot: Laptop vezérlése aktív")
+                self._switch_monitor_for_target('desktop', allow_switch=False)
+            if self.clipboard_thread is None or not self.clipboard_thread.is_alive():
+                self.clipboard_thread = threading.Thread(
+                    target=self._clipboard_loop_server,
+                    daemon=True,
+                    name="ClipboardSrv"
+                )
+                self.clipboard_thread.start()
+            if not self._send_to_provider({'command': 'start_stream', 'target': target}):
+                logging.error("Failed to start input streaming for target %s", target)
+                if target == 'elitedesk':
+                    self._switch_monitor_for_target('desktop', allow_switch=True)
+                self.current_target = 'desktop'
+                self.kvm_active = False
+                self.status_update.emit("Hiba: nem érhető el az input szolgáltató")
+                if self.clipboard_thread and self.clipboard_thread.is_alive():
+                    self.clipboard_thread.join(timeout=1)
+                    self.clipboard_thread = None
+                return
+            logging.info("Controller activated for %s", target)
+            return
+
         logging.info(
             "activate_kvm called. switch_monitor=%s active_client=%s",
             switch_monitor,
@@ -1046,19 +1466,38 @@ class KVMWorker(QObject):
         release_keys: bool = True,
         reason: Optional[str] = None,
     ):
-        # --- EZT A BLOKKOT ILLESZD BE A FÜGGVÉNY ELEJÉRE ---
-        # Védelmi feltétel: ha a KVM már eleve inaktív, ne csináljunk semmit.
-        # Ez megakadályozza a hibákat és a felesleges műveleteket.
+        if self.settings.get('role') == 'ado':
+            if not self.kvm_active and self.current_target == 'desktop':
+                logging.info("Controller deactivate requested but already idle")
+                if release_keys:
+                    self.release_hotkey_keys()
+                return
+            prev_target = self.current_target
+            self.kvm_active = False
+            self.current_target = 'desktop'
+            if self.input_provider_socket:
+                self._send_to_provider({'command': 'stop_stream'})
+            if self.clipboard_thread and self.clipboard_thread.is_alive():
+                self.clipboard_thread.join(timeout=1)
+                self.clipboard_thread = None
+            do_switch = switch_monitor
+            if do_switch is None:
+                do_switch = prev_target == 'elitedesk'
+            self._switch_monitor_for_target('desktop', allow_switch=bool(do_switch and prev_target == 'elitedesk'))
+            self.status_update.emit("Állapot: Asztali gép irányít")
+            if release_keys:
+                self.release_hotkey_keys()
+            logging.info("Controller deactivated (reason=%s)", reason)
+            return
+
         if not self.kvm_active:
             logging.info(
                 "deactivate_kvm called, but KVM was already inactive. Reason: %s. No action taken.",
                 reason or "unknown",
             )
-            # Biztonsági okokból a billentyű-elengedést itt is lefuttathatjuk.
             if release_keys:
                 self.release_hotkey_keys()
             return
-        # --- EDDIG TART AZ ÚJ RÉSZ ---
 
         if reason:
             logging.info(
@@ -1070,8 +1509,8 @@ class KVMWorker(QObject):
                 "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
                 switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
             )
-        
-        self.kvm_active = False # Most már biztosak lehetünk benne, hogy 'True'-ról váltunk 'False'-ra.
+
+        self.kvm_active = False
         if self.settings.get('role') == 'ado' and self.clipboard_thread:
             self.clipboard_thread.join(timeout=1)
             self.clipboard_thread = None
@@ -1088,7 +1527,7 @@ class KVMWorker(QObject):
             except Exception as e:
                 self.status_update.emit(f"Monitor hiba: {e}")
                 logging.error(f"Monitor hiba: {e}", exc_info=True)
-        
+
         if release_keys:
             self.release_hotkey_keys()
 
@@ -1097,7 +1536,7 @@ class KVMWorker(QObject):
                 self._host_mouse_controller.position = self._orig_mouse_pos
             except Exception as e:
                 logging.error(f"Failed to restore mouse position: {e}", exc_info=True)
-        
+
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
 
@@ -1106,7 +1545,7 @@ class KVMWorker(QObject):
                 logging.warning("Active client disconnected during deactivation")
             else:
                 logging.debug("No active client set after deactivation")
-            
+
             if self.client_sockets:
                 self.active_client = self.client_sockets[0]
                 logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
