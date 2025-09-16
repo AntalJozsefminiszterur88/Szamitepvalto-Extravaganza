@@ -1015,6 +1015,10 @@ class KVMWorker(QObject):
                 logging.info("!!! Pico gomb 4 (F16) észlelve !!!")
                 self.switch_monitor_input(17)
                 return
+            if key == keyboard.Key.f17:
+                logging.info("!!! F17 gyorsbillentyű érzékelve – monitor váltás HDMI2-re !!!")
+                self.switch_monitor_input(18)
+                return
 
             vk = getattr(key, 'vk', None)
             if vk is None: return
@@ -1038,7 +1042,7 @@ class KVMWorker(QObject):
         hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         self.pynput_listeners.append(hotkey_listener)
         hotkey_listener.start()
-        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F16 billentyűkkel).")
+        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F17 billentyűkkel).")
         
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
