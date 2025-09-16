@@ -13,6 +13,19 @@ import msgpack
 import random
 import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
+import math
+
+if os.name == 'nt':
+    import ctypes
+    from ctypes import wintypes
+
+    _USER32 = ctypes.windll.user32
+    _SM_XVIRTUALSCREEN = 76
+    _SM_YVIRTUALSCREEN = 77
+    _SM_CXVIRTUALSCREEN = 78
+    _SM_CYVIRTUALSCREEN = 79
+else:
+    _USER32 = None
 from clipboard_sync import safe_copy, safe_paste
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
@@ -51,6 +64,7 @@ class KVMWorker(QObject):
         'server_socket', 'input_provider_socket', '_ignore_next_clipboard_change',
         'last_server_ip', 'message_queue', 'message_processor_thread',
         '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
+        '_win_mouse_fraction',
         'keyboard_controller', '_pressed_keys', '_provider_pressed_keys',
         'pico_thread', 'pico_handler', 'discovered_peers', 'connection_manager_thread',
         'resolver_thread', 'resolver_queue', 'service_info', 'peers_lock',
@@ -98,6 +112,7 @@ class KVMWorker(QObject):
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
         self.mouse_controller = mouse.Controller()
+        self._win_mouse_fraction = [0.0, 0.0]
         self.keyboard_controller = keyboard.Controller()
         self._pressed_keys = set()
         self._provider_pressed_keys = set()
@@ -207,6 +222,70 @@ class KVMWorker(QObject):
             return False
         return self._send_message(sock, payload)
 
+    def _move_mouse_relative(self, dx, dy) -> None:
+        """Move the cursor relative to its current position."""
+        try:
+            dx_val = float(dx) if dx is not None else 0.0
+        except (TypeError, ValueError):
+            dx_val = 0.0
+        try:
+            dy_val = float(dy) if dy is not None else 0.0
+        except (TypeError, ValueError):
+            dy_val = 0.0
+
+        if dx_val == 0.0 and dy_val == 0.0:
+            return
+
+        if _USER32 is not None:
+            try:
+                point = wintypes.POINT()
+                if not _USER32.GetCursorPos(ctypes.byref(point)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+
+                total_dx = dx_val + self._win_mouse_fraction[0]
+                total_dy = dy_val + self._win_mouse_fraction[1]
+                frac_x, int_x = math.modf(total_dx)
+                frac_y, int_y = math.modf(total_dy)
+
+                move_x = int(int_x)
+                move_y = int(int_y)
+
+                self._win_mouse_fraction[0] = frac_x
+                self._win_mouse_fraction[1] = frac_y
+
+                target_x = point.x + move_x
+                target_y = point.y + move_y
+
+                width = _USER32.GetSystemMetrics(_SM_CXVIRTUALSCREEN)
+                height = _USER32.GetSystemMetrics(_SM_CYVIRTUALSCREEN)
+                if width and height:
+                    left = _USER32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
+                    top = _USER32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
+                    max_x = left + width - 1
+                    max_y = top + height - 1
+                    if target_x < left:
+                        target_x = left
+                        self._win_mouse_fraction[0] = 0.0
+                    elif target_x > max_x:
+                        target_x = max_x
+                        self._win_mouse_fraction[0] = 0.0
+                    if target_y < top:
+                        target_y = top
+                        self._win_mouse_fraction[1] = 0.0
+                    elif target_y > max_y:
+                        target_y = max_y
+                        self._win_mouse_fraction[1] = 0.0
+
+                if move_x != 0 or move_y != 0 or target_x != point.x or target_y != point.y:
+                    _USER32.SetCursorPos(int(target_x), int(target_y))
+                return
+            except Exception as exc:
+                logging.debug("Native cursor move failed (%s), falling back to pynput", exc)
+                self._win_mouse_fraction[0] = 0.0
+                self._win_mouse_fraction[1] = 0.0
+
+        self.mouse_controller.move(dx_val, dy_val)
+
     def _apply_event_locally(self, data: dict) -> None:
         """Apply a remote input event to the local controllers."""
         button_map = {
@@ -219,7 +298,7 @@ class KVMWorker(QObject):
             button_map['x1'] = extra_button
         msg_type = data.get('type')
         if msg_type == 'move_relative':
-            self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+            self._move_mouse_relative(data.get('dx', 0), data.get('dy', 0))
         elif msg_type == 'click':
             btn = button_map.get(data.get('button'))
             if btn:
@@ -1136,7 +1215,7 @@ class KVMWorker(QObject):
                 )
                 msg_type = data.get('type')
                 if msg_type == 'move_relative':
-                    self.mouse_controller.move(data.get('dx', 0), data.get('dy', 0))
+                    self._move_mouse_relative(data.get('dx', 0), data.get('dy', 0))
                 elif msg_type == 'click':
                     btn = button_map.get(data.get('button'))
                     if btn:
