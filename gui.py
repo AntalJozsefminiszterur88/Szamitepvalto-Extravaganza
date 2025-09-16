@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QPushButton,
     QGridLayout,
+    QStackedWidget,
     QSystemTrayIcon,
     QMenu,
     QToolTip,
@@ -32,6 +33,7 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 from worker import KVMWorker
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
+from file_transfer import FileTransferWidget
 
 
 # gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
@@ -90,7 +92,9 @@ class MainWindow(QMainWindow):
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
         'host_code', 'client_code', 'hotkey_label', 'autostart_check',
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
-        'tray_icon', 'tray_hover_timer', '_tray_hover_visible'
+        'tray_icon', 'tray_hover_timer', '_tray_hover_visible',
+        'stack', 'main_view', 'file_transfer_widget', 'file_transfer_button',
+        '_main_view_size'
     )
 
     # A MainWindow többi része változatlan...
@@ -98,14 +102,24 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("KVM Switch Vezérlőpult v7")
         self.setWindowIcon(QIcon(ICON_PATH))
-        # Prevent resizing during runtime
-        # Provide a bit more vertical room so texts are not cramped
-        # Slightly increased height so long texts fit within the window
-        # Provide a bit more space vertically for future additions
-        self.setFixedSize(QSize(450, 560))
+        self._main_view_size = QSize(450, 560)
 
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.main_view = self._create_main_view()
+        self.file_transfer_widget = FileTransferWidget(self, on_back=self.show_main_view)
+        self.stack.addWidget(self.main_view)
+        self.stack.addWidget(self.file_transfer_widget)
+        self.show_main_view()
+
+        self.kvm_thread = None
+        self.kvm_worker = None
+        self.init_tray_icon()
+        self.load_settings()
+
+    def _create_main_view(self):
         central_widget = QWidget()
-        self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
         role_box = QGroupBox("Eszköz kiválasztása")
@@ -155,6 +169,17 @@ class MainWindow(QMainWindow):
         other_box.setLayout(other_layout)
         main_layout.addWidget(other_box)
 
+        file_transfer_container = QWidget()
+        file_transfer_layout = QVBoxLayout(file_transfer_container)
+        file_transfer_layout.setContentsMargins(0, 6, 0, 0)
+        file_transfer_layout.setSpacing(6)
+        file_transfer_label = QLabel("Fájlátvitel")
+        file_transfer_layout.addWidget(file_transfer_label)
+        self.file_transfer_button = QPushButton("LAN fájlátvitel megnyitása")
+        self.file_transfer_button.clicked.connect(self.show_file_transfer)
+        file_transfer_layout.addWidget(self.file_transfer_button)
+        main_layout.addWidget(file_transfer_container)
+
         self.start_button = QPushButton("KVM Szolgáltatás Indítása")
         self.start_button.clicked.connect(self.toggle_kvm_service)
         main_layout.addWidget(self.start_button)
@@ -165,10 +190,19 @@ class MainWindow(QMainWindow):
         self.status_label.setFixedHeight(90)
         main_layout.addWidget(self.status_label)
 
-        self.kvm_thread = None
-        self.kvm_worker = None
-        self.init_tray_icon()
-        self.load_settings()
+        return central_widget
+
+    def show_file_transfer(self):
+        self.stack.setCurrentWidget(self.file_transfer_widget)
+        self.setMinimumSize(QSize(900, 600))
+        self.setMaximumSize(QSize(16777215, 16777215))
+        self.resize(980, 680)
+
+    def show_main_view(self):
+        self.stack.setCurrentWidget(self.main_view)
+        self.setMinimumSize(self._main_view_size)
+        self.setMaximumSize(self._main_view_size)
+        self.resize(self._main_view_size)
 
     def get_settings(self):
         if self.radio_elitedesk.isChecked():
@@ -365,5 +399,7 @@ class MainWindow(QMainWindow):
         if self._tray_hover_visible:
             QToolTip.hideText()
         self.stop_kvm_service()
+        if hasattr(self, 'file_transfer_widget') and self.file_transfer_widget:
+            self.file_transfer_widget.shutdown()
         time.sleep(0.2)
         QApplication.instance().quit()
