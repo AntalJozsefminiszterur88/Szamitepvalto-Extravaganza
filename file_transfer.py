@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
@@ -935,4 +936,15 @@ if __name__ == "__main__":  # pragma: no cover - manuális futtatás
     window.setCentralWidget(widget)
     window.resize(980, 680)
     window.show()
+    app.processEvents()
+
+    def _center_window_on_screen(target: QWidget) -> None:
+        screen = target.screen() or QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        frame = target.frameGeometry()
+        frame.moveCenter(screen.availableGeometry().center())
+        target.move(frame.topLeft())
+
+    _center_window_on_screen(window)
     sys.exit(app.exec())

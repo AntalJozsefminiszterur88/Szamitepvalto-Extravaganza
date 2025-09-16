@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QToolTip,
 )
-from PySide6.QtGui import QIcon, QAction, QCursor
+from PySide6.QtGui import QIcon, QAction, QCursor, QGuiApplication, QShowEvent
 from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
         'tray_icon', 'tray_hover_timer', '_tray_hover_visible',
         'stack', 'main_view', 'file_transfer_widget', 'file_transfer_button',
-        '_main_view_size'
+        '_main_view_size', '_initial_show_done', '_file_transfer_centered'
     )
 
     # A MainWindow többi része változatlan...
@@ -103,6 +103,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("KVM Switch Vezérlőpult v7")
         self.setWindowIcon(QIcon(ICON_PATH))
         self._main_view_size = QSize(450, 560)
+        self._initial_show_done = False
+        self._file_transfer_centered = False
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -197,12 +199,30 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(900, 600))
         self.setMaximumSize(QSize(16777215, 16777215))
         self.resize(980, 680)
+        if not self._file_transfer_centered:
+            self._center_on_screen()
+            self._file_transfer_centered = True
 
     def show_main_view(self):
         self.stack.setCurrentWidget(self.main_view)
         self.setMinimumSize(self._main_view_size)
         self.setMaximumSize(self._main_view_size)
         self.resize(self._main_view_size)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._initial_show_done:
+            self._center_on_screen()
+            self._initial_show_done = True
+
+    def _center_on_screen(self) -> None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        geometry = screen.availableGeometry()
+        frame = self.frameGeometry()
+        frame.moveCenter(geometry.center())
+        self.move(frame.topLeft())
 
     def get_settings(self):
         if self.radio_elitedesk.isChecked():
