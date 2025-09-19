@@ -31,8 +31,13 @@ else:
     # Ha a program scriptként fut
     application_path = os.path.dirname(os.path.abspath(__file__))
 
-# Log könyvtár létrehozása
-log_dir = os.path.join(application_path, "logs")
+# Log könyvtár létrehozása a felhasználó Dokumentumok mappájában
+documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+if not documents_dir:
+    # Biztonsági tartalék, ha a Qt nem ad vissza érvényes elérési utat
+    documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
+
+log_dir = os.path.join(documents_dir, "UMKGL Solutions", "Szamitepvalto-Extravaganza")
 os.makedirs(log_dir, exist_ok=True)
 log_file_path = os.path.join(log_dir, "kvm_app.log")
 
