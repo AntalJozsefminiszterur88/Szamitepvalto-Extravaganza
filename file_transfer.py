@@ -42,7 +42,10 @@ APP_NAME = "LAN Drop"
 VERSION = "1.2.2 (PySide6 - HU)"
 DEFAULT_PORT = 5001
 CHUNK_SIZE = 1024 * 1024
-TIMEOUT = 120
+# A socket timeout of ``None`` means blocking mode with no automatic timeout,
+# allowing arbitrarily large/slow transfers. Previously this was set to 120
+# seconds, which could cut off large files on slower links.
+TIMEOUT: Optional[float] = None
 AUTO_CLEAN_INTERVAL_MS = 5 * 60 * 1000
 
 
@@ -213,7 +216,8 @@ class ReceiverHandler(QThread):
         log = self.signals.log_message.emit
         progress = self.signals.progress_updated.emit
         try:
-            self.conn.settimeout(TIMEOUT)
+            if TIMEOUT is not None:
+                self.conn.settimeout(TIMEOUT)
             header_bytes = _recv_line(self.conn)
             if not header_bytes:
                 log(f"[{self.addr[0]}] Kapcsolat lezárult fejléc nélkül.")
@@ -406,7 +410,8 @@ class Sender(QThread):
             f"({human_bytes(size)})..."
         )
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(TIMEOUT)
+            if TIMEOUT is not None:
+                sock.settimeout(TIMEOUT)
             sock.connect((self.host, self.port))
             sock.sendall(header.to_json_bytes())
             response = _recv_line(sock)
