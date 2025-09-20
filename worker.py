@@ -30,6 +30,7 @@ from clipboard_sync import safe_copy, safe_paste
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
 from monitorcontrol import get_monitors
+from monitorcontrol.monitorcontrol import PowerMode
 from PySide6.QtCore import QObject, Signal, QSettings
 import ipaddress
 from config import (
@@ -69,7 +70,8 @@ class KVMWorker(QObject):
         'pico_thread', 'pico_handler', 'discovered_peers', 'connection_manager_thread',
         'resolver_thread', 'resolver_queue', 'service_info', 'peers_lock',
         'clients_lock', 'pending_activation_target', 'provider_stop_event',
-        'provider_target', 'current_target', 'current_monitor_input'
+        'provider_target', 'current_target', 'current_monitor_input',
+        'monitor_power_on'
     )
 
     finished = Signal()
@@ -132,6 +134,7 @@ class KVMWorker(QObject):
         self.provider_target = None
         self.current_target = 'desktop'
         self.current_monitor_input = None
+        self.monitor_power_on = True
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -148,6 +151,41 @@ class KVMWorker(QObject):
                 kc.release(k)
             except Exception:
                 pass
+
+    def toggle_monitor_power(self) -> None:
+        """Toggle the primary monitor power state between on and soft off."""
+        try:
+            monitors = list(get_monitors())
+            if not monitors:
+                logging.warning("No monitors detected for power toggle (F21).")
+                return
+
+            with monitors[0] as monitor:
+                try:
+                    current_mode = monitor.get_power_mode()
+                    monitor_is_on = current_mode == PowerMode.on
+                    self.monitor_power_on = monitor_is_on
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to query monitor power state, assuming current value (%s): %s",
+                        self.monitor_power_on,
+                        exc,
+                    )
+                    monitor_is_on = self.monitor_power_on
+
+                try:
+                    if monitor_is_on:
+                        monitor.set_power_mode(PowerMode.off_soft)
+                        self.monitor_power_on = False
+                        logging.info("Monitor power toggled OFF via F21 hotkey.")
+                    else:
+                        monitor.set_power_mode(PowerMode.on)
+                        self.monitor_power_on = True
+                        logging.info("Monitor power toggled ON via F21 hotkey.")
+                except Exception as exc:
+                    logging.error("Failed to toggle monitor power state: %s", exc, exc_info=True)
+        except Exception as exc:
+            logging.error("Unexpected error while toggling monitor power: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Clipboard utilities
@@ -1105,6 +1143,10 @@ class KVMWorker(QObject):
             if key == keyboard.Key.f17:
                 logging.info("!!! F17 gyorsbillentyű érzékelve – monitor váltás HDMI2-re !!!")
                 self.switch_monitor_input(18)
+                return
+            if key == keyboard.Key.f21:
+                logging.info("!!! F21 gyorsbillentyű érzékelve – monitor ki/bekapcsolás !!!")
+                self.toggle_monitor_power()
                 return
 
             vk = getattr(key, 'vk', None)
