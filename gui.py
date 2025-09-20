@@ -194,20 +194,18 @@ class MainWindow(QMainWindow):
         return central_widget
 
     def show_file_transfer(self):
-        top_left = self.frameGeometry().topLeft()
         self.stack.setCurrentWidget(self.file_transfer_widget)
         self.setMinimumSize(QSize(900, 600))
         self.setMaximumSize(QSize(16777215, 16777215))
         self.resize(980, 680)
-        self.move(top_left)
+        self._center_on_screen()
 
     def show_main_view(self):
-        top_left = self.frameGeometry().topLeft()
         self.stack.setCurrentWidget(self.main_view)
         self.setMinimumSize(self._main_view_size)
         self.setMaximumSize(self._main_view_size)
         self.resize(self._main_view_size)
-        self.move(top_left)
+        self._center_on_screen()
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
