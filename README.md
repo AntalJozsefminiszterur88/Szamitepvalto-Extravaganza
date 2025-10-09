@@ -68,6 +68,16 @@ simple `vevo` receiver. This keeps local control snappy and avoids sending
 unnecessary traffic across the network when you are working on the desktop
 itself.
 
+### Shared clipboard
+
+The controller maintains a shared clipboard for every connected client. Long
+text snippets and full-resolution images copied on any machine are packaged in
+their native Windows clipboard formats and distributed to all other peers. The
+receiving side updates its local clipboard immediately so the content can be
+used without any extra steps. Clipboard entries that remain unchanged for more
+than 12 hours are cleared automatically to avoid stale data lingering in the
+shared history.
+
 ### Automatic connection
 
 The receiver continuously searches for the host using Zeroconf and

@@ -8,7 +8,7 @@ import logging
 import tkinter
 import queue
 import struct
-from typing import Optional
+from typing import Any, Optional
 import msgpack
 import random
 import psutil  # ÚJ IMPORT
@@ -26,7 +26,13 @@ if os.name == 'nt':
     _SM_CYVIRTUALSCREEN = 79
 else:
     _USER32 = None
-from clipboard_sync import safe_copy, safe_paste
+from clipboard_sync import (
+    clear_clipboard,
+    clipboard_items_equal,
+    normalize_clipboard_item,
+    read_clipboard_content,
+    write_clipboard_content,
+)
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
 from monitorcontrol import get_monitors
@@ -62,17 +68,18 @@ class KVMWorker(QObject):
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
         'client_roles', 'active_client', 'pynput_listeners', 'zeroconf',
         'streaming_thread', 'switch_monitor', 'local_ip', 'server_ip',
-        'connection_thread', 'device_name', 'clipboard_thread', 'last_clipboard',
-        'server_socket', 'input_provider_socket', '_ignore_next_clipboard_change',
-        'last_server_ip', 'message_queue', 'message_processor_thread',
-        '_host_mouse_controller', '_orig_mouse_pos', 'mouse_controller',
-        '_win_mouse_fraction',
-        'keyboard_controller', '_pressed_keys', '_provider_pressed_keys',
-        'pico_thread', 'pico_handler', 'discovered_peers', 'connection_manager_thread',
-        'resolver_thread', 'resolver_queue', 'service_info', 'peers_lock',
-        'clients_lock', 'pending_activation_target', 'provider_stop_event',
-        'provider_target', 'current_target', 'current_monitor_input',
-        'monitor_power_on', 'button_manager'
+        'connection_thread', 'device_name', 'clipboard_thread',
+        'last_clipboard_item', 'shared_clipboard_item', 'clipboard_lock',
+        'clipboard_expiry_seconds', 'server_socket', 'input_provider_socket',
+        '_ignore_next_clipboard_change', 'last_server_ip', 'message_queue',
+        'message_processor_thread', '_host_mouse_controller', '_orig_mouse_pos',
+        'mouse_controller', '_win_mouse_fraction', 'keyboard_controller',
+        '_pressed_keys', '_provider_pressed_keys', 'pico_thread', 'pico_handler',
+        'discovered_peers', 'connection_manager_thread', 'resolver_thread',
+        'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
+        'pending_activation_target', 'provider_stop_event', 'provider_target',
+        'current_target', 'current_monitor_input', 'monitor_power_on',
+        'button_manager'
     )
 
     finished = Signal()
@@ -106,7 +113,10 @@ class KVMWorker(QObject):
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
         self.clipboard_thread = None
-        self.last_clipboard = ""
+        self.last_clipboard_item = None
+        self.shared_clipboard_item = None
+        self.clipboard_lock = threading.Lock()
+        self.clipboard_expiry_seconds = 12 * 60 * 60
         self.server_socket = None
         self.input_provider_socket = None
         self._ignore_next_clipboard_change = threading.Event()
@@ -192,27 +202,142 @@ class KVMWorker(QObject):
     # ------------------------------------------------------------------
     # Clipboard utilities
     # ------------------------------------------------------------------
-    def _set_clipboard(self, text: str) -> None:
-        """Safely set the system clipboard and flag it to prevent feedback."""
-        if not text or text == self.last_clipboard:
+    def _remember_last_clipboard(self, item: Optional[dict]) -> None:
+        self.last_clipboard_item = item.copy() if item else None
+
+    def _apply_system_clipboard(self, item: dict) -> None:
+        if not item:
             return
         try:
             self._ignore_next_clipboard_change.set()
-            safe_copy(text)
-            self.last_clipboard = text
-            logging.debug("Clipboard set by application.")
-        except Exception as e:
-            logging.error(f"Failed to set clipboard: {e}", exc_info=True)
-            self._ignore_next_clipboard_change.clear()
+            write_clipboard_content(item)
+            logging.debug("System clipboard updated from shared data.")
+        except Exception as exc:
+            logging.error("Failed to set clipboard: %s", exc, exc_info=True)
 
-    def _get_clipboard(self) -> Optional[str]:
-        """Safely read the system clipboard. Returns None if no text is available."""
+    def _store_shared_clipboard(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
+        stored = item.copy()
+        stored['timestamp'] = float(timestamp if timestamp is not None else time.time())
+        with self.clipboard_lock:
+            self.shared_clipboard_item = stored
+        return stored
+
+    def _build_clipboard_payload(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
+        ts = float(timestamp if timestamp is not None else item.get('timestamp', time.time()))
+        payload = {
+            'type': 'clipboard_data',
+            'format': item['format'],
+            'encoding': item.get('encoding'),
+            'size': item.get('size'),
+            'digest': item.get('digest'),
+            'timestamp': ts,
+            'data': item['data'],
+        }
+        if 'length' in item:
+            payload['length'] = item['length']
+        if 'width' in item:
+            payload['width'] = item['width']
+        if 'height' in item:
+            payload['height'] = item['height']
+        if 'bits_per_pixel' in item:
+            payload['bits_per_pixel'] = item['bits_per_pixel']
+        return payload
+
+    def _apply_clipboard_clear(self) -> None:
+        self._ignore_next_clipboard_change.set()
         try:
-            text = safe_paste()
-        except Exception as e:
-            logging.error("Failed to read clipboard: %s", e)
+            clear_clipboard()
+        except Exception as exc:
+            logging.error("Failed to clear clipboard: %s", exc, exc_info=True)
+        self._remember_last_clipboard(None)
+        with self.clipboard_lock:
+            self.shared_clipboard_item = None
+
+    def _clear_shared_clipboard(self, *, broadcast: bool = False) -> None:
+        logging.info("Clearing shared clipboard contents.")
+        self._apply_clipboard_clear()
+        if broadcast and self.settings.get('role') == 'ado':
+            payload = {'type': 'clipboard_clear', 'timestamp': time.time()}
+            provider = self.input_provider_socket
+            exclude: set[Any] = set()
+            if provider:
+                if not self._send_to_provider(payload):
+                    logging.warning("Failed to notify input provider about clipboard clear.")
+                exclude.add(provider)
+            if self.client_sockets:
+                self._broadcast_message(payload, exclude=exclude)
+
+    def _check_clipboard_expiration(self) -> None:
+        if self.settings.get('role') != 'ado':
+            return
+        with self.clipboard_lock:
+            item = self.shared_clipboard_item
+        if not item:
+            return
+        timestamp = item.get('timestamp')
+        if not timestamp:
+            return
+        if time.time() - float(timestamp) >= self.clipboard_expiry_seconds:
+            logging.info(
+                "Shared clipboard entry expired after %.0f seconds.",
+                self.clipboard_expiry_seconds,
+            )
+            self._clear_shared_clipboard(broadcast=True)
+
+    def _get_shared_clipboard_payload(self) -> Optional[dict]:
+        with self.clipboard_lock:
+            item = self.shared_clipboard_item
+        if not item:
             return None
-        return text if text else None
+        timestamp = item.get('timestamp')
+        if timestamp and time.time() - float(timestamp) >= self.clipboard_expiry_seconds:
+            return None
+        return self._build_clipboard_payload(item)
+
+    def _handle_clipboard_data_message(self, sock, data: dict, *, from_local: bool = False) -> None:
+        item = normalize_clipboard_item(data)
+        if not item:
+            logging.debug("Ignoring invalid clipboard payload from %s", sock)
+            return
+        timestamp = data.get('timestamp')
+        if from_local or timestamp is None:
+            timestamp = time.time()
+        role = self.settings.get('role')
+        if role == 'ado':
+            stored = self._store_shared_clipboard(item, timestamp=timestamp)
+            if not from_local and not clipboard_items_equal(item, self.last_clipboard_item):
+                self._apply_system_clipboard(item)
+            self._remember_last_clipboard(item)
+            payload = self._build_clipboard_payload(stored)
+            provider = self.input_provider_socket
+            exclude: set[Any] = set()
+            if sock:
+                exclude.add(sock)
+            if provider:
+                if provider is not sock:
+                    if not self._send_to_provider(payload):
+                        logging.warning("Failed to forward clipboard update to input provider.")
+                    exclude.add(provider)
+                else:
+                    exclude.add(provider)
+            if self.client_sockets:
+                self._broadcast_message(payload, exclude=exclude)
+        else:
+            if not clipboard_items_equal(item, self.last_clipboard_item):
+                self._apply_system_clipboard(item)
+            self._remember_last_clipboard(item)
+            if timestamp is not None:
+                stored = item.copy()
+                stored['timestamp'] = float(timestamp)
+                with self.clipboard_lock:
+                    self.shared_clipboard_item = stored
+
+    def _handle_clipboard_clear_message(self, sock) -> None:
+        role = self.settings.get('role')
+        if role == 'ado':
+            self._clear_shared_clipboard(broadcast=True)
+        else:
+            self._apply_clipboard_clear()
 
     # ------------------------------------------------------------------
     # Network helpers
@@ -239,9 +364,15 @@ class KVMWorker(QObject):
 
     def _broadcast_message(self, data, exclude=None) -> None:
         """Broadcast a message to all connected clients."""
+        if exclude is None:
+            excluded = set()
+        elif isinstance(exclude, (set, list, tuple)):
+            excluded = set(exclude)
+        else:
+            excluded = {exclude}
         packed = msgpack.packb(data, use_bin_type=True)
         for s in list(self.client_sockets):
-            if s is exclude:
+            if s in excluded:
                 continue
             try:
                 s.sendall(struct.pack('!I', len(packed)) + packed)
@@ -366,10 +497,6 @@ class KVMWorker(QObject):
                 else:
                     self.keyboard_controller.release(k_press)
                     self._pressed_keys.discard(k_press)
-        elif msg_type == 'clipboard_text':
-            text = data.get('text', '')
-            if text and text != self.last_clipboard:
-                self._set_clipboard(text)
         else:
             logging.debug("Unhandled local event type: %s", msg_type)
 
@@ -557,16 +684,21 @@ class KVMWorker(QObject):
                 time.sleep(0.5)
                 continue
 
-            text = self._get_clipboard()
-            if text is not None and text != self.last_clipboard:
-                self.last_clipboard = text
-                payload = {'type': 'clipboard_text', 'text': text}
-                if self.input_provider_socket:
+            item = read_clipboard_content()
+            if item and not clipboard_items_equal(item, self.last_clipboard_item):
+                self._remember_last_clipboard(item)
+                stored = self._store_shared_clipboard(item)
+                payload = self._build_clipboard_payload(stored)
+                provider = self.input_provider_socket
+                exclude: set[Any] = set()
+                if provider:
                     if not self._send_to_provider(payload):
                         logging.warning("Failed to forward clipboard update to input provider.")
+                    exclude.add(provider)
                 if self.client_sockets:
-                    self._broadcast_message(payload, exclude=self.input_provider_socket)
-            time.sleep(0.5)
+                    self._broadcast_message(payload, exclude=exclude)
+            self._check_clipboard_expiration()
+            time.sleep(0.3)
         logging.info("Clipboard server loop stopped.")
 
     def _clipboard_loop_client(self) -> None:
@@ -578,14 +710,15 @@ class KVMWorker(QObject):
                 time.sleep(0.5)
                 continue
 
-            text = self._get_clipboard()
-            if text is not None and text != self.last_clipboard:
-                self.last_clipboard = text
+            item = read_clipboard_content()
+            if item and not clipboard_items_equal(item, self.last_clipboard_item):
+                self._remember_last_clipboard(item)
                 sock = self.server_socket
                 if sock:
-                    if not self._send_message(sock, {'type': 'clipboard_text', 'text': text}):
+                    payload = self._build_clipboard_payload(item)
+                    if not self._send_message(sock, payload):
                         logging.warning("Failed to send clipboard update to server.")
-            time.sleep(0.5)
+            time.sleep(0.3)
         logging.info("Clipboard client loop stopped.")
 
     def _process_messages(self):
@@ -609,17 +742,14 @@ class KVMWorker(QObject):
                         self.toggle_client_control('laptop', switch_monitor=False)
                         continue
                     msg_type = data.get('type')
-                    if msg_type in {'move_relative', 'click', 'scroll', 'key', 'clipboard_text'} and sock == self.input_provider_socket:
-                        self._handle_provider_event(data)
+                    if msg_type == 'clipboard_data':
+                        self._handle_clipboard_data_message(sock, data)
                         continue
-                    if msg_type == 'clipboard_text':
-                        text = data.get('text', '')
-                        if text and text != self.last_clipboard:
-                            self._set_clipboard(text)
-                            clipboard_msg = {'type': 'clipboard_text', 'text': text}
-                            if sock != self.input_provider_socket:
-                                self._send_to_provider(clipboard_msg)
-                            self._broadcast_message(clipboard_msg, exclude=sock)
+                    if msg_type == 'clipboard_clear':
+                        self._handle_clipboard_clear_message(sock)
+                        continue
+                    if msg_type in {'move_relative', 'click', 'scroll', 'key'} and sock == self.input_provider_socket:
+                        self._handle_provider_event(data)
                         continue
                     logging.debug(
                         "Unhandled message type '%s' in controller context from %s",
@@ -637,10 +767,11 @@ class KVMWorker(QObject):
                         self._stop_input_provider_stream()
                         continue
                     msg_type = data.get('type')
-                    if msg_type == 'clipboard_text':
-                        text = data.get('text', '')
-                        if text and text != self.last_clipboard:
-                            self._set_clipboard(text)
+                    if msg_type == 'clipboard_data':
+                        self._handle_clipboard_data_message(sock, data)
+                        continue
+                    if msg_type == 'clipboard_clear':
+                        self._handle_clipboard_clear_message(sock)
                         continue
                     logging.debug(
                         "Unhandled message type '%s' in input provider context",
@@ -651,10 +782,10 @@ class KVMWorker(QObject):
                 msg_type = data.get('type')
                 if msg_type in {'move_relative', 'click', 'scroll', 'key'}:
                     self._apply_event_locally(data)
-                elif msg_type == 'clipboard_text':
-                    text = data.get('text', '')
-                    if text and text != self.last_clipboard:
-                        self._set_clipboard(text)
+                elif msg_type == 'clipboard_data':
+                    self._handle_clipboard_data_message(sock, data)
+                elif msg_type == 'clipboard_clear':
+                    self._handle_clipboard_clear_message(sock)
                 else:
                     logging.debug(
                         "Unhandled message type '%s' in peer message processor",
@@ -1171,11 +1302,11 @@ class KVMWorker(QObject):
                         self.toggle_client_control('laptop', switch_monitor=False)
                         continue
 
-                    if data.get('type') == 'clipboard_text':
-                        text = data.get('text', '')
-                        if text and text != self.last_clipboard:
-                            self._set_clipboard(text)
-                            self._broadcast_message(data, exclude=sock)
+                    msg_type = data.get('type')
+                    if msg_type == 'clipboard_data':
+                        self._handle_clipboard_data_message(sock, data)
+                    elif msg_type == 'clipboard_clear':
+                        self._handle_clipboard_clear_message(sock)
                     else:
                         logging.debug(
                             "Unhandled server message type '%s' from %s",
@@ -1234,10 +1365,10 @@ class KVMWorker(QObject):
                         else:
                             self.keyboard_controller.release(k_press)
                             self._pressed_keys.discard(k_press)
-                elif msg_type == 'clipboard_text':
-                    text = data.get('text', '')
-                    if text and text != self.last_clipboard:
-                        self._set_clipboard(text)
+                elif msg_type == 'clipboard_data':
+                    self._handle_clipboard_data_message(sock, data)
+                elif msg_type == 'clipboard_clear':
+                    self._handle_clipboard_clear_message(sock)
                 else:
                     logging.debug(
                         "Unhandled client message type '%s'",
@@ -1367,11 +1498,18 @@ class KVMWorker(QObject):
             client_name,
         )
         # send current clipboard to newly connected client
-        if self.last_clipboard:
-            try:
-                self._send_message(sock, {'type': 'clipboard_text', 'text': self.last_clipboard})
-            except Exception:
-                pass
+        if self.settings.get('role') == 'ado':
+            self._check_clipboard_expiration()
+            payload = self._get_shared_clipboard_payload()
+            if payload:
+                try:
+                    self._send_message(sock, payload)
+                except Exception as exc:
+                    logging.debug(
+                        "Failed to send initial clipboard to %s: %s",
+                        client_name,
+                        exc,
+                    )
         try:
             buffer = bytearray()
             logging.debug("monitor_client main loop starting for %s", client_name)
