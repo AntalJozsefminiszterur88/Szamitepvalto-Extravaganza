@@ -15,11 +15,16 @@ from typing import Any, Dict, Optional
 import pyperclip
 
 try:  # pragma: no cover - elérhető csak Windows alatt
+    import ctypes
+    from ctypes import wintypes
+
     import win32clipboard  # type: ignore
     import win32con  # type: ignore
 except ImportError:  # pragma: no cover - más platformok
     win32clipboard = None  # type: ignore
     win32con = None  # type: ignore
+    ctypes = None  # type: ignore
+    wintypes = None  # type: ignore
 
 
 ClipboardItem = Dict[str, Any]
@@ -32,6 +37,128 @@ if win32clipboard is not None:  # pragma: no cover - Windows specifikus
         CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
     except Exception:  # pragma: no cover - régebbi Windows verziók
         CF_PNG = None
+
+if win32clipboard is not None:  # pragma: no cover - Windows specifikus
+    _KERNEL32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    _KERNEL32.GlobalLock.argtypes = [wintypes.HGLOBAL]  # type: ignore[attr-defined]
+    _KERNEL32.GlobalLock.restype = wintypes.LPVOID  # type: ignore[attr-defined]
+    _KERNEL32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]  # type: ignore[attr-defined]
+    _KERNEL32.GlobalUnlock.restype = wintypes.BOOL  # type: ignore[attr-defined]
+    _KERNEL32.GlobalSize.argtypes = [wintypes.HGLOBAL]  # type: ignore[attr-defined]
+    _KERNEL32.GlobalSize.restype = ctypes.c_size_t  # type: ignore[attr-defined]
+    _KERNEL32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]  # type: ignore[attr-defined]
+    _KERNEL32.GlobalAlloc.restype = wintypes.HGLOBAL  # type: ignore[attr-defined]
+    _KERNEL32.GlobalFree.argtypes = [wintypes.HGLOBAL]  # type: ignore[attr-defined]
+    _KERNEL32.GlobalFree.restype = wintypes.HGLOBAL  # type: ignore[attr-defined]
+
+    GMEM_MOVEABLE = 0x0002
+
+
+def _win32_clipboard_object_to_bytes(data: Any, fmt_hint: Optional[int] = None) -> Optional[bytes]:
+    if win32clipboard is None:  # pragma: no cover - non-Windows
+        return None
+
+    handle: Optional[int] = None
+
+    for attr in ("handle", "value"):
+        if hasattr(data, attr):
+            try:
+                handle = int(getattr(data, attr))
+                break
+            except (TypeError, ValueError):
+                continue
+
+    if handle is None:
+        try:
+            handle = int(data)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            handle = None
+
+    if handle:
+        try:
+            size = int(_KERNEL32.GlobalSize(handle))  # type: ignore[arg-type]
+            if size <= 0:
+                return b""
+            ptr = _KERNEL32.GlobalLock(handle)  # type: ignore[arg-type]
+            if not ptr:
+                raise ctypes.WinError()  # type: ignore[attr-defined]
+            try:
+                return ctypes.string_at(ptr, size)  # type: ignore[attr-defined]
+            finally:
+                _KERNEL32.GlobalUnlock(handle)  # type: ignore[arg-type]
+        except Exception as exc:
+            logging.debug("Failed to read clipboard handle %s: %s", handle, exc, exc_info=True)
+
+    if fmt_hint is not None and win32clipboard is not None:
+        try:
+            handle_obj = win32clipboard.GetClipboardDataHandle(fmt_hint)  # type: ignore[attr-defined]
+        except AttributeError:
+            handle_obj = None
+        except Exception as exc:
+            logging.debug(
+                "GetClipboardDataHandle(%s) failed: %s",
+                fmt_hint,
+                exc,
+                exc_info=True,
+            )
+            handle_obj = None
+        if handle_obj:
+            try:
+                size = int(_KERNEL32.GlobalSize(handle_obj))  # type: ignore[arg-type]
+                if size <= 0:
+                    return b""
+                ptr = _KERNEL32.GlobalLock(handle_obj)  # type: ignore[arg-type]
+                if not ptr:
+                    raise ctypes.WinError()  # type: ignore[attr-defined]
+                try:
+                    return ctypes.string_at(ptr, size)  # type: ignore[attr-defined]
+                finally:
+                    _KERNEL32.GlobalUnlock(handle_obj)  # type: ignore[arg-type]
+            except Exception as exc:
+                logging.debug(
+                    "Failed to read clipboard handle via fmt %s: %s",
+                    fmt_hint,
+                    exc,
+                    exc_info=True,
+                )
+
+    return None
+
+
+def _win32_bytes_to_handle(data: bytes) -> int:
+    if win32clipboard is None:  # pragma: no cover - non-Windows
+        raise RuntimeError("Clipboard handle conversion only supported on Windows")
+
+    size = len(data)
+    if size == 0:
+        size = 1  # allocate minimum block for empty payloads
+    handle = _KERNEL32.GlobalAlloc(GMEM_MOVEABLE, size)  # type: ignore[arg-type]
+    if not handle:
+        raise ctypes.WinError()  # type: ignore[attr-defined]
+    ptr = _KERNEL32.GlobalLock(handle)  # type: ignore[arg-type]
+    if not ptr:
+        _KERNEL32.GlobalFree(handle)  # type: ignore[arg-type]
+        raise ctypes.WinError()  # type: ignore[attr-defined]
+    try:
+        if data:
+            ctypes.memmove(ptr, data, len(data))  # type: ignore[attr-defined]
+        else:  # pragma: no cover - empty payload
+            ctypes.memset(ptr, 0, 1)  # type: ignore[attr-defined]
+    finally:
+        _KERNEL32.GlobalUnlock(handle)  # type: ignore[arg-type]
+    return handle
+
+
+def _win32_set_clipboard_bytes(fmt: int, data: bytes) -> None:
+    if win32clipboard is None:  # pragma: no cover - non-Windows
+        return
+    handle = _win32_bytes_to_handle(data)
+    try:
+        win32clipboard.SetClipboardData(fmt, handle)
+    except Exception:
+        _KERNEL32.GlobalFree(handle)  # type: ignore[arg-type]
+        raise
 
 
 def _compute_digest(fmt: str, encoding: Optional[str], raw: bytes) -> str:
@@ -51,6 +178,10 @@ def _ensure_bytes(data: Any) -> bytes:
         return bytes(data.tobytes())
     if isinstance(data, str):
         return data.encode("utf-8")
+    if win32clipboard is not None:  # pragma: no cover - Windows specifikus
+        raw = _win32_clipboard_object_to_bytes(data)
+        if raw is not None:
+            return raw
     raise TypeError(f"Unsupported clipboard payload type: {type(data)!r}")
 
 
@@ -115,7 +246,17 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
     try:
         raw_bytes = _ensure_bytes(data)
     except TypeError:
-        return None
+        if win32clipboard is not None:
+            fmt_hint = None
+            if encoding == "dib" and win32con is not None:
+                fmt_hint = getattr(win32con, "CF_DIB", None)
+            elif encoding == "png":
+                fmt_hint = CF_PNG
+            raw_bytes = _win32_clipboard_object_to_bytes(data, fmt_hint)
+            if raw_bytes is None:
+                return None
+        else:
+            return None
 
     encoding = item.get("encoding") or "dib"
     normalized.update(
@@ -228,11 +369,11 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                     elif fmt == "image":
                         encoding = normalized.get("encoding") or "dib"
                         if encoding == "dib":
-                            win32clipboard.SetClipboardData(
+                            _win32_set_clipboard_bytes(
                                 win32con.CF_DIB, normalized["data"]
                             )
                         elif encoding == "png" and CF_PNG:
-                            win32clipboard.SetClipboardData(CF_PNG, normalized["data"])
+                            _win32_set_clipboard_bytes(CF_PNG, normalized["data"])
                         else:
                             raise ValueError(
                                 f"Unsupported image encoding for clipboard: {encoding}"
