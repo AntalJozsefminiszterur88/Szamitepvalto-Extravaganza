@@ -281,6 +281,51 @@ def _coerce_path_list(data: Any) -> Optional[list[str]]:
     return None
 
 
+def _detect_windows_file_paths(text: str) -> Optional[list[str]]:
+    """Detect Explorer style newline separated absolute paths in text data."""
+
+    if win32clipboard is None:
+        return None
+
+    if not text:
+        return None
+
+    has_newline = "\n" in text or "\r" in text
+    normalized_lines = (
+        text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    )
+
+    paths: list[str] = []
+
+    for raw_line in normalized_lines:
+        candidate = raw_line.strip()
+        if not candidate:
+            continue
+        # Windows "Copy as path" surrounds the path with quotes – strip them.
+        candidate = candidate.strip("\"")
+        if not candidate:
+            continue
+        if not (
+            candidate.startswith("\\\\")
+            or (len(candidate) >= 3 and candidate[1] == ":" and candidate[2] in ("\\", "/"))
+        ):
+            return None
+        normalized = os.path.abspath(candidate)
+        if not os.path.exists(normalized):
+            return None
+        paths.append(normalized)
+
+    if not paths:
+        return None
+
+    if not has_newline and len(paths) == 1:
+        stripped = text.strip()
+        if not (stripped.startswith('"') and stripped.endswith('"')):
+            return None
+
+    return paths
+
+
 def _pack_clipboard_files(paths: Sequence[str]) -> Optional[tuple[bytes, list[dict], int, int]]:
     if not paths:
         return None
@@ -499,6 +544,14 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
                 text = str(text)
             except Exception:
                 return None
+        file_paths = _detect_windows_file_paths(text)
+        if file_paths:
+            logging.debug(
+                "Promoting text clipboard content to file list with %d entr%s.",
+                len(file_paths),
+                "ies" if len(file_paths) != 1 else "y",
+            )
+            return normalize_clipboard_item({"format": "files", "data": file_paths})
         raw = text.encode("utf-8")
         normalized.update(
             {
