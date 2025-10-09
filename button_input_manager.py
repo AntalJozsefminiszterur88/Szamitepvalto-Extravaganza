@@ -85,10 +85,10 @@ class ButtonInputManager:
             "KEY_HDMI_1": lambda: self._handle_hdmi1("pico KEY_HDMI_1"),
             "KEY_HDMI_2": lambda: self._handle_hdmi2("pico KEY_HDMI_2"),
             "KEY_Monitor_OnOff": lambda: self._handle_monitor_toggle("pico KEY_Monitor_OnOff"),
-            "KEY_Hang_1": lambda: self._emit_host_key(Key.f18, "pico KEY_Hang_1"),
-            "KEY_Hang_2": lambda: self._emit_host_key(Key.f19, "pico KEY_Hang_2"),
-            "KEY_Hang_3": lambda: self._emit_host_key(Key.f20, "pico KEY_Hang_3"),
-            "KEY_Nemitas": lambda: self._emit_host_key(Key.f22, "pico KEY_Nemitas"),
+            "KEY_Hang_1": lambda: self._forward_or_emit_host_key(Key.f18, "pico KEY_Hang_1"),
+            "KEY_Hang_2": lambda: self._forward_or_emit_host_key(Key.f19, "pico KEY_Hang_2"),
+            "KEY_Hang_3": lambda: self._forward_or_emit_host_key(Key.f20, "pico KEY_Hang_3"),
+            "KEY_Nemitas": lambda: self._forward_or_emit_host_key(Key.f22, "pico KEY_Nemitas"),
             # Legacy numeric protocol compatibility
             "1": lambda: self._handle_asztal("pico legacy 1"),
             "2": lambda: self._handle_laptop("pico legacy 2"),
@@ -155,6 +155,18 @@ class ButtonInputManager:
     def _handle_monitor_toggle(self, source: str) -> None:
         logging.info("Monitor power toggle requested by %s", source)
         self.worker.toggle_monitor_power()
+
+    def _forward_or_emit_host_key(self, key: Key, source: str) -> None:
+        """Try forwarding the key press to the desktop provider, fall back locally."""
+        logging.info("Audio hotkey %s triggered by %s", key, source)
+        try:
+            forwarded = self.worker.send_provider_function_key(key, source=source)
+        except AttributeError:
+            forwarded = False
+        if forwarded:
+            return
+        logging.info("Falling back to local key simulation for %s due to %s", key, source)
+        self._emit_host_key(key, source)
 
     def _emit_host_key(self, key: Key, source: str) -> None:
         logging.info("Simulating %s due to %s", key, source)

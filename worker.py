@@ -519,6 +519,54 @@ class KVMWorker(QObject):
                 target,
             )
 
+    def send_provider_function_key(self, key: keyboard.Key, *, source: str = "") -> bool:
+        """Request the desktop input provider to tap the given function key."""
+        if self.settings.get('role') != 'ado':
+            logging.debug("Ignoring provider key tap request in role %s", self.settings.get('role'))
+            return False
+        vk = None
+        if hasattr(key, 'value') and hasattr(key.value, 'vk'):
+            vk = key.value.vk
+        if vk is None:
+            vk = getattr(key, 'vk', None)
+        if vk is None:
+            logging.warning("Cannot determine virtual key code for %s", key)
+            return False
+        payload = {
+            'command': 'host_key_tap',
+            'key_type': 'vk',
+            'key': int(vk),
+            'source': source,
+        }
+        if not self._send_to_provider(payload):
+            logging.warning("Failed to forward provider key tap for %s (%s)", key, source)
+            return False
+        logging.info("Forwarded provider key tap %s (%s)", key, source)
+        return True
+
+    def _simulate_provider_key_tap(self, key_type: str, key_value, source: str | None = None) -> None:
+        """Simulate a key tap locally using the existing event application helper."""
+        if key_type == 'vk':
+            try:
+                key_value = int(key_value)
+            except (TypeError, ValueError):
+                logging.warning("Invalid virtual key value %s for provider tap", key_value)
+                return
+        logging.info(
+            "Executing provider key tap type=%s value=%s requested by %s",
+            key_type,
+            key_value,
+            source or 'unknown',
+        )
+        press_event = {'type': 'key', 'key_type': key_type, 'key': key_value, 'pressed': True}
+        release_event = {'type': 'key', 'key_type': key_type, 'key': key_value, 'pressed': False}
+        try:
+            self._apply_event_locally(press_event)
+            time.sleep(0.05)
+            self._apply_event_locally(release_event)
+        except Exception as exc:
+            logging.error("Failed to perform provider key tap: %s", exc, exc_info=True)
+
     def _switch_monitor_for_target(self, target: str, *, allow_switch: bool) -> None:
         """Switch the monitor input according to the current control target."""
         if not allow_switch:
@@ -765,6 +813,12 @@ class KVMWorker(QObject):
                         continue
                     if cmd == 'stop_stream':
                         self._stop_input_provider_stream()
+                        continue
+                    if cmd == 'host_key_tap':
+                        key_type = data.get('key_type', 'vk')
+                        key_value = data.get('key')
+                        source = data.get('source')
+                        self._simulate_provider_key_tap(key_type, key_value, source)
                         continue
                     msg_type = data.get('type')
                     if msg_type == 'clipboard_data':
