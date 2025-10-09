@@ -41,3 +41,6 @@ def resource_path(relative_path: str) -> str:
 
 # Program icon path
 ICON_PATH = resource_path("keyboard_mouse_switch_icon.ico")
+# Soros port beállítása a Pico-hoz
+# A Windows rendszer a Pico soros eszközét ezen a porton éri el.
+PICO_SERIAL_PORT = "COM7"
