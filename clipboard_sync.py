@@ -243,6 +243,9 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
     data = item.get("data")
     if data is None:
         return None
+
+    encoding = item.get("encoding") or "dib"
+
     try:
         raw_bytes = _ensure_bytes(data)
     except TypeError:
@@ -257,8 +260,6 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
                 return None
         else:
             return None
-
-    encoding = item.get("encoding") or "dib"
     normalized.update(
         {
             "data": raw_bytes,
