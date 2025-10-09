@@ -1328,6 +1328,25 @@ class KVMWorker(QObject):
                     hello = msgpack.unpackb(payload, raw=False)
                     client_name = hello.get('device_name', client_name)
                     client_role = hello.get('role')
+                    if (
+                        self.settings.get('role') == 'vevo'
+                        and client_role == 'ado'
+                    ):
+                        try:
+                            peer_ip = sock.getpeername()[0]
+                        except Exception:
+                            peer_ip = addr[0] if isinstance(addr, tuple) else None
+                        if (
+                            peer_ip
+                            and peer_ip != self.last_server_ip
+                            and peer_ip != self.local_ip
+                        ):
+                            self.last_server_ip = peer_ip
+                            settings_store = QSettings(ORG_NAME, APP_NAME)
+                            settings_store.setValue('network/last_server_ip', peer_ip)
+                            logging.info(
+                                "Laptop client stored last server IP: %s", peer_ip
+                            )
                 else:
                     client_role = None
             else:
@@ -2105,6 +2124,13 @@ class KVMWorker(QObject):
         while self._running:
             with self.peers_lock:
                 peers = list(self.discovered_peers.values())
+
+            if self.settings.get('role') == 'vevo' and self.last_server_ip:
+                if self.last_server_ip != self.local_ip and not any(
+                    peer.get('ip') == self.last_server_ip for peer in peers
+                ):
+                    peers.append({'ip': self.last_server_ip, 'port': self.settings['port']})
+
             for peer in peers:
                 ip = peer['ip']
                 port = peer['port']
@@ -2114,8 +2140,9 @@ class KVMWorker(QObject):
                         for s in self.client_sockets
                         if s.fileno() != -1
                     )
-                if not already:
-                    self.connect_to_peer(ip, port)
+                if already:
+                    continue
+                self.connect_to_peer(ip, port)
             time.sleep(2)
 
     def connect_to_peer(self, ip, port):
