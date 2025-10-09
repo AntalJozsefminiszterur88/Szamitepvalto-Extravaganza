@@ -879,10 +879,9 @@ class KVMWorker(QObject):
                 logging.warning("Unknown controller target: %s", target)
                 return
             if self.kvm_active and self.current_target == target:
-                self.deactivate_kvm(
-                    switch_monitor=True if target == 'elitedesk' else False,
-                    release_keys=release_keys,
-                    reason="toggle same target",
+                logging.info(
+                    "Toggle request ignored because target %s is already active",
+                    target,
                 )
                 self.pending_activation_target = None
                 return
