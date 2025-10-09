@@ -51,6 +51,7 @@ from config import (
     VK_INSERT,
     VK_END,
 )
+from button_input_manager import ButtonInputManager
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
@@ -71,7 +72,7 @@ class KVMWorker(QObject):
         'resolver_thread', 'resolver_queue', 'service_info', 'peers_lock',
         'clients_lock', 'pending_activation_target', 'provider_stop_event',
         'provider_target', 'current_target', 'current_monitor_input',
-        'monitor_power_on'
+        'monitor_power_on', 'button_manager'
     )
 
     finished = Signal()
@@ -135,6 +136,7 @@ class KVMWorker(QObject):
         self.current_target = 'desktop'
         self.current_monitor_input = None
         self.monitor_power_on = True
+        self.button_manager: Optional[ButtonInputManager] = None
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -951,6 +953,12 @@ class KVMWorker(QObject):
                 listener.stop()
             except:
                 pass
+        if self.button_manager:
+            try:
+                self.button_manager.stop()
+            except Exception:
+                logging.exception("Failed to stop button manager cleanly")
+            self.button_manager = None
         with self.clients_lock:
             for sock in list(self.client_sockets):
                 try:
@@ -1106,72 +1114,10 @@ class KVMWorker(QObject):
 
     def start_main_hotkey_listener(self):
         """Segédmetódus a globális gyorsbillentyű-figyelő indítására."""
-        if self.pynput_listeners:
+        if self.button_manager:
             return
-
-        current_pressed_vk = set()
-        numpad_pressed_vk = set()
-        
-        VK_F13, VK_F14, VK_F15, VK_F16 = 124, 125, 126, 127
-
-        def handle_action(action_name):
-            logging.info(f"!!! Hotkey action triggered: {action_name} !!!")
-            if "desktop" in action_name:
-                self.deactivate_kvm(switch_monitor=True, reason=action_name)
-            elif "laptop" in action_name:
-                self.toggle_client_control('laptop', switch_monitor=False, release_keys=False)
-            elif "elitedesk" in action_name:
-                self.toggle_client_control('elitedesk', switch_monitor=True, release_keys=False)
-
-        def on_press(key):
-            if key == keyboard.Key.f13:
-                logging.info("!!! Pico gomb 1 (F13) észlelve !!!")
-                self.deactivate_kvm(switch_monitor=True, reason="pico F13")
-                return
-            if key == keyboard.Key.f14:
-                logging.info("!!! Pico gomb 2 (F14) észlelve !!!")
-                self.toggle_client_control('laptop', switch_monitor=False)
-                return
-            if key == keyboard.Key.f15:
-                logging.info("!!! Pico gomb 3 (F15) észlelve !!!")
-                self.toggle_client_control('elitedesk', switch_monitor=True)
-                return
-            if key == keyboard.Key.f16:
-                logging.info("!!! Pico gomb 4 (F16) észlelve !!!")
-                self.switch_monitor_input(17)
-                return
-            if key == keyboard.Key.f17:
-                logging.info("!!! F17 gyorsbillentyű érzékelve – monitor váltás HDMI2-re !!!")
-                self.switch_monitor_input(18)
-                return
-            if key == keyboard.Key.f21:
-                logging.info("!!! F21 gyorsbillentyű érzékelve – monitor ki/bekapcsolás !!!")
-                self.toggle_monitor_power()
-                return
-
-            vk = getattr(key, 'vk', None)
-            if vk is None: return
-
-            current_pressed_vk.add(vk)
-            if getattr(key, '_flags', 0) == 0:
-                numpad_pressed_vk.add(vk)
-            
-            is_shift_pressed = VK_LSHIFT in current_pressed_vk or VK_RSHIFT in current_pressed_vk
-            if is_shift_pressed:
-                if VK_NUMPAD0 in current_pressed_vk or (VK_INSERT in current_pressed_vk and VK_INSERT in numpad_pressed_vk): handle_action("desktop")
-                elif VK_NUMPAD1 in current_pressed_vk or (VK_END in current_pressed_vk and VK_END in numpad_pressed_vk): handle_action("laptop")
-                elif VK_NUMPAD2 in current_pressed_vk or (VK_DOWN in current_pressed_vk and VK_DOWN in numpad_pressed_vk): handle_action("elitedesk")
-
-        def on_release(key):
-            vk = getattr(key, 'vk', None)
-            if vk is not None:
-                current_pressed_vk.discard(vk)
-                numpad_pressed_vk.discard(vk)
-
-        hotkey_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-        self.pynput_listeners.append(hotkey_listener)
-        hotkey_listener.start()
-        logging.info("Pynput figyelő elindítva (kiterjesztve F13-F17 billentyűkkel).")
+        self.button_manager = ButtonInputManager(self)
+        self.button_manager.start()
         
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
@@ -1879,7 +1825,7 @@ class KVMWorker(QObject):
             try:
                 # --- ÚJ, FONTOS RÉSZ: VEZÉRLÉS FIGYELÉSE STREAMING ALATT ---
                 # A billentyű lenyomásakor (p=True) ellenőrizzük a vezérlőgombokat.
-                if p: 
+                if p:
                     if k == keyboard.Key.f13:
                         logging.info("!!! Visszaváltás a hosztra (Pico F13) észlelve a streaming alatt !!!")
                         self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
@@ -1891,6 +1837,9 @@ class KVMWorker(QObject):
                     if k == keyboard.Key.f15:
                         logging.info("!!! Váltás EliteDeskre (Pico F15) észlelve a streaming alatt !!!")
                         self.toggle_client_control('elitedesk', switch_monitor=True)
+                        return
+                    if k in (keyboard.Key.f18, keyboard.Key.f19, keyboard.Key.f20, keyboard.Key.f22):
+                        logging.info("Audio/mute hotkey %s captured locally during streaming", k)
                         return
 
                 # Itt jön a már meglévő logika a Shift+Numpad0 figyelésére is.
