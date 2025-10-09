@@ -333,10 +333,10 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
         try:
             if _win32_open_clipboard():
                 try:
-                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
-                        data = win32clipboard.GetClipboardData(win32con.CF_DIB)
+                    if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
+                        data = win32clipboard.GetClipboardData(CF_PNG)
                         item = normalize_clipboard_item(
-                            {"format": "image", "encoding": "dib", "data": data}
+                            {"format": "image", "encoding": "png", "data": data}
                         )
                         if item:
                             logging.debug(
@@ -344,10 +344,10 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
                                 _describe_clipboard_item(item),
                             )
                             return item
-                    if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
-                        data = win32clipboard.GetClipboardData(CF_PNG)
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                        data = win32clipboard.GetClipboardData(win32con.CF_DIB)
                         item = normalize_clipboard_item(
-                            {"format": "image", "encoding": "png", "data": data}
+                            {"format": "image", "encoding": "dib", "data": data}
                         )
                         if item:
                             logging.debug(
