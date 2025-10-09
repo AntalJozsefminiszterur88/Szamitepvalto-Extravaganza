@@ -7,10 +7,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
+import os
+import shutil
 import struct
+import tempfile
 import time
-from typing import Any, Dict, Optional
+import zipfile
+from typing import Any, Dict, Iterable, Optional, Sequence
 
 import pyperclip
 
@@ -32,6 +37,8 @@ ClipboardItem = Dict[str, Any]
 PyperclipException = getattr(pyperclip, "PyperclipException", Exception)
 
 CF_PNG = None
+MAX_FILE_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB – plenty for large transfers
+_LAST_EXTRACTED_DIR: Optional[str] = None
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     try:
         CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
@@ -40,6 +47,14 @@ if win32clipboard is not None:  # pragma: no cover - Windows specifikus
 
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     _KERNEL32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+    class DROPFILES(ctypes.Structure):  # type: ignore[misc]
+        _fields_ = [
+            ("pFiles", wintypes.DWORD),
+            ("pt", wintypes.POINT),
+            ("fNC", wintypes.BOOL),
+            ("fWide", wintypes.BOOL),
+        ]
 
     _KERNEL32.GlobalLock.argtypes = [wintypes.HGLOBAL]  # type: ignore[attr-defined]
     _KERNEL32.GlobalLock.restype = wintypes.LPVOID  # type: ignore[attr-defined]
@@ -53,6 +68,19 @@ if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     _KERNEL32.GlobalFree.restype = wintypes.HGLOBAL  # type: ignore[attr-defined]
 
     GMEM_MOVEABLE = 0x0002
+
+
+def _format_bytes(num: Optional[int]) -> str:
+    if num is None:
+        return "?"
+    size = float(num)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
 
 
 def _describe_clipboard_item(item: ClipboardItem) -> str:
@@ -77,6 +105,21 @@ def _describe_clipboard_item(item: ClipboardItem) -> str:
             digest = hashlib.sha256(bytes(data)).hexdigest()[:12]
             return f"image(encoding={encoding}, size={size}, sha256={digest})"
         return f"image(encoding={encoding}, type={type(data)!r})"
+
+    if fmt == "files":
+        count = item.get("file_count") or len(item.get("entries") or [])
+        total_size = _format_bytes(item.get("total_size"))
+        payload_size = item.get("size")
+        digest = item.get("digest", "")
+        digest_preview = digest[:12] if isinstance(digest, str) else ""
+        return (
+            "files(count={count}, total={total}, payload={payload}, sha256={digest})".format(
+                count=count,
+                total=total_size,
+                payload=_format_bytes(payload_size) if payload_size is not None else "?",
+                digest=digest_preview,
+            )
+        )
 
     return f"format={fmt} keys={sorted(item.keys())}"
 
@@ -211,6 +254,209 @@ def _ensure_bytes(data: Any) -> bytes:
     raise TypeError(f"Unsupported clipboard payload type: {type(data)!r}")
 
 
+def _cleanup_last_temp_dir() -> None:
+    global _LAST_EXTRACTED_DIR
+    if _LAST_EXTRACTED_DIR and os.path.isdir(_LAST_EXTRACTED_DIR):
+        shutil.rmtree(_LAST_EXTRACTED_DIR, ignore_errors=True)
+    _LAST_EXTRACTED_DIR = None
+
+
+def _coerce_path_list(data: Any) -> Optional[list[str]]:
+    if data is None:
+        return None
+    if isinstance(data, (str, os.PathLike)):
+        return [os.fspath(data)]
+    if isinstance(data, Iterable):
+        paths: list[str] = []
+        for entry in data:
+            if entry is None:
+                continue
+            try:
+                paths.append(os.fspath(entry))
+            except TypeError:
+                logging.debug("Ignoring non-path entry in clipboard file list: %r", entry)
+                continue
+        return paths
+    logging.debug("Unable to coerce clipboard files from %r", data)
+    return None
+
+
+def _pack_clipboard_files(paths: Sequence[str]) -> Optional[tuple[bytes, list[dict], int, int]]:
+    if not paths:
+        return None
+
+    archive_buffer = io.BytesIO()
+    entries: list[dict] = []
+    file_count = 0
+    total_size = 0
+    used_root_names: set[str] = set()
+
+    def _unique_root(name: str) -> str:
+        base = name or "item"
+        candidate = base
+        counter = 2
+        while candidate in used_root_names:
+            candidate = f"{base} ({counter})"
+            counter += 1
+        used_root_names.add(candidate)
+        return candidate
+
+    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for original in paths:
+            if not original:
+                continue
+            try:
+                normalized_path = os.path.abspath(original)
+            except Exception:
+                logging.debug("Failed to normalise clipboard path: %r", original)
+                continue
+
+            if not os.path.exists(normalized_path):
+                logging.debug("Clipboard path does not exist anymore: %s", normalized_path)
+                continue
+
+            base_name = os.path.basename(normalized_path.rstrip("/\\")) or os.path.basename(normalized_path)
+            root_name = _unique_root(base_name)
+
+            if os.path.isdir(normalized_path):
+                entries.append({"name": root_name, "is_dir": True})
+                for root, _, files in os.walk(normalized_path):
+                    rel_dir = os.path.relpath(root, normalized_path)
+                    archive_root = root_name if rel_dir in (".", os.curdir) else os.path.join(root_name, rel_dir).replace("\\", "/")
+                    for filename in files:
+                        full_path = os.path.join(root, filename)
+                        arcname = os.path.join(archive_root, filename).replace("\\", "/")
+                        try:
+                            archive.write(full_path, arcname=arcname)
+                            file_size = os.path.getsize(full_path)
+                            total_size += int(file_size)
+                            file_count += 1
+                        except Exception as exc:
+                            logging.debug("Failed to add %s to clipboard archive: %s", full_path, exc)
+            else:
+                entries.append({"name": root_name, "is_dir": False})
+                try:
+                    archive.write(normalized_path, arcname=root_name)
+                    file_size = os.path.getsize(normalized_path)
+                    total_size += int(file_size)
+                    file_count += 1
+                except Exception as exc:
+                    logging.debug("Failed to add %s to clipboard archive: %s", normalized_path, exc)
+
+    if file_count == 0:
+        logging.debug("Clipboard file packaging yielded no files – skipping.")
+        return None
+
+    if total_size > MAX_FILE_PAYLOAD_BYTES:
+        logging.warning(
+            "Clipboard file payload too large (%.2f MiB > %.2f MiB). Ignoring.",
+            total_size / (1024 * 1024),
+            MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
+        )
+        return None
+
+    payload = archive_buffer.getvalue()
+    if len(payload) > MAX_FILE_PAYLOAD_BYTES:
+        logging.warning(
+            "Clipboard archive is too large to share (%.2f MiB > %.2f MiB).",
+            len(payload) / (1024 * 1024),
+            MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
+        )
+        return None
+    return payload, entries, file_count, total_size
+
+
+def _win32_build_dropfiles_payload(paths: Sequence[str]) -> bytes:
+    if win32clipboard is None:
+        raise RuntimeError("File clipboard operations require Windows APIs")
+    if not paths:
+        raise ValueError("No paths supplied for file clipboard payload")
+
+    normalised = [os.path.abspath(p) for p in paths]
+    encoded = ("\0".join(normalised) + "\0\0").encode("utf-16-le")
+
+    drop = DROPFILES()
+    drop.pFiles = ctypes.sizeof(DROPFILES)
+    drop.pt.x = 0  # type: ignore[attr-defined]
+    drop.pt.y = 0  # type: ignore[attr-defined]
+    drop.fNC = 0
+    drop.fWide = 1
+    header = ctypes.string_at(ctypes.byref(drop), ctypes.sizeof(DROPFILES))  # type: ignore[attr-defined]
+    return header + encoded
+
+
+def _win32_set_file_clipboard(data: bytes, entries: Sequence[Dict[str, Any]]) -> None:
+    if win32clipboard is None:
+        return
+    if not data:
+        logging.debug("Ignoring empty file clipboard payload")
+        return
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            _cleanup_last_temp_dir()
+            temp_dir = tempfile.mkdtemp(prefix="clipboard_files_")
+
+            try:
+                archive.extractall(temp_dir)
+            except Exception as exc:
+                logging.error("Failed to extract clipboard archive: %s", exc)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return
+
+            targets: list[str] = []
+            if entries:
+                for entry in entries:
+                    name = entry.get("name") if isinstance(entry, dict) else None
+                    if not name:
+                        continue
+                    candidate = os.path.join(temp_dir, name)
+                    if os.path.exists(candidate):
+                        targets.append(candidate)
+            if not targets:
+                # fall back to top-level archive members
+                roots = {
+                    item.split("/", 1)[0]
+                    for item in archive.namelist()
+                    if item
+                }
+                for name in roots:
+                    candidate = os.path.join(temp_dir, name)
+                    if os.path.exists(candidate):
+                        targets.append(candidate)
+
+            if not targets:
+                logging.error("Could not determine extracted clipboard targets; aborting.")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return
+
+            try:
+                payload = _win32_build_dropfiles_payload(targets)
+            except Exception as exc:
+                logging.error("Failed to build DROPFILES payload: %s", exc)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return
+
+            try:
+                _win32_set_clipboard_bytes(win32con.CF_HDROP, payload)
+                logging.info(
+                    "Set clipboard file list (%d item%s) from shared data.",
+                    len(targets),
+                    "s" if len(targets) != 1 else "",
+                )
+            except Exception as exc:
+                logging.error("Failed to apply file clipboard payload: %s", exc)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return
+
+    except zipfile.BadZipFile:
+        logging.error("Received invalid clipboard archive; refusing to apply.")
+        return
+
+    global _LAST_EXTRACTED_DIR
+    _LAST_EXTRACTED_DIR = temp_dir
+
+
 def _extract_image_metadata(item: ClipboardItem, raw: bytes) -> None:
     encoding = item.get("encoding")
     if encoding == "dib":
@@ -239,7 +485,7 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
         return None
 
     fmt = item.get("format")
-    if fmt not in {"text", "image"}:
+    if fmt not in {"text", "image", "files"}:
         return None
 
     normalized: ClipboardItem = {"format": fmt}
@@ -265,36 +511,93 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
         )
         return normalized
 
-    # image
-    data = item.get("data")
-    if data is None:
-        return None
-
-    encoding = item.get("encoding") or "dib"
-
-    try:
-        raw_bytes = _ensure_bytes(data)
-    except TypeError:
-        if win32clipboard is not None:
-            fmt_hint = None
-            if encoding == "dib" and win32con is not None:
-                fmt_hint = getattr(win32con, "CF_DIB", None)
-            elif encoding == "png":
-                fmt_hint = CF_PNG
-            raw_bytes = _win32_clipboard_object_to_bytes(data, fmt_hint)
-            if raw_bytes is None:
-                return None
-        else:
+    if fmt == "image":
+        data = item.get("data")
+        if data is None:
             return None
+
+        encoding = item.get("encoding") or "dib"
+
+        try:
+            raw_bytes = _ensure_bytes(data)
+        except TypeError:
+            if win32clipboard is not None:
+                fmt_hint = None
+                if encoding == "dib" and win32con is not None:
+                    fmt_hint = getattr(win32con, "CF_DIB", None)
+                elif encoding == "png":
+                    fmt_hint = CF_PNG
+                raw_bytes = _win32_clipboard_object_to_bytes(data, fmt_hint)
+                if raw_bytes is None:
+                    return None
+            else:
+                return None
+        normalized.update(
+            {
+                "data": raw_bytes,
+                "encoding": encoding,
+                "size": len(raw_bytes),
+                "digest": _compute_digest("image", encoding, raw_bytes),
+            }
+        )
+        _extract_image_metadata(normalized, raw_bytes)
+        return normalized
+
+    # files
+    data = item.get("data")
+    entries_data = item.get("entries")
+    file_count = item.get("file_count")
+    total_size = item.get("total_size")
+
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        payload = _ensure_bytes(data)
+        encoding = item.get("encoding") or "zip"
+    else:
+        paths = _coerce_path_list(data)
+        if not paths:
+            return None
+        packed = _pack_clipboard_files(paths)
+        if not packed:
+            return None
+        payload, entries_data, file_count, total_size = packed
+        encoding = "zip"
+
     normalized.update(
         {
-            "data": raw_bytes,
+            "data": payload,
             "encoding": encoding,
-            "size": len(raw_bytes),
-            "digest": _compute_digest("image", encoding, raw_bytes),
+            "size": len(payload),
+            "digest": _compute_digest("files", encoding, payload),
         }
     )
-    _extract_image_metadata(normalized, raw_bytes)
+
+    entries_list: list[dict] = []
+    if isinstance(entries_data, Iterable):
+        for entry in entries_data:
+            if isinstance(entry, dict) and entry.get("name"):
+                entries_list.append(
+                    {
+                        "name": str(entry.get("name")),
+                        "is_dir": bool(entry.get("is_dir", False)),
+                    }
+                )
+    if entries_list:
+        normalized["entries"] = entries_list
+
+    if file_count is not None:
+        try:
+            normalized["file_count"] = int(file_count)
+        except (TypeError, ValueError):
+            pass
+    elif entries_list:
+        normalized["file_count"] = len(entries_list)
+
+    if total_size is not None:
+        try:
+            normalized["total_size"] = int(total_size)
+        except (TypeError, ValueError):
+            pass
+
     return normalized
 
 
@@ -355,6 +658,22 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
                                 _describe_clipboard_item(item),
                             )
                             return item
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+                        try:
+                            paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+                        except Exception as exc:  # pragma: no cover - unexpected
+                            logging.debug("Failed to read CF_HDROP payload: %s", exc)
+                        else:
+                            file_list = list(paths) if paths else []
+                            item = normalize_clipboard_item(
+                                {"format": "files", "data": file_list}
+                            )
+                            if item:
+                                logging.debug(
+                                    "Read clipboard item via win32 API: %s",
+                                    _describe_clipboard_item(item),
+                                )
+                                return item
                     if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
                         text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
                         item = normalize_clipboard_item({"format": "text", "data": text})
@@ -436,6 +755,16 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                             raise ValueError(
                                 f"Unsupported image encoding for clipboard: {encoding}"
                             )
+                    elif fmt == "files":
+                        entries = normalized.get("entries") or []
+                        _win32_set_file_clipboard(normalized["data"], entries)
+                        logging.info(
+                            "Set clipboard files (count=%s, attempt=%d)",
+                            normalized.get("file_count")
+                            or len(entries)
+                            or "?",
+                            attempt + 1,
+                        )
                     else:  # pragma: no cover - nem érhető el
                         raise ValueError(f"Unsupported clipboard format: {fmt}")
                     return
@@ -490,6 +819,7 @@ def clear_clipboard() -> None:
                     _win32_close_clipboard()
         except Exception as exc:
             logging.error("Failed to clear clipboard via win32 API: %s", exc)
+        _cleanup_last_temp_dir()
         return
 
     try:

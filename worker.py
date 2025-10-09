@@ -241,6 +241,12 @@ class KVMWorker(QObject):
             payload['height'] = item['height']
         if 'bits_per_pixel' in item:
             payload['bits_per_pixel'] = item['bits_per_pixel']
+        if 'entries' in item:
+            payload['entries'] = item['entries']
+        if 'file_count' in item:
+            payload['file_count'] = item['file_count']
+        if 'total_size' in item:
+            payload['total_size'] = item['total_size']
         return payload
 
     def _apply_clipboard_clear(self) -> None:

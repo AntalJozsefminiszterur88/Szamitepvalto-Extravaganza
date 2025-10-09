@@ -195,9 +195,15 @@ The script relies on the `pyperclip` library for cross-platform clipboard access
 Install it with `pip install pyperclip`. On Linux, `pyperclip` also depends on
 either `xclip` or `xsel` (or `wl-clipboard` for Wayland) being available.
 Without these the script may not be able to read or write the clipboard.
-Only plain text clipboard contents are synchronized between computers; other
-clipboard formats are ignored to avoid interfering with local copy-paste
-operations.
+
+On Windows the helper taps into the native Win32 clipboard so that full fidelity
+image data (including PNG, JPEG, GIF and large 10+ MiB screenshots) and file
+collections can be mirrored as well. File selections are packaged into a
+temporary ZIP archive, streamed across the network and unpacked on the receiver
+into a throwaway directory before being re-published as a standard
+`CF_HDROP` payload. This allows copying complex document sets exactly as if they
+originated locally, while still keeping the text-based pyperclip fallback for
+other platforms.
 
 ## Formatting
 
