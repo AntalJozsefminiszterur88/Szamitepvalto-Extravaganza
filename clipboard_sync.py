@@ -55,6 +55,32 @@ if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     GMEM_MOVEABLE = 0x0002
 
 
+def _describe_clipboard_item(item: ClipboardItem) -> str:
+    """Build a human readable description for logging purposes."""
+
+    fmt = item.get("format", "unknown")
+
+    if fmt == "text":
+        text = item.get("data", "")
+        if isinstance(text, str):
+            preview = text.replace("\n", "\\n")
+            if len(preview) > 40:
+                preview = f"{preview[:37]}..."
+            return f"text(len={len(text)} preview='{preview}')"
+        return f"text(type={type(text)!r})"
+
+    if fmt == "image":
+        encoding = item.get("encoding", "unknown")
+        data = item.get("data", b"")
+        if isinstance(data, (bytes, bytearray)):
+            size = len(data)
+            digest = hashlib.sha256(bytes(data)).hexdigest()[:12]
+            return f"image(encoding={encoding}, size={size}, sha256={digest})"
+        return f"image(encoding={encoding}, type={type(data)!r})"
+
+    return f"format={fmt} keys={sorted(item.keys())}"
+
+
 def _win32_clipboard_object_to_bytes(data: Any, fmt_hint: Optional[int] = None) -> Optional[bytes]:
     if win32clipboard is None:  # pragma: no cover - non-Windows
         return None
@@ -313,6 +339,10 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
                             {"format": "image", "encoding": "dib", "data": data}
                         )
                         if item:
+                            logging.debug(
+                                "Read clipboard item via win32 API: %s",
+                                _describe_clipboard_item(item),
+                            )
                             return item
                     if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
                         data = win32clipboard.GetClipboardData(CF_PNG)
@@ -320,11 +350,19 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
                             {"format": "image", "encoding": "png", "data": data}
                         )
                         if item:
+                            logging.debug(
+                                "Read clipboard item via win32 API: %s",
+                                _describe_clipboard_item(item),
+                            )
                             return item
                     if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
                         text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
                         item = normalize_clipboard_item({"format": "text", "data": text})
                         if item:
+                            logging.debug(
+                                "Read clipboard item via win32 API: %s",
+                                _describe_clipboard_item(item),
+                            )
                             return item
                 finally:
                     _win32_close_clipboard()
@@ -343,7 +381,13 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
         logging.error("Failed to access clipboard via pyperclip: %s", e)
         return None
     if content:
-        return normalize_clipboard_item({"format": "text", "data": str(content)})
+        item = normalize_clipboard_item({"format": "text", "data": str(content)})
+        if item:
+            logging.debug(
+                "Read clipboard item via pyperclip: %s",
+                _describe_clipboard_item(item),
+            )
+        return item
     return None
 
 
@@ -352,9 +396,14 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
 
     normalized = normalize_clipboard_item(item)
     if not normalized:
+        logging.debug("Ignoring clipboard write request with invalid payload: %s", item)
         return
 
     fmt = normalized["format"]
+
+    logging.debug(
+        "Requested clipboard write: %s", _describe_clipboard_item(normalized)
+    )
 
     if win32clipboard is not None:  # pragma: no cover - Windows
         for attempt in range(retries):
@@ -373,8 +422,16 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                             _win32_set_clipboard_bytes(
                                 win32con.CF_DIB, normalized["data"]
                             )
+                            logging.info(
+                                "Set clipboard image (encoding=dib, attempt=%d)",
+                                attempt + 1,
+                            )
                         elif encoding == "png" and CF_PNG:
                             _win32_set_clipboard_bytes(CF_PNG, normalized["data"])
+                            logging.info(
+                                "Set clipboard image (encoding=png, attempt=%d)",
+                                attempt + 1,
+                            )
                         else:
                             raise ValueError(
                                 f"Unsupported image encoding for clipboard: {encoding}"
@@ -398,12 +455,20 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
 
     # Fallback – csak szöveg támogatott
     if fmt != "text":
-        logging.debug("Non-text clipboard item ignored on non-Windows platform")
+        logging.info(
+            "Non-text clipboard item ignored on non-Windows platform: %s",
+            _describe_clipboard_item(normalized),
+        )
         return
 
     for attempt in range(retries):
         try:
             pyperclip.copy(normalized["data"])
+            logging.debug(
+                "Set clipboard text via pyperclip on attempt %d: %s",
+                attempt + 1,
+                _describe_clipboard_item(normalized),
+            )
             return
         except PyperclipException as exc:
             logging.warning(
