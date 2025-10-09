@@ -3,8 +3,13 @@
 This script uses PyInstaller to package ``main.py`` into a single ``.exe``
 without showing a console window on startup.
 """
+from __future__ import annotations
+
+import os
 import subprocess
 import sys
+from pathlib import Path
+import importlib.util
 
 
 def ensure_pyinstaller():
@@ -22,6 +27,7 @@ def build():
         "win32con",
         "win32api",
         "pywintypes",
+        "pythoncom",
     ]
 
     cmd = [
@@ -49,7 +55,37 @@ def build():
         "--collect-binaries",
         "pywin32",
     ])
+
+    cmd.extend(_collect_pywin32_system32_data())
     subprocess.check_call(cmd)
+
+
+def _collect_pywin32_system32_data() -> list[str]:
+    """Collect the ``pywin32_system32`` directory if pywin32 is available.
+
+    When the project is frozen with PyInstaller in ``--onefile`` mode the
+    ``pywintypes`` and ``pythoncom`` DLLs must be explicitly included.
+    Otherwise importing :mod:`win32clipboard` succeeds, but clipboard
+    operations that rely on these DLLs fail at runtime, which manifests as
+    empty images on the clipboard when the packaged executable is used.
+    """
+
+    try:
+        spec = importlib.util.find_spec("pywintypes")
+    except ImportError:
+        return []
+
+    if not spec or not spec.origin:
+        return []
+
+    system32_dir = Path(spec.origin).resolve().parent
+    if not system32_dir.exists():
+        return []
+
+    return [
+        "--add-data",
+        f"{system32_dir}{os.pathsep}pywin32_system32",
+    ]
 
 
 if __name__ == "__main__":
