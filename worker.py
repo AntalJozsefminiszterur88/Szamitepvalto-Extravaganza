@@ -8,12 +8,16 @@ import logging
 import tkinter
 import queue
 import struct
+from datetime import datetime
 from typing import Any, Optional
+import io
 import msgpack
 import random
 import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
 import math
+import shutil
+import zipfile
 
 if os.name == 'nt':
     import ctypes
@@ -37,7 +41,7 @@ from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
 from monitorcontrol import get_monitors
 from monitorcontrol.monitorcontrol import PowerMode
-from PySide6.QtCore import QObject, Signal, QSettings
+from PySide6.QtCore import QObject, Signal, QSettings, QStandardPaths
 import ipaddress
 from config import (
     SERVICE_TYPE,
@@ -63,6 +67,8 @@ from button_input_manager import ButtonInputManager
 STREAM_LOOP_DELAY = 0.05
 # Maximum number of events queued for sending before old ones are dropped
 SEND_QUEUE_MAXSIZE = 200
+CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
+CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
@@ -79,7 +85,10 @@ class KVMWorker(QObject):
         'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
         'pending_activation_target', 'provider_stop_event', 'provider_target',
         'current_target', 'current_monitor_input', 'monitor_power_on',
-        'button_manager'
+        'button_manager',
+        'clipboard_storage_dir',
+        '_clipboard_cleanup_marker',
+        '_clipboard_last_cleanup'
     )
 
     finished = Signal()
@@ -147,6 +156,12 @@ class KVMWorker(QObject):
         self.current_monitor_input = None
         self.monitor_power_on = True
         self.button_manager: Optional[ButtonInputManager] = None
+        self.clipboard_storage_dir: Optional[str] = None
+        self._clipboard_cleanup_marker: Optional[str] = None
+        self._clipboard_last_cleanup: float = 0.0
+
+        if self.settings.get('role') == 'ado':
+            self._initialize_clipboard_storage()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -202,6 +217,266 @@ class KVMWorker(QObject):
     # ------------------------------------------------------------------
     # Clipboard utilities
     # ------------------------------------------------------------------
+    def _initialize_clipboard_storage(self) -> None:
+        documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+        if not documents_dir:
+            documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
+            logging.debug(
+                "Qt did not return a Documents path; using fallback %s for clipboard storage.",
+                documents_dir,
+            )
+
+        base_dir = os.path.join(documents_dir, ORG_NAME, APP_NAME, CLIPBOARD_STORAGE_DIRNAME)
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+        except Exception as exc:
+            logging.error(
+                "Unable to create shared clipboard directory %s: %s",
+                base_dir,
+                exc,
+                exc_info=True,
+            )
+            return
+
+        self.clipboard_storage_dir = base_dir
+        self._clipboard_cleanup_marker = os.path.join(base_dir, ".last_cleanup")
+        logging.info("Shared clipboard storage initialised at %s", base_dir)
+        self._ensure_clipboard_storage_cleanup()
+
+    def _ensure_clipboard_storage_cleanup(self, *, force: bool = False) -> None:
+        directory = self.clipboard_storage_dir
+        marker = self._clipboard_cleanup_marker
+        if not directory or not marker:
+            return
+
+        now = time.time()
+        last_cleanup = self._clipboard_last_cleanup or 0.0
+
+        marker_timestamp: Optional[float] = None
+        if os.path.exists(marker):
+            try:
+                with open(marker, "r", encoding="utf-8") as handle:
+                    content = handle.read().strip()
+                if content:
+                    marker_timestamp = float(content)
+            except Exception as exc:
+                logging.debug(
+                    "Failed to read clipboard cleanup marker %s: %s",
+                    marker,
+                    exc,
+                )
+                marker_timestamp = None
+            if marker_timestamp is None:
+                try:
+                    marker_timestamp = os.path.getmtime(marker)
+                except OSError:
+                    marker_timestamp = None
+
+        if marker_timestamp:
+            last_cleanup = marker_timestamp
+            self._clipboard_last_cleanup = last_cleanup
+
+        if not force and last_cleanup and now - last_cleanup < CLIPBOARD_CLEANUP_INTERVAL_SECONDS:
+            return
+
+        logging.info(
+            "Performing daily cleanup of shared clipboard storage at %s",
+            directory,
+        )
+
+        try:
+            entries = os.listdir(directory)
+        except Exception as exc:
+            logging.warning(
+                "Failed to list clipboard storage directory %s: %s",
+                directory,
+                exc,
+            )
+            entries = []
+
+        for entry in entries:
+            path = os.path.join(directory, entry)
+            try:
+                if marker and os.path.abspath(path) == os.path.abspath(marker):
+                    continue
+            except OSError:
+                # Fallback to simple comparison if abspath fails for any reason
+                if marker and path == marker:
+                    continue
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=False)
+                else:
+                    os.remove(path)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                logging.warning(
+                    "Failed to remove clipboard artifact %s: %s",
+                    path,
+                    exc,
+                )
+
+        try:
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write(str(now))
+            os.utime(marker, (now, now))
+        except Exception as exc:
+            logging.warning(
+                "Failed to update clipboard cleanup marker %s: %s",
+                marker,
+                exc,
+            )
+        else:
+            self._clipboard_last_cleanup = now
+
+    def _build_unique_storage_name(
+        self, base_name: str, *, extension: Optional[str] = None
+    ) -> str:
+        directory = self.clipboard_storage_dir
+        if not directory:
+            return base_name
+
+        safe_base = base_name.replace(os.sep, "_")
+        if os.altsep:
+            safe_base = safe_base.replace(os.altsep, "_")
+        candidate = safe_base
+        counter = 1
+
+        def _target(name: str) -> str:
+            if extension:
+                return os.path.join(directory, f"{name}{extension}")
+            return os.path.join(directory, name)
+
+        while os.path.exists(_target(candidate)):
+            counter += 1
+            candidate = f"{safe_base}_{counter:02d}"
+
+        return candidate
+
+    def _persist_clipboard_item(self, item: dict) -> None:
+        if self.settings.get('role') != 'ado':
+            return
+
+        directory = self.clipboard_storage_dir
+        if not directory:
+            logging.debug("Clipboard storage directory is not initialised; skipping persistence.")
+            return
+
+        fmt = item.get('format')
+        if fmt not in {'image', 'files'}:
+            return
+
+        raw_data = item.get('data')
+        if isinstance(raw_data, bytes):
+            payload = raw_data
+        elif isinstance(raw_data, bytearray):
+            payload = bytes(raw_data)
+        elif isinstance(raw_data, memoryview):
+            payload = raw_data.tobytes()
+        else:
+            logging.debug(
+                "Clipboard item in format %s does not provide raw bytes; skipping persistence.",
+                fmt,
+            )
+            return
+
+        self._ensure_clipboard_storage_cleanup()
+
+        digest_fragment = str(item.get('digest') or 'nohash')[:12]
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        base_name = f"{timestamp}_{fmt}_{digest_fragment}"
+
+        if fmt == 'image':
+            encoding = str(item.get('encoding') or 'dib').lower()
+            extension = '.png' if encoding == 'png' else '.dib'
+            unique_name = self._build_unique_storage_name(base_name, extension=extension)
+            target_path = os.path.join(directory, f"{unique_name}{extension}")
+            try:
+                with open(target_path, 'wb') as handle:
+                    handle.write(payload)
+            except Exception as exc:
+                logging.error(
+                    "Failed to persist clipboard image to %s: %s",
+                    target_path,
+                    exc,
+                    exc_info=True,
+                )
+                return
+
+            logging.info(
+                "Clipboard image saved to %s (%d bytes, encoding=%s).",
+                target_path,
+                len(payload),
+                encoding,
+            )
+            return
+
+        # fmt == 'files'
+        unique_name = self._build_unique_storage_name(base_name)
+        target_dir = os.path.join(directory, unique_name)
+        try:
+            os.makedirs(target_dir, exist_ok=False)
+        except FileExistsError:
+            logging.debug(
+                "Clipboard storage target %s already exists; generating a new name.",
+                target_dir,
+            )
+            unique_name = self._build_unique_storage_name(f"{base_name}_extra")
+            target_dir = os.path.join(directory, unique_name)
+            try:
+                os.makedirs(target_dir, exist_ok=False)
+            except FileExistsError:
+                logging.error(
+                    "Unable to reserve clipboard storage directory %s; aborting persistence.",
+                    target_dir,
+                )
+                return
+        except Exception as exc:
+            logging.error(
+                "Failed to create clipboard storage directory %s: %s",
+                target_dir,
+                exc,
+                exc_info=True,
+            )
+            return
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                archive.extractall(target_dir)
+        except zipfile.BadZipFile as exc:
+            logging.error(
+                "Clipboard file payload is not a valid archive: %s",
+                exc,
+            )
+            shutil.rmtree(target_dir, ignore_errors=True)
+            return
+        except Exception as exc:
+            logging.error(
+                "Failed to unpack clipboard files into %s: %s",
+                target_dir,
+                exc,
+                exc_info=True,
+            )
+            shutil.rmtree(target_dir, ignore_errors=True)
+            return
+
+        file_count = item.get('file_count')
+        if not file_count and item.get('entries'):
+            file_count = len(item['entries'])
+        try:
+            file_count_int = int(file_count) if file_count is not None else None
+        except (TypeError, ValueError):
+            file_count_int = None
+
+        logging.info(
+            "Clipboard files saved under %s (%s item%s, %d bytes payload).",
+            target_dir,
+            file_count_int if file_count_int is not None else 'unknown',
+            '' if file_count_int == 1 else 's',
+            len(payload),
+        )
+
     def _remember_last_clipboard(self, item: Optional[dict]) -> None:
         self.last_clipboard_item = item.copy() if item else None
 
@@ -220,6 +495,15 @@ class KVMWorker(QObject):
         stored['timestamp'] = float(timestamp if timestamp is not None else time.time())
         with self.clipboard_lock:
             self.shared_clipboard_item = stored
+        if self.settings.get('role') == 'ado':
+            try:
+                self._persist_clipboard_item(stored)
+            except Exception as exc:
+                logging.error(
+                    "Failed to persist clipboard payload locally: %s",
+                    exc,
+                    exc_info=True,
+                )
         return stored
 
     def _build_clipboard_payload(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
