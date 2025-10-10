@@ -88,7 +88,8 @@ class KVMWorker(QObject):
         'button_manager',
         'clipboard_storage_dir',
         '_clipboard_cleanup_marker',
-        '_clipboard_last_cleanup'
+        '_clipboard_last_cleanup',
+        '_clipboard_last_persisted_digest'
     )
 
     finished = Signal()
@@ -159,6 +160,7 @@ class KVMWorker(QObject):
         self.clipboard_storage_dir: Optional[str] = None
         self._clipboard_cleanup_marker: Optional[str] = None
         self._clipboard_last_cleanup: float = 0.0
+        self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -367,6 +369,18 @@ class KVMWorker(QObject):
         if fmt not in {'image', 'files'}:
             return
 
+        digest = item.get('digest')
+        key: Optional[tuple[str, str]] = None
+        if digest:
+            key = (fmt, str(digest))
+            if key == self._clipboard_last_persisted_digest:
+                logging.debug(
+                    "Skipping clipboard persistence for duplicate %s payload (digest=%s).",
+                    fmt,
+                    digest,
+                )
+                return
+
         raw_data = item.get('data')
         if isinstance(raw_data, bytes):
             payload = raw_data
@@ -410,6 +424,8 @@ class KVMWorker(QObject):
                 len(payload),
                 encoding,
             )
+            if key:
+                self._clipboard_last_persisted_digest = key
             return
 
         # fmt == 'files'
@@ -476,6 +492,8 @@ class KVMWorker(QObject):
             '' if file_count_int == 1 else 's',
             len(payload),
         )
+        if key:
+            self._clipboard_last_persisted_digest = key
 
     def _remember_last_clipboard(self, item: Optional[dict]) -> None:
         self.last_clipboard_item = item.copy() if item else None
