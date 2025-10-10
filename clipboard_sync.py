@@ -238,6 +238,34 @@ def _compute_digest(fmt: str, encoding: Optional[str], raw: bytes) -> str:
     return hashlib.sha256(base).hexdigest()
 
 
+def _compute_file_payload_digest(payload: bytes) -> str:
+    """Build a stable digest for a ZIP payload representing shared files."""
+
+    # The raw ZIP bytes can legitimately change between reads because certain
+    # metadata (for example internal timestamps) may be regenerated.  To ensure
+    # we only persist genuinely new clipboard payloads, derive the digest from
+    # the logical file contents instead of the container bytes.
+    hasher = hashlib.sha256()
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
+        for info in sorted(archive.infolist(), key=lambda entry: entry.filename):
+            # Normalise path separators so the hash is platform independent.
+            name = info.filename.replace("\\", "/")
+            if info.is_dir():
+                hasher.update(b"D\0")
+                hasher.update(name.encode("utf-8"))
+                hasher.update(b"\0")
+                continue
+
+            hasher.update(b"F\0")
+            hasher.update(name.encode("utf-8"))
+            hasher.update(b"\0")
+            with archive.open(info, "r") as source:
+                for chunk in iter(lambda: source.read(65536), b""):
+                    hasher.update(chunk)
+
+    return hasher.hexdigest()
+
+
 def _ensure_bytes(data: Any) -> bytes:
     if isinstance(data, bytes):
         return data
@@ -326,7 +354,9 @@ def _detect_windows_file_paths(text: str) -> Optional[list[str]]:
     return paths
 
 
-def _pack_clipboard_files(paths: Sequence[str]) -> Optional[tuple[bytes, list[dict], int, int]]:
+def _pack_clipboard_files(
+    paths: Sequence[str],
+) -> Optional[tuple[bytes, list[dict], int, int, str]]:
     if not paths:
         return None
 
@@ -401,6 +431,7 @@ def _pack_clipboard_files(paths: Sequence[str]) -> Optional[tuple[bytes, list[di
         return None
 
     payload = archive_buffer.getvalue()
+    digest = _compute_file_payload_digest(payload)
     if len(payload) > MAX_FILE_PAYLOAD_BYTES:
         logging.warning(
             "Clipboard archive is too large to share (%.2f MiB > %.2f MiB).",
@@ -408,7 +439,7 @@ def _pack_clipboard_files(paths: Sequence[str]) -> Optional[tuple[bytes, list[di
             MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
         )
         return None
-    return payload, entries, file_count, total_size
+    return payload, entries, file_count, total_size, digest
 
 
 def _win32_build_dropfiles_payload(paths: Sequence[str]) -> bytes:
@@ -605,6 +636,11 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
     if isinstance(data, (bytes, bytearray, memoryview)):
         payload = _ensure_bytes(data)
         encoding = item.get("encoding") or "zip"
+        try:
+            digest = _compute_file_payload_digest(payload)
+        except zipfile.BadZipFile:
+            logging.debug("Invalid ZIP payload on clipboard; ignoring.")
+            return None
     else:
         paths = _coerce_path_list(data)
         if not paths:
@@ -612,7 +648,7 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
         packed = _pack_clipboard_files(paths)
         if not packed:
             return None
-        payload, entries_data, file_count, total_size = packed
+        payload, entries_data, file_count, total_size, digest = packed
         encoding = "zip"
 
     normalized.update(
@@ -620,7 +656,7 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
             "data": payload,
             "encoding": encoding,
             "size": len(payload),
-            "digest": _compute_digest("files", encoding, payload),
+            "digest": digest,
         }
     )
 
