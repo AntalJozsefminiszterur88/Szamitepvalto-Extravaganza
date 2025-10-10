@@ -18,6 +18,7 @@ import os      # ÚJ IMPORT
 import math
 import shutil
 import zipfile
+from pathlib import PurePosixPath
 
 if os.name == 'nt':
     import ctypes
@@ -228,7 +229,12 @@ class KVMWorker(QObject):
                 documents_dir,
             )
 
-        base_dir = os.path.join(documents_dir, ORG_NAME, APP_NAME, CLIPBOARD_STORAGE_DIRNAME)
+        base_dir = os.path.join(
+            documents_dir,
+            BRAND_NAME,
+            "Szamitepvalto-Extravaganza",
+            CLIPBOARD_STORAGE_DIRNAME,
+        )
         try:
             os.makedirs(base_dir, exist_ok=True)
         except Exception as exc:
@@ -430,51 +436,85 @@ class KVMWorker(QObject):
 
         # fmt == 'files'
         unique_name = self._build_unique_storage_name(base_name)
-        target_dir = os.path.join(directory, unique_name)
-        try:
-            os.makedirs(target_dir, exist_ok=False)
-        except FileExistsError:
-            logging.debug(
-                "Clipboard storage target %s already exists; generating a new name.",
-                target_dir,
-            )
-            unique_name = self._build_unique_storage_name(f"{base_name}_extra")
-            target_dir = os.path.join(directory, unique_name)
-            try:
-                os.makedirs(target_dir, exist_ok=False)
-            except FileExistsError:
-                logging.error(
-                    "Unable to reserve clipboard storage directory %s; aborting persistence.",
-                    target_dir,
-                )
-                return
-        except Exception as exc:
-            logging.error(
-                "Failed to create clipboard storage directory %s: %s",
-                target_dir,
-                exc,
-                exc_info=True,
-            )
-            return
 
+        extracted_files = []
+        skipped_members = 0
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                archive.extractall(target_dir)
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+
+                    normalized = PurePosixPath(info.filename.replace("\\", "/"))
+                    parts = [
+                        part
+                        for part in normalized.parts
+                        if part not in {"", ".", ".."}
+                    ]
+                    if not parts:
+                        skipped_members += 1
+                        continue
+
+                    original_name = parts[-1]
+                    stem, extension = os.path.splitext(original_name)
+
+                    prefix = "_".join(parts[:-1])
+                    if prefix:
+                        stem = f"{prefix}_{stem}" if stem else prefix
+
+                    candidate_base = f"{unique_name}_{stem}" if stem else unique_name
+                    safe_base = self._build_unique_storage_name(
+                        candidate_base,
+                        extension=extension if extension else None,
+                    )
+                    if extension:
+                        target_path = os.path.join(directory, f"{safe_base}{extension}")
+                    else:
+                        target_path = os.path.join(directory, safe_base)
+
+                    try:
+                        with archive.open(info, "r") as source, open(
+                            target_path, "wb"
+                        ) as destination:
+                            shutil.copyfileobj(source, destination)
+                    except Exception as exc:
+                        logging.warning(
+                            "Failed to extract clipboard file %s: %s",
+                            info.filename,
+                            exc,
+                        )
+                        try:
+                            os.remove(target_path)
+                        except OSError:
+                            pass
+                        continue
+
+                    extracted_files.append(target_path)
         except zipfile.BadZipFile as exc:
             logging.error(
                 "Clipboard file payload is not a valid archive: %s",
                 exc,
             )
-            shutil.rmtree(target_dir, ignore_errors=True)
             return
         except Exception as exc:
             logging.error(
                 "Failed to unpack clipboard files into %s: %s",
-                target_dir,
+                directory,
                 exc,
                 exc_info=True,
             )
-            shutil.rmtree(target_dir, ignore_errors=True)
+            for path in extracted_files:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return
+
+        if not extracted_files:
+            logging.info(
+                "Clipboard file payload did not contain any extractable files (skipped %d members).",
+                skipped_members,
+            )
             return
 
         file_count = item.get('file_count')
@@ -486,11 +526,12 @@ class KVMWorker(QObject):
             file_count_int = None
 
         logging.info(
-            "Clipboard files saved under %s (%s item%s, %d bytes payload).",
-            target_dir,
+            "Clipboard files saved into %s (%s item%s, %d bytes payload, %d skipped).",
+            directory,
             file_count_int if file_count_int is not None else 'unknown',
             '' if file_count_int == 1 else 's',
             len(payload),
+            skipped_members,
         )
         if key:
             self._clipboard_last_persisted_digest = key
