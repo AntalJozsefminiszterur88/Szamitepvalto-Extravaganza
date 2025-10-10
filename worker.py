@@ -1033,6 +1033,8 @@ class KVMWorker(QObject):
         if self.settings.get('role') == 'input_provider' and sock == self.server_socket:
             self.server_socket = None
             self._stop_input_provider_stream()
+        if self.settings.get('role') == 'vevo' and sock == self.server_socket:
+            self.server_socket = None
 
         if was_active and self.kvm_active:
             logging.info("Active client disconnected, deactivating KVM")
@@ -1905,6 +1907,9 @@ class KVMWorker(QObject):
         if self.settings.get('role') == 'input_provider' and client_role == 'ado':
             self.server_socket = sock
             logging.info("Controller connection established: %s", client_name)
+        if self.settings.get('role') == 'vevo' and client_role == 'ado':
+            self.server_socket = sock
+            logging.info("Laptop connected to controller: %s", client_name)
         if (
             self.pending_activation_target
             and self.pending_activation_target == client_name
