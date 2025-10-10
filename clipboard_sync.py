@@ -696,17 +696,40 @@ def clipboard_items_equal(a: Optional[ClipboardItem], b: Optional[ClipboardItem]
     return a.get("format") == b.get("format") and a.get("digest") == b.get("digest")
 
 
-def _win32_open_clipboard(retries: int = 5, delay: float = 0.05) -> bool:
+def _win32_open_clipboard(
+    retries: int = 5,
+    delay: float = 0.05,
+    *,
+    backoff: float = 1.5,
+    max_delay: float = 0.4,
+) -> bool:
     if win32clipboard is None:  # pragma: no cover - más platform
         return False
-    for attempt in range(retries):
+
+    last_error: Optional[BaseException] = None
+    current_delay = max(0.0, delay)
+
+    max_attempts = max(1, retries)
+
+    for attempt in range(1, max_attempts + 1):
         try:
             win32clipboard.OpenClipboard()
             return True
         except Exception as exc:  # pragma: no cover - ritka hibák
-            logging.debug("OpenClipboard failed (%s), retrying", exc)
-            time.sleep(delay)
-    raise RuntimeError("Unable to open clipboard after retries")
+            last_error = exc
+            logging.debug(
+                "OpenClipboard failed (attempt %d/%d): %s",
+                attempt,
+                max_attempts,
+                exc,
+            )
+            if attempt >= max_attempts:
+                break
+            if current_delay > 0:
+                time.sleep(current_delay)
+                current_delay = min(current_delay * max(1.0, backoff), max_delay)
+
+    raise RuntimeError("Unable to open clipboard after retries") from last_error
 
 
 def _win32_close_clipboard() -> None:
@@ -723,7 +746,7 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
 
     if win32clipboard is not None:  # pragma: no cover - Windows-specifikus út
         try:
-            if _win32_open_clipboard():
+            if _win32_open_clipboard(retries=8, delay=0.03, backoff=1.6):
                 try:
                     if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
                         data = win32clipboard.GetClipboardData(CF_PNG)
@@ -816,7 +839,9 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
     if win32clipboard is not None:  # pragma: no cover - Windows
         for attempt in range(retries):
             try:
-                if not _win32_open_clipboard():
+                if not _win32_open_clipboard(
+                    retries=max(3, retries), delay=delay, backoff=1.5
+                ):
                     break
                 try:
                     win32clipboard.EmptyClipboard()
@@ -901,7 +926,7 @@ def clear_clipboard() -> None:
 
     if win32clipboard is not None:  # pragma: no cover - Windows
         try:
-            if _win32_open_clipboard():
+            if _win32_open_clipboard(retries=6, delay=0.05):
                 try:
                     win32clipboard.EmptyClipboard()
                 finally:
