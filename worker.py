@@ -8,6 +8,7 @@ import logging
 import tkinter
 import queue
 import struct
+from collections import deque
 from datetime import datetime
 from typing import Any, Optional
 import io
@@ -2211,7 +2212,28 @@ class KVMWorker(QObject):
         movement_lock = threading.Lock()
 
         send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
-        unsent_events = []
+        unsent_events = deque(maxlen=50)
+        unsent_events_total = 0
+
+        def record_unsent(event: Any) -> None:
+            nonlocal unsent_events_total
+            unsent_events_total += 1
+            summary: Any = event
+            try:
+                if isinstance(event, dict):
+                    summary = {}
+                    for key, value in event.items():
+                        if isinstance(value, (bytes, bytearray)):
+                            summary[key] = f"<{len(value)} bytes>"
+                        elif isinstance(value, str) and len(value) > 200:
+                            summary[key] = f"<string len={len(value)}>"
+                        else:
+                            summary[key] = value
+                elif isinstance(event, (bytes, bytearray)):
+                    summary = f"<{len(event)} bytes>"
+            except Exception:
+                summary = repr(event)
+            unsent_events.append(summary)
 
         def sender():
             last_tick = time.time()
@@ -2292,7 +2314,7 @@ class KVMWorker(QObject):
                                 exc_info=True,
                             )
                             if event_dbg != '<unpack failed>':
-                                unsent_events.append(event_dbg)
+                                record_unsent(event_dbg)
                             to_remove.append(sock)
                             break
                 for s in to_remove:
@@ -2326,7 +2348,7 @@ class KVMWorker(QObject):
                     self.client_infos.get(self.active_client),
                     len(self.client_sockets),
                 )
-                unsent_events.append(data)
+                record_unsent(data)
                 return False
             try:
                 packed = msgpack.packb(data, use_bin_type=True)
@@ -2346,7 +2368,7 @@ class KVMWorker(QObject):
                 return True
             except Exception as e:
                 logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
-                unsent_events.append(data)
+                record_unsent(data)
                 self.deactivate_kvm(reason="queue error")
                 return False
 
@@ -2484,10 +2506,15 @@ class KVMWorker(QObject):
             else:
                 evt = None
             if evt:
-                unsent_events.append(evt)
+                record_unsent(evt)
 
-        if unsent_events:
-            logging.warning("Unsent or failed events: %s", unsent_events)
+        if unsent_events_total:
+            logging.warning(
+                "Unsent or failed events (total=%d, showing_last=%d): %s",
+                unsent_events_total,
+                len(unsent_events),
+                list(unsent_events),
+            )
 
         logging.info("Streaming listenerek leálltak.")
 
