@@ -37,7 +37,8 @@ ClipboardItem = Dict[str, Any]
 PyperclipException = getattr(pyperclip, "PyperclipException", Exception)
 
 CF_PNG = None
-MAX_FILE_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB – plenty for large transfers
+MAX_FILE_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MiB hard limit for shared files
+MAX_IMAGE_PAYLOAD_BYTES = MAX_FILE_PAYLOAD_BYTES
 _LAST_EXTRACTED_DIR: Optional[str] = None
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     try:
@@ -616,6 +617,14 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
                     return None
             else:
                 return None
+        if len(raw_bytes) > MAX_IMAGE_PAYLOAD_BYTES:
+            logging.warning(
+                "Clipboard image is too large to share (%.2f MiB > %.2f MiB)",
+                len(raw_bytes) / (1024 * 1024),
+                MAX_IMAGE_PAYLOAD_BYTES / (1024 * 1024),
+            )
+            return None
+
         normalized.update(
             {
                 "data": raw_bytes,
@@ -635,6 +644,13 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
 
     if isinstance(data, (bytes, bytearray, memoryview)):
         payload = _ensure_bytes(data)
+        if len(payload) > MAX_FILE_PAYLOAD_BYTES:
+            logging.warning(
+                "Clipboard file archive is too large to share (%.2f MiB > %.2f MiB).",
+                len(payload) / (1024 * 1024),
+                MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
+            )
+            return None
         encoding = item.get("encoding") or "zip"
         try:
             digest = _compute_file_payload_digest(payload)
