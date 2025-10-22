@@ -37,14 +37,40 @@ ClipboardItem = Dict[str, Any]
 PyperclipException = getattr(pyperclip, "PyperclipException", Exception)
 
 CF_PNG = None
+CFSTR_PREFERREDDROPEFFECT = None
+DROPEFFECT_MOVE = 0x0002
 MAX_FILE_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MiB hard limit for shared files
 MAX_IMAGE_PAYLOAD_BYTES = MAX_FILE_PAYLOAD_BYTES
+VIDEO_FILE_EXTENSIONS = {
+    ".3gp",
+    ".avi",
+    ".flv",
+    ".m2ts",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".mts",
+    ".ogv",
+    ".ts",
+    ".vob",
+    ".webm",
+    ".wmv",
+}
 _LAST_EXTRACTED_DIR: Optional[str] = None
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     try:
         CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
     except Exception:  # pragma: no cover - régebbi Windows verziók
         CF_PNG = None
+    try:
+        CFSTR_PREFERREDDROPEFFECT = win32clipboard.RegisterClipboardFormat(
+            "Preferred DropEffect"
+        )
+    except Exception:  # pragma: no cover - régebbi Windows verziók
+        CFSTR_PREFERREDDROPEFFECT = None
 
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     _KERNEL32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
@@ -125,6 +151,11 @@ def _describe_clipboard_item(item: ClipboardItem) -> str:
     return f"format={fmt} keys={sorted(item.keys())}"
 
 
+def _is_video_file(path: str) -> bool:
+    _, ext = os.path.splitext(path)
+    return ext.lower() in VIDEO_FILE_EXTENSIONS
+
+
 def _win32_clipboard_object_to_bytes(data: Any, fmt_hint: Optional[int] = None) -> Optional[bytes]:
     if win32clipboard is None:  # pragma: no cover - non-Windows
         return None
@@ -194,6 +225,23 @@ def _win32_clipboard_object_to_bytes(data: Any, fmt_hint: Optional[int] = None) 
                 )
 
     return None
+
+
+def _win32_clipboard_has_move_effect() -> bool:
+    if win32clipboard is None or CFSTR_PREFERREDDROPEFFECT is None:
+        return False
+    try:
+        raw = win32clipboard.GetClipboardData(CFSTR_PREFERREDDROPEFFECT)
+    except Exception:
+        return False
+    raw_bytes = _win32_clipboard_object_to_bytes(raw, CFSTR_PREFERREDDROPEFFECT)
+    if not raw_bytes or len(raw_bytes) < 4:
+        return False
+    try:
+        effect = struct.unpack_from("<I", raw_bytes, 0)[0]
+    except struct.error:
+        return False
+    return bool(effect & DROPEFFECT_MOVE)
 
 
 def _win32_bytes_to_handle(data: bytes) -> int:
@@ -401,6 +449,12 @@ def _pack_clipboard_files(
                     archive_root = root_name if rel_dir in (".", os.curdir) else os.path.join(root_name, rel_dir).replace("\\", "/")
                     for filename in files:
                         full_path = os.path.join(root, filename)
+                        if _is_video_file(full_path):
+                            logging.info(
+                                "Clipboard sync skipped due to video file: %s",
+                                full_path,
+                            )
+                            return None
                         arcname = os.path.join(archive_root, filename).replace("\\", "/")
                         try:
                             archive.write(full_path, arcname=arcname)
@@ -410,6 +464,12 @@ def _pack_clipboard_files(
                         except Exception as exc:
                             logging.debug("Failed to add %s to clipboard archive: %s", full_path, exc)
             else:
+                if _is_video_file(normalized_path):
+                    logging.info(
+                        "Clipboard sync skipped due to video file: %s",
+                        normalized_path,
+                    )
+                    return None
                 entries.append({"name": root_name, "is_dir": False})
                 try:
                     archive.write(normalized_path, arcname=root_name)
@@ -792,16 +852,19 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
                         except Exception as exc:  # pragma: no cover - unexpected
                             logging.debug("Failed to read CF_HDROP payload: %s", exc)
                         else:
-                            file_list = list(paths) if paths else []
-                            item = normalize_clipboard_item(
-                                {"format": "files", "data": file_list}
-                            )
-                            if item:
-                                logging.debug(
-                                    "Read clipboard item via win32 API: %s",
-                                    _describe_clipboard_item(item),
+                            if _win32_clipboard_has_move_effect():
+                                logging.debug("Ignoring clipboard file list with move effect (local cut).")
+                            else:
+                                file_list = list(paths) if paths else []
+                                item = normalize_clipboard_item(
+                                    {"format": "files", "data": file_list}
                                 )
-                                return item
+                                if item:
+                                    logging.debug(
+                                        "Read clipboard item via win32 API: %s",
+                                        _describe_clipboard_item(item),
+                                    )
+                                    return item
                     if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
                         text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
                         item = normalize_clipboard_item({"format": "text", "data": text})
