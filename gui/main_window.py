@@ -48,62 +48,112 @@ def _is_user_admin() -> bool:
 
 # GUI modul -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
 
-def set_autostart(enabled: bool) -> None:
-    """Enable or disable autostart using the Task Scheduler for higher priority."""
-    app_name = "MyKVM_Start"  # A feladat neve a Feladatütemezőben
+def _build_autostart_command() -> str:
+    """Return the command that should be launched on logon."""
+    if getattr(sys, "frozen", False):  # Ha PyInstaller exe-ként fut
+        executable = f'"{sys.executable}"'
+        arguments = '--tray'
+    else:  # Ha sima python szkriptként fut
+        executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
+        script_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "main.py"
+        )
+        script_path = os.path.normpath(script_path)
+        arguments = f'"{script_path}" --tray'
+    return f"{executable} {arguments}".strip()
 
+
+def _configure_registry_autostart(enabled: bool, command: str, value_name: str) -> None:
+    """Configure autostart through the HKCU Run registry key."""
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
     try:
-        if enabled:
-            # Összeállítjuk az indítandó parancsot és az argumentumait
-            if getattr(sys, "frozen", False):  # Ha PyInstaller exe-ként fut
-                executable = f'"{sys.executable}"'
-                arguments = '--tray'
-            else:  # Ha sima python szkriptként fut
-                executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
-                script_path = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)), "..", "main.py"
+        with winreg.CreateKeyEx(  # type: ignore[call-overload]
+            winreg.HKEY_CURRENT_USER,
+            key_path,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            if enabled:
+                winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, command)
+                logging.info(
+                    "Automatikus indulás (Registry) sikeresen beállítva: %s -> %s",
+                    value_name,
+                    command,
                 )
-                script_path = os.path.normpath(script_path)
-                arguments = f'"{script_path}" --tray'
-
-            # --- JAVÍTOTT RÉSZ ---
-            # A teljes futtatandó parancs egyetlen stringként,
-            # amit a schtasks helyesen tud értelmezni.
-            task_run_command = f"{executable} {arguments}"
-
-            command = [
-                'schtasks', '/Create', '/TN', app_name,
-                '/TR', task_run_command,  # Itt már a tiszta stringet adjuk át
-                '/SC', 'ONLOGON',
-            ]
-
-            if _is_user_admin():
-                command.extend(['/RL', 'HIGHEST'])
             else:
-                logging.info("Autostart feladat normál jogosultsági szinten kerül létrehozásra (nem rendszergazda).")
+                try:
+                    winreg.DeleteValue(key, value_name)
+                    logging.info(
+                        "Automatikus indulás (Registry) sikeresen törölve: %s",
+                        value_name,
+                    )
+                except FileNotFoundError:
+                    logging.debug(
+                        "Registry autostart érték nem létezett törléskor: %s",
+                        value_name,
+                    )
+    except OSError as exc:  # pragma: no cover - Windows specific
+        logging.error(
+            "Nem sikerült módosítani a registry autostart beállítást: %s",
+            exc,
+        )
 
-            command.append('/F')
 
-            logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
-            result = subprocess.run(command, check=True, capture_output=True, text=True)
-            logging.info("Automatikus indulás (Feladatütemező) sikeresen beállítva. Kimenet: %s", result.stdout)
+def set_autostart(enabled: bool) -> None:
+    """Enable or disable autostart using Task Scheduler or registry fallback."""
+    app_name = "MyKVM_Start"  # A feladat neve a Feladatütemezőben
+    command_string = _build_autostart_command()
 
-        else:
-            command = ['schtasks', '/Delete', '/TN', app_name, '/F']
-            logging.info(f"Autostart feladat törlése: {' '.join(command)}")
-            result = subprocess.run(command, check=True, capture_output=True, text=True)
-            logging.info("Automatikus indulás (Feladatütemező) sikeresen törölve. Kimenet: %s", result.stdout)
+    if _is_user_admin():
+        try:
+            if enabled:
+                command = [
+                    'schtasks', '/Create', '/TN', app_name,
+                    '/TR', command_string,
+                    '/SC', 'ONLOGON',
+                    '/RL', 'HIGHEST',
+                    '/F',
+                ]
 
-    except subprocess.CalledProcessError as e:
-        # Ha a parancs hibával tér vissza, kiírjuk a hibaüzenetét is
-        logging.error("Hiba az automatikus indulás beállításakor (schtasks). Visszatérési kód: %d", e.returncode)
-        logging.error("Schtasks HIBA kimenet: %s", e.stderr)
-        # Itt jön a jogosultsági probléma gyanúja
-        if e.returncode == 1 and ("Access is denied" in e.stderr or "A hozzáférés megtagadva" in e.stderr):
-            logging.error(">>> A hiba oka valószínűleg a hiányzó RENDSZERGAZDAI JOGOSULTSÁG. <<<")
-            # Itt jelezhetnénk a felhasználónak is a GUI-n, ha szükséges
-    except FileNotFoundError:
-        logging.info("Autostart beállítás kihagyva: nem támogatott platform (schtasks nem található).")
+                logging.info("Autostart feladat létrehozása: %s", ' '.join(command))
+                result = subprocess.run(command, check=True, capture_output=True, text=True)
+                logging.info(
+                    "Automatikus indulás (Feladatütemező) sikeresen beállítva. Kimenet: %s",
+                    result.stdout,
+                )
+
+            else:
+                command = ['schtasks', '/Delete', '/TN', app_name, '/F']
+                logging.info("Autostart feladat törlése: %s", ' '.join(command))
+                result = subprocess.run(command, check=True, capture_output=True, text=True)
+                logging.info(
+                    "Automatikus indulás (Feladatütemező) sikeresen törölve. Kimenet: %s",
+                    result.stdout,
+                )
+
+        except subprocess.CalledProcessError as e:
+            logging.error(
+                "Hiba az automatikus indulás beállításakor (schtasks). Visszatérési kód: %d",
+                e.returncode,
+            )
+            logging.error("Schtasks HIBA kimenet: %s", e.stderr)
+            if e.returncode == 1 and (
+                "Access is denied" in e.stderr or "A hozzáférés megtagadva" in e.stderr
+            ):
+                logging.error(
+                    ">>> A hiba oka valószínűleg a hiányzó RENDSZERGAZDAI JOGOSULTSÁG. <<<"
+                )
+                logging.info("Átváltás registry alapú automatikus indításra.")
+                _configure_registry_autostart(enabled, command_string, app_name)
+        except FileNotFoundError:
+            logging.info(
+                "Autostart beállítás kihagyva: nem támogatott platform (schtasks nem található)."
+            )
+    else:
+        logging.info(
+            "Nem rendszergazdai jogosultság - registry alapú automatikus indítás használata."
+        )
+        _configure_registry_autostart(enabled, command_string, app_name)
 
 
 WorkerFactory = Callable[[dict], "KVMWorkerProtocol"]
