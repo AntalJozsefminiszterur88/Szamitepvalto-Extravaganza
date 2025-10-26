@@ -10,7 +10,7 @@ import queue
 import struct
 from collections import deque
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import io
 import msgpack
 import random
@@ -64,6 +64,7 @@ from config import (
     VK_END,
 )
 from button_input_manager import ButtonInputManager
+from stability_monitor import StabilityMonitor
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
@@ -75,7 +76,7 @@ class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
         'client_roles', 'active_client', 'pynput_listeners', 'zeroconf',
-        'streaming_thread', 'switch_monitor', 'local_ip', 'server_ip',
+        'streaming_thread', 'heartbeat_thread', 'switch_monitor', 'local_ip', 'server_ip',
         'connection_thread', 'device_name', 'clipboard_thread',
         'last_clipboard_item', 'shared_clipboard_item', 'clipboard_lock',
         'clipboard_expiry_seconds', 'server_socket', 'input_provider_socket',
@@ -91,13 +92,15 @@ class KVMWorker(QObject):
         'clipboard_storage_dir',
         '_clipboard_cleanup_marker',
         '_clipboard_last_cleanup',
-        '_clipboard_last_persisted_digest'
+        '_clipboard_last_persisted_digest',
+        'stability_monitor', '_monitor_prefix', '_monitor_thread_keys',
+        '_monitor_directory_keys', '_monitor_task_keys', '_monitor_memory_callback'
     )
 
     finished = Signal()
     status_update = Signal(str)
 
-    def __init__(self, settings):
+    def __init__(self, settings, stability_monitor: Optional[StabilityMonitor] = None):
         super().__init__()
         self.settings = settings
         self._running = True
@@ -113,6 +116,7 @@ class KVMWorker(QObject):
         self.pynput_listeners = []
         self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
         self.streaming_thread = None
+        self.heartbeat_thread = None
         self.switch_monitor = True
         self.local_ip = self._detect_primary_ipv4()
         self.server_ip = None
@@ -164,6 +168,16 @@ class KVMWorker(QObject):
         self._clipboard_last_cleanup: float = 0.0
         self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
 
+        self.stability_monitor: Optional[StabilityMonitor] = stability_monitor
+        self._monitor_prefix = f"kvm-{id(self):x}"
+        self._monitor_thread_keys: list[str] = []
+        self._monitor_directory_keys: list[str] = []
+        self._monitor_task_keys: list[str] = []
+        self._monitor_memory_callback: Optional[Callable[[], None]] = None
+
+        if self.stability_monitor:
+            self._register_core_monitoring()
+
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
 
@@ -182,6 +196,89 @@ class KVMWorker(QObject):
                 kc.release(k)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Stability monitor integration
+    # ------------------------------------------------------------------
+    def _register_core_monitoring(self) -> None:
+        if not self.stability_monitor:
+            return
+
+        monitor = self.stability_monitor
+
+        def register(name: str, supplier: Callable[[], Optional[threading.Thread]], *, grace: float = 30.0) -> None:
+            key = f"{self._monitor_prefix}/{name}"
+            monitor.register_thread(key, supplier, grace_period=grace)
+            self._monitor_thread_keys.append(key)
+
+        register('message_processor', lambda: self.message_processor_thread)
+        register('clipboard', lambda: self.clipboard_thread)
+        register('streaming', lambda: self.streaming_thread, grace=15.0)
+        register('connection_manager', lambda: self.connection_manager_thread)
+        register('resolver', lambda: self.resolver_thread)
+        register('connection', lambda: self.connection_thread)
+        register('heartbeat', lambda: self.heartbeat_thread)
+        register('pico', lambda: self.pico_thread)
+
+    def _register_clipboard_monitoring(self) -> None:
+        if not self.stability_monitor or not self.clipboard_storage_dir:
+            return
+
+        monitor = self.stability_monitor
+        directory = os.path.abspath(self.clipboard_storage_dir)
+        if directory not in self._monitor_directory_keys:
+            monitor.add_directory_quota(directory, max_mb=512, min_free_mb=256)
+            self._monitor_directory_keys.append(directory)
+
+        task_name = f"{self._monitor_prefix}/clipboard_cleanup"
+        if task_name not in self._monitor_task_keys:
+            monitor.add_periodic_task(
+                task_name,
+                max(3600.0, CLIPBOARD_CLEANUP_INTERVAL_SECONDS / 2),
+                lambda: self._ensure_clipboard_storage_cleanup(force=True),
+            )
+            self._monitor_task_keys.append(task_name)
+
+        if self._monitor_memory_callback is None:
+            self._monitor_memory_callback = lambda: self._memory_cleanup()
+            monitor.register_memory_cleanup(self._monitor_memory_callback)
+
+    def _unregister_monitoring(self) -> None:
+        if not self.stability_monitor:
+            return
+
+        for key in self._monitor_thread_keys:
+            self.stability_monitor.unregister_thread(key)
+        self._monitor_thread_keys.clear()
+
+        for directory in self._monitor_directory_keys:
+            self.stability_monitor.remove_directory_quota(directory)
+        self._monitor_directory_keys.clear()
+
+        for task in self._monitor_task_keys:
+            self.stability_monitor.remove_periodic_task(task)
+        self._monitor_task_keys.clear()
+
+        if self._monitor_memory_callback is not None:
+            self.stability_monitor.unregister_memory_cleanup(self._monitor_memory_callback)
+            self._monitor_memory_callback = None
+
+    def _memory_cleanup(self) -> None:
+        """Attempt to release cached resources when the process is under pressure."""
+        try:
+            trimmed = 0
+            while self.message_queue.qsize() > SEND_QUEUE_MAXSIZE:
+                self.message_queue.get_nowait()
+                trimmed += 1
+            if trimmed:
+                logging.warning("Trimmed %d pending messages during memory cleanup", trimmed)
+        except Exception:
+            logging.exception("Failed to trim message queue during memory cleanup")
+        finally:
+            try:
+                self._ensure_clipboard_storage_cleanup(force=True)
+            except Exception:
+                logging.exception("Clipboard cleanup failed during memory pressure mitigation")
 
     def toggle_monitor_power(self) -> None:
         """Toggle the primary monitor power state between on and soft off."""
@@ -251,6 +348,7 @@ class KVMWorker(QObject):
         self._clipboard_cleanup_marker = os.path.join(base_dir, ".last_cleanup")
         logging.info("Shared clipboard storage initialised at %s", base_dir)
         self._ensure_clipboard_storage_cleanup()
+        self._register_clipboard_monitoring()
 
     def _ensure_clipboard_storage_cleanup(self, *, force: bool = False) -> None:
         directory = self.clipboard_storage_dir
@@ -1470,6 +1568,7 @@ class KVMWorker(QObject):
     def stop(self):
         logging.info("stop() metódus meghívva.")
         self._running = False
+        self._unregister_monitoring()
         self.pending_activation_target = None
         if self.settings.get('role') == 'input_provider':
             self._stop_input_provider_stream()
@@ -1526,6 +1625,9 @@ class KVMWorker(QObject):
             except Exception:
                 pass
             self.message_processor_thread.join(timeout=1)
+        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
+            self.heartbeat_thread.join(timeout=1)
+        self.heartbeat_thread = None
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
 
@@ -1632,10 +1734,10 @@ class KVMWorker(QObject):
                 )
                 self.clipboard_thread.start()
 
-            heartbeat_thread = threading.Thread(
+            self.heartbeat_thread = threading.Thread(
                 target=self._heartbeat_monitor, daemon=True, name="Heartbeat"
             )
-            heartbeat_thread.start()
+            self.heartbeat_thread.start()
 
             while self._running:
                 time.sleep(0.5)
@@ -1645,6 +1747,7 @@ class KVMWorker(QObject):
                 "Állapot: Hiba - a KVM szolgáltatás leállt"
             )
         finally:
+            self._unregister_monitoring()
             self.finished.emit()
 
 
