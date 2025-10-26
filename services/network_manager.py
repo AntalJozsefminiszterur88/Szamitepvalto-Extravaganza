@@ -315,8 +315,8 @@ class NetworkManager(QObject):
         logging.info("Client connected: %s (%s)", client_name, addr)
 
         if self.settings.get('role') == 'ado':
-            service._check_clipboard_expiration()
-            payload = service._get_shared_clipboard_payload()
+            service.clipboard_manager.check_clipboard_expiration()
+            payload = service.clipboard_manager.get_shared_clipboard_payload()
             if payload:
                 try:
                     self.send_message(sock, payload)
