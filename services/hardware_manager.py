@@ -16,6 +16,7 @@ from serial.tools import list_ports
 import serial
 
 from core.config import PICO_SERIAL_PORT
+from utils.logging_helpers import log_user_notice
 
 
 class HardwareManager(QObject):
@@ -123,6 +124,7 @@ class ButtonInputManager:
         self._numpad_pressed_vk: set[int] = set()
         self._serial_action_map: Dict[str, Callable[[], None]] = {}
         self._keyboard_action_map: Dict[Key, Callable[[], None]] = {}
+        self._waiting_for_serial_notice = False
         self._initialise_action_maps()
 
     def start(self) -> None:
@@ -216,23 +218,23 @@ class ButtonInputManager:
         logging.info("Global keyboard listener started")
 
     def _handle_switch(self, target: str, source: str) -> None:
-        logging.info("Switch requested to %s by %s", target, source)
+        log_user_notice("Switch requested to %s by %s", target, source)
         self.hardware_manager.switch_requested.emit(target, source)
 
     def _handle_monitor_input(self, input_code: int, source: str) -> None:
-        logging.info("Monitor input %s requested by %s", input_code, source)
+        log_user_notice("Monitor input %s requested by %s", input_code, source)
         self.hardware_manager.monitor_input_requested.emit(input_code)
 
     def _handle_monitor_toggle(self, source: str) -> None:
-        logging.info("Monitor power toggle requested by %s", source)
+        log_user_notice("Monitor power toggle requested by %s", source)
         self.hardware_manager.monitor_power_toggle_requested.emit()
 
     def _handle_function_key(self, key: Key, source: str) -> None:
-        logging.info("Audio hotkey %s triggered by %s", key, source)
+        log_user_notice("Audio hotkey %s triggered by %s", key, source)
         forwarded = self.hardware_manager.handle_function_key_request(key, source)
         if forwarded:
             return
-        logging.info("Falling back to local key simulation for %s due to %s", key, source)
+        log_user_notice("Falling back to local key simulation for %s due to %s", key, source)
         self._emit_host_key(key)
 
     def _emit_host_key(self, key: Key) -> None:
@@ -315,22 +317,26 @@ class ButtonInputManager:
         while self._running.is_set():
             port_name = self._find_pico_port()
             if not port_name:
+                if not self._waiting_for_serial_notice:
+                    log_user_notice("Waiting for Pico serial device to become available...")
+                    self._waiting_for_serial_notice = True
                 for _ in range(5):
                     if not self._running.is_set():
                         return
                     time.sleep(1)
                 continue
 
-            logging.info("Pico serial device detected on %s", port_name)
+            self._waiting_for_serial_notice = False
+            log_user_notice("Pico serial device detected on %s", port_name)
             try:
                 with serial.Serial(port_name, self.BAUD_RATE, timeout=self.SERIAL_TIMEOUT) as ser:
                     ser.reset_input_buffer()
-                    logging.info("Listening for Pico button messages")
+                    log_user_notice("Listening for Pico button messages")
                     while self._running.is_set():
                         try:
                             line = ser.readline()
                         except serial.SerialException:
-                            logging.info("Serial read failed, attempting reconnect")
+                            log_user_notice("Serial read failed, attempting reconnect")
                             break
                         if not line:
                             continue
@@ -346,6 +352,6 @@ class ButtonInputManager:
                         else:
                             logging.debug("Unknown Pico message: %s", message)
             except serial.SerialException as exc:
-                logging.info("Unable to open Pico serial device %s: %s", port_name, exc)
+                log_user_notice("Pico serial device %s became unavailable: %s", port_name, exc)
                 time.sleep(1)
         logging.info("Pico serial listener terminated")

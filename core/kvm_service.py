@@ -39,6 +39,7 @@ from services.input_manager import InputManager
 from services.network_manager import NetworkManager
 from services.clipboard_manager import ClipboardManager
 from utils.stability_monitor import StabilityMonitor
+from utils.logging_helpers import log_user_notice
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
@@ -1058,29 +1059,29 @@ class KVMService(QObject):
 
         if self.settings.get('role') == 'ado' and client_role == 'input_provider':
             self.input_provider_socket = sock
-            logging.info("Input provider connected: %s", client_name)
+            log_user_notice("Input provider connected: %s", client_name)
         if self.settings.get('role') == 'input_provider' and client_role == 'ado':
             self.server_socket = sock
-            logging.info("Controller connection established: %s", client_name)
+            log_user_notice("Controller connection established: %s", client_name)
         if self.settings.get('role') == 'vevo' and client_role == 'ado':
             self.server_socket = sock
-            logging.info("Laptop connected to controller: %s", client_name)
+            log_user_notice("Laptop connected to controller: %s", client_name)
 
         if (
             self.pending_activation_target
             and self.pending_activation_target == client_name
             and not self.kvm_active
         ):
-            logging.info("Reconnected to %s, resuming KVM", client_name)
+            log_user_notice("Reconnected to %s, resuming KVM", client_name)
             self.active_client = sock
             self.pending_activation_target = None
             self.activate_kvm(switch_monitor=self.switch_monitor)
 
     def _on_client_disconnected(self, sock, client_name: str) -> None:
         if self.settings.get('role') == 'ado' and sock == self.input_provider_socket:
-            logging.info("Input provider disconnected: %s", client_name)
+            log_user_notice("Input provider disconnected: %s", client_name)
         elif sock == self.server_socket:
-            logging.info("Controller disconnected: %s", client_name)
+            log_user_notice("Controller disconnected: %s", client_name)
         
     def _process_server_messages(self):
         """Process raw messages received from clients on the server."""
