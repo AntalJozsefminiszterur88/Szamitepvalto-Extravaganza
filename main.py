@@ -14,6 +14,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
+from stability_monitor import initialize_global_monitor
 
 # Windows-specifikus importok
 try:
@@ -40,6 +41,13 @@ if not documents_dir:
 log_dir = os.path.join(documents_dir, "UMKGL Solutions", "Szamitepvalto-Extravaganza")
 os.makedirs(log_dir, exist_ok=True)
 log_file_path = os.path.join(log_dir, "kvm_app.log")
+
+stability_monitor = initialize_global_monitor(
+    check_interval=60.0,
+    memory_warning_mb=600,
+    memory_critical_mb=900,
+)
+stability_monitor.add_directory_quota(log_dir, max_mb=200, min_free_mb=512)
 
 # Naplózás beállítása fájlba, rotációval
 # 5 MB-onként új fájlt kezd, és 3 régi fájlt tart meg.
