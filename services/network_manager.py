@@ -52,17 +52,42 @@ class NetworkManager(QObject):
         """Send a msgpack message through the given socket."""
         try:
             packed = msgpack.packb(data, use_bin_type=True)
-            sock.sendall(struct.pack('!I', len(packed)) + packed)
+        except Exception as exc:
+            logging.error(
+                "Failed to pack message type '%s': %s",
+                data.get('type') or data.get('command'),
+                exc,
+                exc_info=True,
+            )
+            return False
+
+        payload = struct.pack('!I', len(packed)) + packed
+        try:
+            sock.sendall(payload)
             logging.debug(
                 "Sent message type '%s' (%d bytes)",
-                data.get('type'),
+                data.get('type') or data.get('command'),
                 len(packed),
             )
             return True
-        except Exception as exc:
+        except (
+            ConnectionResetError,
+            BrokenPipeError,
+            ConnectionAbortedError,
+            socket.error,
+        ) as exc:
             logging.error(
                 "Failed to send message type '%s': %s",
-                data.get('type'),
+                data.get('type') or data.get('command'),
+                exc,
+                exc_info=True,
+            )
+            self._handle_disconnect(sock, "send_error")
+            return False
+        except Exception as exc:
+            logging.error(
+                "Unexpected error sending message type '%s': %s",
+                data.get('type') or data.get('command'),
                 exc,
                 exc_info=True,
             )
@@ -76,20 +101,55 @@ class NetworkManager(QObject):
             excluded = set(exclude)
         else:
             excluded = {exclude}
-        packed = msgpack.packb(data, use_bin_type=True)
+        try:
+            packed = msgpack.packb(data, use_bin_type=True)
+        except Exception as exc:
+            logging.error(
+                "Failed to pack broadcast message type '%s': %s",
+                data.get('type') or data.get('command'),
+                exc,
+                exc_info=True,
+            )
+            return
+
+        payload = struct.pack('!I', len(packed)) + packed
+        failed: list[socket.socket] = []
         for sock in list(self.client_sockets):
             if sock in excluded:
                 continue
             try:
-                sock.sendall(struct.pack('!I', len(packed)) + packed)
+                sock.sendall(payload)
                 logging.debug(
                     "Broadcast message type '%s' to %s (%d bytes)",
-                    data.get('type'),
+                    data.get('type') or data.get('command'),
                     self.client_infos.get(sock, 'unknown'),
                     len(packed),
                 )
+            except (
+                ConnectionResetError,
+                BrokenPipeError,
+                ConnectionAbortedError,
+                socket.error,
+            ) as exc:
+                logging.error(
+                    "Failed to broadcast message type '%s' to %s: %s",
+                    data.get('type') or data.get('command'),
+                    self.client_infos.get(sock, 'unknown'),
+                    exc,
+                    exc_info=True,
+                )
+                failed.append(sock)
             except Exception as exc:
-                logging.error("Failed to broadcast message: %s", exc)
+                logging.error(
+                    "Unexpected error during broadcast of '%s' to %s: %s",
+                    data.get('type') or data.get('command'),
+                    self.client_infos.get(sock, 'unknown'),
+                    exc,
+                    exc_info=True,
+                )
+
+        for sock in failed:
+            self._handle_disconnect(sock, "broadcast_error")
 
     # ------------------------------------------------------------------
     # Discovery
