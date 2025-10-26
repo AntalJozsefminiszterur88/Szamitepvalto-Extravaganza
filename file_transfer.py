@@ -61,6 +61,7 @@ APP_NAME = "LAN Drop"
 VERSION = "1.3.2 (PySide6 - HU)"
 DEFAULT_PORT = 5001
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
+MAX_TRANSFER_SIZE = 50 * 1024 * 1024  # 50 MiB hard limit per file
 TIMEOUT = 120
 AUTO_CLEAN_INTERVAL_MS = 5 * 60 * 1000
 
@@ -165,6 +166,26 @@ def zip_directory(
     log_cb(f"[ZIP] Kész ({human_bytes(size)})")
 
 
+def path_total_size(path: str) -> int:
+    """Return the total size of a file or directory tree in bytes."""
+
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+
+    if os.path.isdir(path):
+        total = 0
+        for root, _, files in os.walk(path):
+            for filename in files:
+                full_path = os.path.join(root, filename)
+                try:
+                    total += os.path.getsize(full_path)
+                except OSError:
+                    pass
+        return total
+
+    return 0
+
+
 def _recv_line(sock: socket.socket) -> Optional[bytes]:
     data = b""
     while True:
@@ -206,6 +227,10 @@ class TransferHeader:
         )
 
 
+class OversizedTransferError(Exception):
+    """Raised when a requested transfer exceeds the allowed size."""
+
+
 class WorkerSignals(QObject):
     log_message = Signal(str)
     progress_updated = Signal(str, float, float, object)
@@ -242,6 +267,14 @@ class ReceiverHandler(QThread):
             if header.kind != "file":
                 log(f"[{self.addr[0]}] Ismeretlen fajta: {header.kind}")
                 self.conn.sendall(b"ERR:KIND\n")
+                return
+            if header.size > MAX_TRANSFER_SIZE:
+                log(
+                    f"[{self.addr[0]}] Elutasítva: '{header.filename}' mérete "
+                    f"{human_bytes(header.size)}, meghaladja az engedélyezett "
+                    f"{human_bytes(MAX_TRANSFER_SIZE)}-t."
+                )
+                self.conn.sendall(b"ERR:SIZE\n")
                 return
             final_name = unique_filename(
                 self.dest_dir, os.path.basename(header.filename)
@@ -361,6 +394,10 @@ class Sender(QThread):
         log = lambda message: self.signals.log_message.emit(message)
         try:
             expanded = self._prepare_paths(self.files)
+        except OversizedTransferError as exc:
+            log(str(exc))
+            return
+        try:
             for path in expanded:
                 if self._stop_requested:
                     log(
@@ -397,9 +434,23 @@ class Sender(QThread):
                 timestamp = time.strftime("%Y%m%d_%H%M%S")
                 zip_path = os.path.join(app_temp_dir(), f"{base}_{timestamp}.zip")
                 zip_directory(item, zip_path, log_cb, progress_cb)
+                size = os.path.getsize(zip_path)
+                if size > MAX_TRANSFER_SIZE:
+                    safe_remove(zip_path)
+                    raise OversizedTransferError(
+                        f"[KÜLD] Elutasítva: '{base}' ZIP mérete {human_bytes(size)}, "
+                        f"meghaladja az engedélyezett {human_bytes(MAX_TRANSFER_SIZE)}-t."
+                    )
                 output.append(zip_path)
                 self._to_cleanup.append(zip_path)
             elif os.path.isfile(item):
+                size = os.path.getsize(item)
+                if size > MAX_TRANSFER_SIZE:
+                    raise OversizedTransferError(
+                        f"[KÜLD] Elutasítva: '{os.path.basename(item)}' mérete "
+                        f"{human_bytes(size)}, meghaladja az engedélyezett "
+                        f"{human_bytes(MAX_TRANSFER_SIZE)}-t."
+                    )
                 output.append(item)
             else:
                 log_cb(f"[KÜLD] Figyelmeztetés: nem található: {item}")
@@ -680,6 +731,34 @@ class FileTransferWidget(QWidget):
         items = [self.files_list.item(i).text() for i in range(self.files_list.count())]
         if not items:
             QMessageBox.information(self, APP_NAME, "Nincs mit küldeni!")
+            return
+
+        oversize: List[tuple[str, int]] = []
+        for item in items:
+            try:
+                size = path_total_size(item)
+            except OSError:
+                size = 0
+            if size > MAX_TRANSFER_SIZE:
+                oversize.append((item, size))
+
+        if oversize:
+            details = "\n".join(
+                f"- {os.path.basename(path)}: {human_bytes(size)}" for path, size in oversize
+            )
+            QMessageBox.critical(
+                self,
+                APP_NAME,
+                (
+                    "A kiválasztott elemek közül egy vagy több meghaladja az "
+                    f"engedélyezett {human_bytes(MAX_TRANSFER_SIZE)} méretet:\n{details}"
+                ),
+            )
+            for path, size in oversize:
+                self._log(
+                    f"[KÜLD] Elutasítva: '{os.path.basename(path)}' mérete {human_bytes(size)},"
+                    f" meghaladja a limitet."
+                )
             return
 
         host = self.sender_ip.text().strip()
