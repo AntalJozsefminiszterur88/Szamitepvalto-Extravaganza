@@ -64,7 +64,8 @@ class KVMService(QObject):
         'hardware_manager', 'network_manager', 'settings_store',
         'input_manager', '_capture_send_queue', '_capture_sender_thread',
         '_capture_unsent_events', '_capture_unsent_total',
-        '_capture_current_vks', '_capture_numpad_vks'
+        '_capture_current_vks', '_capture_numpad_vks',
+        'pending_provider_target', 'pending_provider_switch'
     )
 
     finished = Signal()
@@ -130,6 +131,8 @@ class KVMService(QObject):
         self.provider_target = None
         self.current_target = 'desktop'
         self.current_monitor_input = None
+        self.pending_provider_target: Optional[str] = None
+        self.pending_provider_switch: bool = True
 
         self.stability_monitor: Optional[StabilityMonitor] = stability_monitor
         self._monitor_prefix = f"kvm-{id(self):x}"
@@ -474,6 +477,8 @@ class KVMService(QObject):
             return
 
         if self.settings.get('role') == 'ado' and sock == self.input_provider_socket:
+            pending_target = self.current_target if self.kvm_active else None
+            pending_switch = pending_target != 'laptop' if pending_target else True
             if self.kvm_active:
                 self.deactivate_kvm(
                     switch_monitor=self.current_target == 'elitedesk',
@@ -481,6 +486,13 @@ class KVMService(QObject):
                 )
             self.input_provider_socket = None
             self.pending_activation_target = None
+            if pending_target in {'laptop', 'elitedesk'}:
+                self.pending_provider_target = pending_target
+                self.pending_provider_switch = pending_switch
+                log_user_notice(
+                    "Input szolgáltató bontotta a kapcsolatot, a %s cél automatikusan folytatódik amikor újra elérhető",
+                    pending_target,
+                )
         if self.settings.get('role') == 'input_provider' and sock == self.server_socket:
             self.server_socket = None
             self._stop_input_provider_stream()
@@ -871,6 +883,8 @@ class KVMService(QObject):
         self._running = False
         self._unregister_monitoring()
         self.pending_activation_target = None
+        self.pending_provider_target = None
+        self.pending_provider_switch = True
         if self.settings.get('role') == 'input_provider':
             self._stop_input_provider_stream()
         elif self.kvm_active:
@@ -1042,6 +1056,8 @@ class KVMService(QObject):
 
     def _handle_switch_request(self, target: str, source: str) -> None:
         if target == 'desktop':
+            self.pending_provider_target = None
+            self.pending_provider_switch = True
             self.deactivate_kvm(switch_monitor=True, reason=source)
             return
         if target in {'laptop', 'elitedesk'}:
@@ -1060,6 +1076,17 @@ class KVMService(QObject):
         if self.settings.get('role') == 'ado' and client_role == 'input_provider':
             self.input_provider_socket = sock
             log_user_notice("Input provider connected: %s", client_name)
+            pending_target = self.pending_provider_target
+            pending_switch = self.pending_provider_switch
+            if pending_target in {'laptop', 'elitedesk'} and not self.kvm_active:
+                self.pending_provider_target = None
+                self.pending_provider_switch = True
+                log_user_notice("Folyamatban lévő váltás folytatása: %s", pending_target)
+                self.toggle_client_control(
+                    pending_target,
+                    switch_monitor=pending_switch,
+                    release_keys=False,
+                )
         if self.settings.get('role') == 'input_provider' and client_role == 'ado':
             self.server_socket = sock
             log_user_notice("Controller connection established: %s", client_name)
@@ -1214,6 +1241,15 @@ class KVMService(QObject):
     def activate_kvm(self, switch_monitor=True, target: Optional[str] = None):
         if self.settings.get('role') == 'ado':
             if not self.input_provider_socket:
+                if target is None:
+                    target = 'laptop' if self.active_client else 'elitedesk'
+                if target in {'laptop', 'elitedesk'}:
+                    self.pending_provider_target = target
+                    self.pending_provider_switch = bool(switch_monitor)
+                    log_user_notice(
+                        "Input szolgáltató nem érhető el, a %s célú váltás később újrapróbálkozik",
+                        target,
+                    )
                 self.status_update.emit("Hiba: Nincs input szolgáltató")
                 logging.error("Activation requested without connected input provider")
                 return
@@ -1236,7 +1272,16 @@ class KVMService(QObject):
                 self.current_target = 'desktop'
                 self.kvm_active = False
                 self.status_update.emit("Hiba: nem érhető el az input szolgáltató")
+                if target in {'laptop', 'elitedesk'}:
+                    self.pending_provider_target = target
+                    self.pending_provider_switch = bool(switch_monitor)
+                    log_user_notice(
+                        "Nem sikerült kapcsolódni az input szolgáltatóhoz, a %s cél később automatikusan aktiválódik",
+                        target,
+                    )
                 return
+            self.pending_provider_target = None
+            self.pending_provider_switch = True
             logging.info("Controller activated for %s", target)
             return
 
