@@ -14,7 +14,7 @@ Run the project by executing `main.py`:
 python main.py
 ```
 
-This starts the Qt based interface defined in `gui.py` and launches the
+This starts the Qt based interface defined in `gui/main_window.py` and launches the
 background worker defined in `worker.py` for handling networking and hotkeys.
 For troubleshooting, you can enable verbose logging by changing the `level`
 argument of `logging.basicConfig` to `DEBUG` in `main.py`. Log entries are
@@ -177,17 +177,17 @@ packaged after enabling autostart from a normal Python interpreter.
 
 ## Clipboard synchronization
 
-A simple script `clipboard_sync.py` is provided to share the system clipboard between computers.
+A simple script `utils/clipboard_sync.py` is provided to share the system clipboard between computers.
 One machine runs the server:
 
 ```bash
-python clipboard_sync.py server --port 8765
+python -m utils.clipboard_sync server --port 8765
 ```
 
 Other machines connect as clients:
 
 ```bash
-python clipboard_sync.py client <server-ip> --port 8765
+python -m utils.clipboard_sync client <server-ip> --port 8765
 ```
 
 Whenever the clipboard changes on any connected computer the new contents are sent to all others.
@@ -210,7 +210,7 @@ other platforms.
 Code style checks can be performed with `pycodestyle`:
 
 ```bash
-pycodestyle --max-line-length=120 gui.py clipboard_sync.py
+pycodestyle --max-line-length=120 gui/main_window.py utils/clipboard_sync.py
 ```
 
 You can also use the provided configuration in `setup.cfg` to keep

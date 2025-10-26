@@ -11,10 +11,11 @@ import time    # ÚJ IMPORT
 import threading
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
+from PySide6.QtCore import QLockFile, QStandardPaths, QSettings, QThread
 from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
-from stability_monitor import initialize_global_monitor
+from utils.stability_monitor import initialize_global_monitor
+from worker import KVMWorker
 
 # Windows-specifikus importok
 try:
@@ -169,7 +170,13 @@ if __name__ == "__main__":
     # Prevent the application from quitting when the last window is closed.
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(ICON_PATH))
-    window = MainWindow()
+    def create_worker(settings):
+        return KVMWorker(settings, stability_monitor=stability_monitor)
+
+    def create_thread():
+        return QThread()
+
+    window = MainWindow(create_worker, create_thread)
     if start_hidden:
         window.hide()
         if auto_connect:
