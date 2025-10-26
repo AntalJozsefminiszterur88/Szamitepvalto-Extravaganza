@@ -15,7 +15,7 @@ from PySide6.QtCore import QLockFile, QStandardPaths, QSettings, QThread
 from gui import MainWindow
 from config import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
-from worker import KVMWorker
+from core.kvm_service import KVMService
 
 # Windows-specifikus importok
 try:
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(QIcon(ICON_PATH))
     def create_worker(settings):
-        return KVMWorker(settings, stability_monitor=stability_monitor)
+        return KVMService(settings, stability_monitor=stability_monitor)
 
     def create_thread():
         return QThread()
