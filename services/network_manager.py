@@ -15,7 +15,7 @@ import msgpack
 from PySide6.QtCore import QObject, Signal
 from zeroconf import IPVersion, ServiceBrowser, Zeroconf
 
-from config import SERVICE_TYPE
+from core.config import SERVICE_TYPE
 
 
 class NetworkManager(QObject):

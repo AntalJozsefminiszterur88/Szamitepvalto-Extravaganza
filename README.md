@@ -52,6 +52,20 @@ The main dependencies are:
 - zeroconf – service discovery on the local network
 - monitorcontrol – controlling monitor inputs
 
+## Repository layout
+
+The root of the repository now only keeps the two primary entry points while
+supporting modules and assets are grouped into dedicated directories:
+
+- `main.py` – GUI entry point.
+- `build_exe.py` – PyInstaller packaging script.
+- `core/` – shared configuration and the KVM background service.
+- `gui/` – Qt widgets, including the LAN file transfer panel.
+- `services/` – networking, clipboard, and hardware integration layers.
+- `utils/` – helper utilities such as the stability monitor.
+- `resources/` – icons, screenshots and other bundled assets.
+- `firmware/` – Raspberry Pi Pico helper scripts (`boot.py`, `pico_hid_switch.py`, `pico_serial_test.py`).
+
 ## Usage
 
 After installing the dependencies, run `python main.py` to launch the GUI. The
@@ -142,20 +156,20 @@ you can verify detection in the console.
 
 ### CircuitPython HID script
 
-The `pico_hid_switch.py` example runs directly on the Pico. It emulates the hotkey
-presses for switching computers and now opens the `usb_cdc` serial connection.
-When a button is pressed the script writes `b'1'`, `b'2'` or `b'3'` to the serial
-port and briefly pauses so the host receives the byte. The `PicoSerialHandler`
-in the desktop application listens for these values to activate the appropriate
-target.
+The `firmware/pico_hid_switch.py` example runs directly on the Pico. It emulates
+the hotkey presses for switching computers and now opens the `usb_cdc` serial
+connection. When a button is pressed the script writes `b'1'`, `b'2'` or `b'3'`
+to the serial port and briefly pauses so the host receives the byte. The
+desktop application's serial listener in `HardwareManager` reacts to these
+values to activate the appropriate target.
 
 If both the console and data CDC interfaces are enabled, Windows will expose two
 COM ports. The application expects the **data** interface, so ensure this port is
-available or disable the console interface in `boot.py` to avoid connecting to
-the wrong one.
+available or disable the console interface in `firmware/boot.py` to avoid
+connecting to the wrong one.
 
-After copying `boot.py` to the Pico you must reset the board for the new
-configuration to take effect.
+After copying `firmware/boot.py` to the Pico you must reset the board for the
+new configuration to take effect.
 
 ### Autostart
 

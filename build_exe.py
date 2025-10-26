@@ -11,6 +11,10 @@ import sys
 from pathlib import Path
 import importlib.util
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+RESOURCE_DIR = PROJECT_ROOT / "resources"
+ICON_FILE = RESOURCE_DIR / "icons" / "keyboard_mouse_switch_icon.ico"
+
 
 def ensure_pyinstaller():
     """Ensure that PyInstaller is installed."""
@@ -40,9 +44,9 @@ def build():
         "--name",
         "Szamitepvalto-Extravaganza",
         "--icon",
-        "keyboard_mouse_switch_icon.ico",
+        str(ICON_FILE),
         "--add-data",
-        "keyboard_mouse_switch_icon.ico;.",
+        f"{RESOURCE_DIR}{os.pathsep}resources",
         "main.py",
     ]
 

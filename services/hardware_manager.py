@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, Signal
 from serial.tools import list_ports
 import serial
 
-from config import PICO_SERIAL_PORT
+from core.config import PICO_SERIAL_PORT
 
 
 class HardwareManager(QObject):

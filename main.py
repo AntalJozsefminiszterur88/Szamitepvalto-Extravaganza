@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings, QThread
 from gui import MainWindow
-from config import ICON_PATH, APP_NAME, ORG_NAME
+from core.config import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
 from core.kvm_service import KVMService
 

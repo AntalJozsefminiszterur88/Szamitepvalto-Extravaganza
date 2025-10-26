@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal, QStandardPaths
 
-from config import BRAND_NAME
+from core.config import BRAND_NAME
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
