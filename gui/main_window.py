@@ -6,6 +6,7 @@ import time
 import logging
 import os
 import subprocess
+import ctypes
 
 # Windows specific module only available on that platform
 import winreg  # type: ignore
@@ -37,6 +38,14 @@ from core.config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
 from .file_transfer import FileTransferWidget
 
 
+def _is_user_admin() -> bool:
+    """Return True when the current process has administrator privileges."""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return False
+
+
 # GUI modul -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
 
 def set_autostart(enabled: bool) -> None:
@@ -65,18 +74,24 @@ def set_autostart(enabled: bool) -> None:
             command = [
                 'schtasks', '/Create', '/TN', app_name,
                 '/TR', task_run_command,  # Itt már a tiszta stringet adjuk át
-                '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F'
+                '/SC', 'ONLOGON',
             ]
 
+            if _is_user_admin():
+                command.extend(['/RL', 'HIGHEST'])
+            else:
+                logging.info("Autostart feladat normál jogosultsági szinten kerül létrehozásra (nem rendszergazda).")
+
+            command.append('/F')
+
             logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
-            # A shell=True itt fontos, hogy a Windows helyesen értelmezze a parancsot
-            result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
             logging.info("Automatikus indulás (Feladatütemező) sikeresen beállítva. Kimenet: %s", result.stdout)
 
         else:
             command = ['schtasks', '/Delete', '/TN', app_name, '/F']
             logging.info(f"Autostart feladat törlése: {' '.join(command)}")
-            result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
             logging.info("Automatikus indulás (Feladatütemező) sikeresen törölve. Kimenet: %s", result.stdout)
 
     except subprocess.CalledProcessError as e:
