@@ -16,6 +16,7 @@ import os      # ÚJ IMPORT
 from pynput import keyboard, mouse
 from zeroconf import ServiceInfo
 from PySide6.QtCore import QObject, Signal, QSettings
+from monitorcontrol import get_monitors
 from .config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
