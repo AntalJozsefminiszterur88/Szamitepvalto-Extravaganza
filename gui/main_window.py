@@ -33,8 +33,8 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 from typing import Callable, Optional, Protocol, Union
 
-from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
-from file_transfer import FileTransferWidget
+from core.config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
+from .file_transfer import FileTransferWidget
 
 
 # GUI modul -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
