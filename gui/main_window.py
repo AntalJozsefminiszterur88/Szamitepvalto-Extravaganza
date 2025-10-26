@@ -1,4 +1,4 @@
-# gui.py - VÉGLEGES
+# main_window.py - VÉGLEGES
 # Hozzáadva a tényleges autostart logika.
 
 import sys
@@ -31,13 +31,13 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QGuiApplication, QShowEvent
 from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
-from worker import KVMWorker
+from typing import Callable, Optional, Protocol, Union
+
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
-from stability_monitor import get_global_monitor
 from file_transfer import FileTransferWidget
 
 
-# gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
+# GUI modul -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
 
 def set_autostart(enabled: bool) -> None:
     """Enable or disable autostart using the Task Scheduler for higher priority."""
@@ -51,7 +51,10 @@ def set_autostart(enabled: bool) -> None:
                 arguments = '--tray'
             else:  # Ha sima python szkriptként fut
                 executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
-                script_path = os.path.join(os.path.dirname(__file__), "main.py")
+                script_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "..", "main.py"
+                )
+                script_path = os.path.normpath(script_path)
                 arguments = f'"{script_path}" --tray'
 
             # --- JAVÍTOTT RÉSZ ---
@@ -88,6 +91,21 @@ def set_autostart(enabled: bool) -> None:
         logging.info("Autostart beállítás kihagyva: nem támogatott platform (schtasks nem található).")
 
 
+WorkerFactory = Callable[[dict], "KVMWorkerProtocol"]
+ThreadFactory = Callable[[], QThread]
+
+
+class KVMWorkerProtocol(Protocol):
+    """Protocol-like base class for typing the expected worker interface."""
+
+    finished: "Signal"
+    status_update: "Signal"
+
+    def moveToThread(self, thread: QThread) -> None: ...  # pragma: no cover - Qt binding
+    def run(self) -> None: ...  # pragma: no cover - Qt binding
+    def stop(self) -> None: ...  # pragma: no cover - Qt binding
+
+
 class MainWindow(QMainWindow):
     __slots__ = (
         'radio_desktop', 'radio_laptop', 'radio_elitedesk', 'port',
@@ -95,16 +113,24 @@ class MainWindow(QMainWindow):
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
         'tray_icon', 'tray_hover_timer', '_tray_hover_visible',
         'stack', 'main_view', 'file_transfer_widget', 'file_transfer_button',
-        '_main_view_size', '_initial_show_done'
+        '_main_view_size', '_initial_show_done',
+        '_worker_dependency', '_thread_dependency'
     )
 
     # A MainWindow többi része változatlan...
-    def __init__(self):
+    def __init__(
+        self,
+        kvm_worker: Union[WorkerFactory, "KVMWorkerProtocol"],
+        kvm_thread: Union[ThreadFactory, QThread],
+    ):
         super().__init__()
         self.setWindowTitle("KVM Switch Vezérlőpult v7")
         self.setWindowIcon(QIcon(ICON_PATH))
         self._main_view_size = QSize(450, 560)
         self._initial_show_done = False
+
+        self._worker_dependency = kvm_worker
+        self._thread_dependency = kvm_thread
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -115,8 +141,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.file_transfer_widget)
         self.show_main_view()
 
-        self.kvm_thread = None
-        self.kvm_worker = None
+        self.kvm_thread: Optional[QThread] = None
+        self.kvm_worker: Optional[KVMWorkerProtocol] = None
         self.init_tray_icon()
         self.load_settings()
 
@@ -252,10 +278,8 @@ class MainWindow(QMainWindow):
     def start_kvm_service(self):
         """Start the background KVM worker and temporarily disable the start
         button to avoid duplicate launches from rapid clicks."""
-        self.kvm_thread = QThread()
-        self.kvm_worker = KVMWorker(
-            self.get_settings(), stability_monitor=get_global_monitor()
-        )
+        self.kvm_thread = self._create_thread()
+        self.kvm_worker = self._create_worker()
         self.kvm_worker.moveToThread(self.kvm_thread)
         self.kvm_thread.started.connect(self.kvm_worker.run)
         self.kvm_worker.finished.connect(self.on_service_stopped)
@@ -270,6 +294,24 @@ class MainWindow(QMainWindow):
     def stop_kvm_service(self):
         if self.kvm_worker:
             self.kvm_worker.stop()
+
+    def _create_worker(self) -> KVMWorkerProtocol:
+        dependency = self._worker_dependency
+        settings = self.get_settings()
+        if callable(dependency):
+            worker = dependency(settings)
+        else:
+            worker = dependency
+            worker.settings = settings
+        return worker
+
+    def _create_thread(self) -> QThread:
+        dependency = self._thread_dependency
+        if callable(dependency):
+            thread = dependency()
+        else:
+            thread = dependency
+        return thread
 
     def on_service_stopped(self):
         if self.kvm_thread:
