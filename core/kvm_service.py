@@ -15,22 +15,9 @@ import msgpack
 import random
 import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
-import math
 import shutil
 import zipfile
 from pathlib import PurePosixPath
-
-if os.name == 'nt':
-    import ctypes
-    from ctypes import wintypes
-
-    _USER32 = ctypes.windll.user32
-    _SM_XVIRTUALSCREEN = 76
-    _SM_YVIRTUALSCREEN = 77
-    _SM_CXVIRTUALSCREEN = 78
-    _SM_CYVIRTUALSCREEN = 79
-else:
-    _USER32 = None
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
@@ -38,7 +25,7 @@ from utils.clipboard_sync import (
     read_clipboard_content,
     write_clipboard_content,
 )
-from pynput import mouse, keyboard
+from pynput import keyboard, mouse
 from zeroconf import ServiceInfo
 from PySide6.QtCore import QObject, Signal, QSettings, QStandardPaths
 from config import (
@@ -60,6 +47,7 @@ from config import (
     VK_END,
 )
 from services.hardware_manager import HardwareManager
+from services.input_manager import InputManager
 from services.network_manager import NetworkManager
 from utils.stability_monitor import StabilityMonitor
 
@@ -72,15 +60,14 @@ CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 class KVMService(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
-        'client_roles', 'active_client', 'pynput_listeners', 'zeroconf',
+        'client_roles', 'active_client', 'zeroconf',
         'streaming_thread', 'heartbeat_thread', 'switch_monitor', 'local_ip', 'server_ip',
         'connection_thread', 'device_name', 'clipboard_thread',
         'last_clipboard_item', 'shared_clipboard_item', 'clipboard_lock',
         'clipboard_expiry_seconds', 'server_socket', 'input_provider_socket',
         '_ignore_next_clipboard_change', 'last_server_ip', 'message_queue',
         'message_processor_thread', '_host_mouse_controller', '_orig_mouse_pos',
-        'mouse_controller', '_win_mouse_fraction', 'keyboard_controller',
-        '_pressed_keys', '_provider_pressed_keys',
+        '_provider_pressed_keys',
         'discovered_peers', 'connection_manager_thread', 'resolver_thread',
         'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
         'pending_activation_target', 'provider_stop_event', 'provider_target',
@@ -91,7 +78,10 @@ class KVMService(QObject):
         '_clipboard_last_persisted_digest',
         'stability_monitor', '_monitor_prefix', '_monitor_thread_keys',
         '_monitor_directory_keys', '_monitor_task_keys', '_monitor_memory_callback',
-        'hardware_manager', 'network_manager', 'settings_store'
+        'hardware_manager', 'network_manager', 'settings_store',
+        'input_manager', '_capture_send_queue', '_capture_sender_thread',
+        '_capture_unsent_events', '_capture_unsent_total',
+        '_capture_current_vks', '_capture_numpad_vks'
     )
 
     finished = Signal()
@@ -110,7 +100,6 @@ class KVMService(QObject):
         self.client_roles = {}
         # Currently selected client to forward events to
         self.active_client = None
-        self.pynput_listeners = []
         self.streaming_thread = None
         self.heartbeat_thread = None
         self.switch_monitor = True
@@ -154,10 +143,6 @@ class KVMService(QObject):
         self.message_processor_thread = None
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
-        self.mouse_controller = mouse.Controller()
-        self._win_mouse_fraction = [0.0, 0.0]
-        self.keyboard_controller = keyboard.Controller()
-        self._pressed_keys = set()
         self._provider_pressed_keys = set()
         # Remember if a KVM session was active when the connection dropped
         self.pending_activation_target = None
@@ -179,6 +164,15 @@ class KVMService(QObject):
         self._monitor_directory_keys: list[str] = []
         self._monitor_task_keys: list[str] = []
         self._monitor_memory_callback: Optional[Callable[[], None]] = None
+
+        self.input_manager = InputManager(self)
+        self.input_manager.input_captured.connect(self._handle_captured_input)
+        self._capture_send_queue: Optional[queue.Queue] = None
+        self._capture_sender_thread: Optional[threading.Thread] = None
+        self._capture_unsent_events = deque(maxlen=50)
+        self._capture_unsent_total = 0
+        self._capture_current_vks: set[int] = set()
+        self._capture_numpad_vks: set[int] = set()
 
         if self.stability_monitor:
             self._register_core_monitoring()
@@ -779,112 +773,9 @@ class KVMService(QObject):
             return False
         return self._send_message(sock, payload)
 
-    def _move_mouse_relative(self, dx, dy) -> None:
-        """Move the cursor relative to its current position."""
-        try:
-            dx_val = float(dx) if dx is not None else 0.0
-        except (TypeError, ValueError):
-            dx_val = 0.0
-        try:
-            dy_val = float(dy) if dy is not None else 0.0
-        except (TypeError, ValueError):
-            dy_val = 0.0
-
-        if dx_val == 0.0 and dy_val == 0.0:
-            return
-
-        if _USER32 is not None:
-            try:
-                point = wintypes.POINT()
-                if not _USER32.GetCursorPos(ctypes.byref(point)):
-                    raise ctypes.WinError(ctypes.get_last_error())
-
-                total_dx = dx_val + self._win_mouse_fraction[0]
-                total_dy = dy_val + self._win_mouse_fraction[1]
-                frac_x, int_x = math.modf(total_dx)
-                frac_y, int_y = math.modf(total_dy)
-
-                move_x = int(int_x)
-                move_y = int(int_y)
-
-                self._win_mouse_fraction[0] = frac_x
-                self._win_mouse_fraction[1] = frac_y
-
-                target_x = point.x + move_x
-                target_y = point.y + move_y
-
-                width = _USER32.GetSystemMetrics(_SM_CXVIRTUALSCREEN)
-                height = _USER32.GetSystemMetrics(_SM_CYVIRTUALSCREEN)
-                if width and height:
-                    left = _USER32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
-                    top = _USER32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
-                    max_x = left + width - 1
-                    max_y = top + height - 1
-                    if target_x < left:
-                        target_x = left
-                        self._win_mouse_fraction[0] = 0.0
-                    elif target_x > max_x:
-                        target_x = max_x
-                        self._win_mouse_fraction[0] = 0.0
-                    if target_y < top:
-                        target_y = top
-                        self._win_mouse_fraction[1] = 0.0
-                    elif target_y > max_y:
-                        target_y = max_y
-                        self._win_mouse_fraction[1] = 0.0
-
-                if move_x != 0 or move_y != 0 or target_x != point.x or target_y != point.y:
-                    _USER32.SetCursorPos(int(target_x), int(target_y))
-                return
-            except Exception as exc:
-                logging.debug("Native cursor move failed (%s), falling back to pynput", exc)
-                self._win_mouse_fraction[0] = 0.0
-                self._win_mouse_fraction[1] = 0.0
-
-        self.mouse_controller.move(dx_val, dy_val)
-
     def _apply_event_locally(self, data: dict) -> None:
-        """Apply a remote input event to the local controllers."""
-        button_map = {
-            'left': mouse.Button.left,
-            'right': mouse.Button.right,
-            'middle': mouse.Button.middle,
-        }
-        extra_button = getattr(mouse.Button, 'x1', None)
-        if extra_button is not None:
-            button_map['x1'] = extra_button
-        msg_type = data.get('type')
-        if msg_type == 'move_relative':
-            self._move_mouse_relative(data.get('dx', 0), data.get('dy', 0))
-        elif msg_type == 'click':
-            btn = button_map.get(data.get('button'))
-            if btn:
-                (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
-        elif msg_type == 'scroll':
-            self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
-        elif msg_type == 'key':
-            k_info = data.get('key')
-            key_type = data.get('key_type')
-            if key_type == 'char':
-                k_press = k_info
-            elif key_type == 'special':
-                k_press = getattr(keyboard.Key, k_info, None)
-            elif key_type == 'vk':
-                try:
-                    k_press = keyboard.KeyCode.from_vk(int(k_info))
-                except Exception:
-                    k_press = None
-            else:
-                k_press = None
-            if k_press:
-                if data.get('pressed'):
-                    self.keyboard_controller.press(k_press)
-                    self._pressed_keys.add(k_press)
-                else:
-                    self.keyboard_controller.release(k_press)
-                    self._pressed_keys.discard(k_press)
-        else:
-            logging.debug("Unhandled local event type: %s", msg_type)
+        """(Deprecated) wrapper maintained for backward compatibility."""
+        self.input_manager.simulate_event(data)
 
     def _handle_provider_event(self, data: dict) -> None:
         """Route events coming from the input provider based on the active target."""
@@ -897,7 +788,7 @@ class KVMService(QObject):
                 logging.warning("Failed to forward provider event to laptop; deactivating KVM")
                 self.deactivate_kvm(reason="forward_failed", switch_monitor=False)
         elif target == 'elitedesk':
-            self._apply_event_locally(data)
+            self.input_manager.simulate_event(data)
         else:
             logging.debug(
                 "Dropping provider event %s because current target is %s",
@@ -947,9 +838,9 @@ class KVMService(QObject):
         press_event = {'type': 'key', 'key_type': key_type, 'key': key_value, 'pressed': True}
         release_event = {'type': 'key', 'key_type': key_type, 'key': key_value, 'pressed': False}
         try:
-            self._apply_event_locally(press_event)
+            self.input_manager.simulate_event(press_event)
             time.sleep(0.05)
-            self._apply_event_locally(release_event)
+            self.input_manager.simulate_event(release_event)
         except Exception as exc:
             logging.error("Failed to perform provider key tap: %s", exc, exc_info=True)
 
@@ -1512,6 +1403,8 @@ class KVMService(QObject):
             self._stop_input_provider_stream()
         elif self.kvm_active:
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
+        else:
+            self.input_manager.stop_capturing()
         if self.service_info:
             try:
                 self.zeroconf.unregister_service(self.service_info)
@@ -1521,11 +1414,6 @@ class KVMService(QObject):
             self.zeroconf.close()
         except Exception:
             pass
-        for listener in self.pynput_listeners:
-            try:
-                listener.stop()
-            except:
-                pass
         try:
             self.hardware_manager.stop()
         except Exception:
@@ -1802,14 +1690,6 @@ class KVMService(QObject):
     def _process_client_messages(self):
         """Process already unpacked messages received from the server."""
         logging.debug("Client message processor thread started")
-        button_map = {
-            'left': mouse.Button.left,
-            'right': mouse.Button.right,
-            'middle': mouse.Button.middle,
-        }
-        extra_button = getattr(mouse.Button, 'x1', None)
-        if extra_button is not None:
-            button_map['x1'] = extra_button
         while self._running:
             try:
                 sock, data = self.message_queue.get()
@@ -1823,31 +1703,8 @@ class KVMService(QObject):
                     data.get('type'),
                 )
                 msg_type = data.get('type')
-                if msg_type == 'move_relative':
-                    self._move_mouse_relative(data.get('dx', 0), data.get('dy', 0))
-                elif msg_type == 'click':
-                    btn = button_map.get(data.get('button'))
-                    if btn:
-                        (self.mouse_controller.press if data.get('pressed') else self.mouse_controller.release)(btn)
-                elif msg_type == 'scroll':
-                    self.mouse_controller.scroll(data.get('dx', 0), data.get('dy', 0))
-                elif msg_type == 'key':
-                    k_info = data.get('key')
-                    if data.get('key_type') == 'char':
-                        k_press = k_info
-                    elif data.get('key_type') == 'special':
-                        k_press = getattr(keyboard.Key, k_info, None)
-                    elif data.get('key_type') == 'vk':
-                        k_press = keyboard.KeyCode.from_vk(int(k_info))
-                    else:
-                        k_press = None
-                    if k_press:
-                        if data.get('pressed'):
-                            self.keyboard_controller.press(k_press)
-                            self._pressed_keys.add(k_press)
-                        else:
-                            self.keyboard_controller.release(k_press)
-                            self._pressed_keys.discard(k_press)
+                if msg_type in {'move_relative', 'click', 'scroll', 'key'}:
+                    self.input_manager.simulate_event(data)
                 elif msg_type == 'clipboard_data':
                     self._handle_clipboard_data_message(sock, data)
                 elif msg_type == 'clipboard_clear':
@@ -1951,7 +1808,7 @@ class KVMService(QObject):
     def _streaming_loop(self):
         """Keep streaming active and restart if it stops unexpectedly."""
         while self.kvm_active and self._running:
-            self.start_kvm_streaming()
+            self._run_capturing_session()
             if self.kvm_active and self._running:
                 logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
                 time.sleep(1)
@@ -1972,6 +1829,7 @@ class KVMService(QObject):
                     self.release_hotkey_keys()
                 return
             prev_target = self.current_target
+            self.input_manager.stop_capturing()
             self.kvm_active = False
             self.current_target = 'desktop'
             if self.input_provider_socket:
@@ -2011,6 +1869,7 @@ class KVMService(QObject):
                 switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
             )
 
+        self.input_manager.stop_capturing()
         self.kvm_active = False
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
@@ -2054,342 +1913,203 @@ class KVMService(QObject):
         """Delegate monitor input switching to the hardware manager."""
         self.hardware_manager.switch_monitor_input(input_code)
     
-    def start_kvm_streaming(self):
-        logging.info("start_kvm_streaming: initiating control transfer")
-        if getattr(self, 'switch_monitor', True):
-            try:
-                with list(get_monitors())[0] as monitor:
-                    monitor.set_input_source(self.settings['monitor_codes']['client'])
-            except Exception as e:
-                logging.error(f"Monitor hiba: {e}", exc_info=True)
-                self.status_update.emit(f"Monitor hiba: {e}")
-                self.deactivate_kvm(reason="monitor switch failed")
-                return
-        
-        host_mouse_controller = mouse.Controller()
-        self._host_mouse_controller = host_mouse_controller
-        self._orig_mouse_pos = host_mouse_controller.position
+    def _run_capturing_session(self) -> None:
+        logging.info("Input capture session starting")
+        self._capture_current_vks.clear()
+        self._capture_numpad_vks.clear()
+        self._capture_unsent_events.clear()
+        self._capture_unsent_total = 0
+        self._capture_send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
+        self._capture_sender_thread = threading.Thread(
+            target=self._capture_sender_loop,
+            daemon=True,
+            name="InputSender",
+        )
+        self._capture_sender_thread.start()
         try:
-            root = tkinter.Tk()
-            root.withdraw()
-            center_x, center_y = root.winfo_screenwidth()//2, root.winfo_screenheight()//2
-            root.destroy()
-        except:
-            center_x, center_y = 800, 600
-        
-        host_mouse_controller.position = (center_x, center_y)
-        last_pos = {'x': center_x, 'y': center_y}
-        is_warping = False
-
-        accumulated_movement = {'dx': 0, 'dy': 0}
-        movement_lock = threading.Lock()
-
-        send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
-        unsent_events = deque(maxlen=50)
-        unsent_events_total = 0
-
-        def record_unsent(event: Any) -> None:
-            nonlocal unsent_events_total
-            unsent_events_total += 1
-            summary: Any = event
-            try:
-                if isinstance(event, dict):
-                    summary = {}
-                    for key, value in event.items():
-                        if isinstance(value, (bytes, bytearray)):
-                            summary[key] = f"<{len(value)} bytes>"
-                        elif isinstance(value, str) and len(value) > 200:
-                            summary[key] = f"<string len={len(value)}>"
-                        else:
-                            summary[key] = value
-                elif isinstance(event, (bytes, bytearray)):
-                    summary = f"<{len(event)} bytes>"
-            except Exception:
-                summary = repr(event)
-            unsent_events.append(summary)
-
-        def sender():
-            last_tick = time.time()
-            while self.kvm_active and self._running:
-                events = []
+            self.input_manager.start_capturing()
+        except Exception as exc:
+            logging.error("Input capture failed: %s", exc, exc_info=True)
+        finally:
+            if self._capture_send_queue is not None:
                 try:
-                    payload = send_queue.get(timeout=0.01)
-                    got_q = True
-                except queue.Empty:
-                    payload = None
-                    got_q = False
-
-                if got_q and payload is None:
-                    logging.debug("Sender thread exiting")
-                    break
-                if got_q and payload is not None:
-                    if isinstance(payload, tuple):
-                        events.append(payload)
-                    else:
-                        events.append((payload, None))
-
-                now = time.time()
-                if now - last_tick >= 0.015:
-                    with movement_lock:
-                        dx = accumulated_movement['dx']
-                        dy = accumulated_movement['dy']
-                        accumulated_movement['dx'] = 0
-                        accumulated_movement['dy'] = 0
-                    if dx != 0 or dy != 0:
-                        move_evt = {'type': 'move_relative', 'dx': dx, 'dy': dy}
-                        events.append((msgpack.packb(move_evt, use_bin_type=True), move_evt))
-                    last_tick = now
-
-                if not events:
-                    continue
-
-                to_remove = []
-                active_lost = False
-                if self.active_client is None and self.client_sockets:
-                    self.active_client = self.client_sockets[0]
-                targets = [self.active_client] if self.active_client else []
-                for sock in list(targets):
-                    if sock not in self.client_sockets:
-                        continue
-                    for packed, event in events:
-                        try:
-                            prev_to = sock.gettimeout()
-                            sock.settimeout(0.1)
-                            sock.sendall(struct.pack('!I', len(packed)) + packed)
-                            sock.settimeout(prev_to)
-                            if event and event.get('type') == 'move_relative':
-                                logging.debug(
-                                    "Mouse move sent to %s: dx=%s dy=%s",
-                                    self.client_infos.get(sock, sock.getpeername()),
-                                    event.get('dx'),
-                                    event.get('dy'),
-                                )
-                            else:
-                                logging.debug(
-                                    "Sent %d bytes to %s",
-                                    len(packed),
-                                    self.client_infos.get(sock, sock.getpeername()),
-                                )
-                        except (socket.timeout, BlockingIOError):
-                            logging.warning(
-                                "Client not reading, disconnecting %s",
-                                self.client_infos.get(sock, sock.getpeername()),
-                            )
-                            to_remove.append(sock)
-                            break
-                        except Exception as e:
-                            try:
-                                event_dbg = msgpack.unpackb(packed, raw=False)
-                            except Exception:
-                                event_dbg = '<unpack failed>'
-                            logging.error(
-                                f"Failed sending event {event_dbg} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
-                                exc_info=True,
-                            )
-                            if event_dbg != '<unpack failed>':
-                                record_unsent(event_dbg)
-                            to_remove.append(sock)
-                            break
-                for s in to_remove:
-                    if s == self.active_client:
-                        active_lost = True
-                    self._handle_disconnect(s, "sender error")
-                    if self.client_sockets and self.active_client is None:
-                        self.active_client = self.client_sockets[0]
-                if active_lost:
-                    if self.active_client:
-                        self.status_update.emit(
-                            f"Kapcsolat megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
-                        )
-                    else:
-                        self.status_update.emit(
-                            "Kapcsolat megszakadt. Várakozás új kliensre..."
-                        )
-                if to_remove and not self.client_sockets:
-                    self.deactivate_kvm(reason="all clients disconnected")
-                    break
-
-        sender_thread = threading.Thread(target=sender, daemon=True)
-        sender_thread.start()
-
-        def send(data):
-            """Queue an event for sending and log the details."""
-            if not self.kvm_active:
+                    self._capture_send_queue.put_nowait(None)
+                except Exception:
+                    pass
+            if self._capture_sender_thread and self._capture_sender_thread.is_alive():
+                self._capture_sender_thread.join()
+            self._capture_send_queue = None
+            self._capture_sender_thread = None
+            if self._capture_unsent_total:
                 logging.warning(
-                    "Send called while KVM inactive. Event=%s active_client=%s connected_clients=%d",
-                    data,
-                    self.client_infos.get(self.active_client),
-                    len(self.client_sockets),
+                    "Unsent or failed events (total=%d, showing_last=%d): %s",
+                    self._capture_unsent_total,
+                    len(self._capture_unsent_events),
+                    list(self._capture_unsent_events),
                 )
-                record_unsent(data)
-                return False
-            try:
-                packed = msgpack.packb(data, use_bin_type=True)
-                if send_queue.full():
-                    try:
-                        send_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    logging.debug("Send queue full, dropping oldest event")
-                send_queue.put_nowait((packed, data))
-                if data.get('type') == 'move_relative':
-                    logging.debug(
-                        f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
-                    )
-                else:
-                    logging.debug(f"Queued event: {data}")
-                return True
-            except Exception as e:
-                logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
-                record_unsent(data)
-                self.deactivate_kvm(reason="queue error")
-                return False
+            logging.info("Input capture session finished")
 
-        def on_move(x, y):
-            nonlocal is_warping
-            if is_warping:
-                is_warping = False
-                return
-            dx = x - last_pos['x']
-            dy = y - last_pos['y']
-            if dx != 0 or dy != 0:
-                with movement_lock:
-                    accumulated_movement['dx'] += dx
-                    accumulated_movement['dy'] += dy
-            is_warping = True
-            host_mouse_controller.position = (center_x, center_y)
-            last_pos['x'], last_pos['y'] = center_x, center_y
-
-        def on_click(x,y,b,p):
-            send({'type':'click','button':b.name,'pressed':p})
-
-        def on_scroll(x,y,dx,dy):
-            send({'type':'scroll','dx':dx,'dy':dy})
-        
-        pressed_keys = set()
-        current_vks = set()
-        numpad_vks = set()
-
-        def get_vk(key):
-            if hasattr(key, "vk") and key.vk is not None:
-                return key.vk
-            if hasattr(key, "value") and hasattr(key.value, "vk"):
-                return key.value.vk
-            return None
-
-        # worker.py -> start_kvm_streaming metóduson belüli on_key JAVÍTVA
-
-        def on_key(k, p):
-            """Forward keyboard events and handle Pico/host hotkeys DURING streaming."""
-            try:
-                # --- ÚJ, FONTOS RÉSZ: VEZÉRLÉS FIGYELÉSE STREAMING ALATT ---
-                # A billentyű lenyomásakor (p=True) ellenőrizzük a vezérlőgombokat.
-                if p:
-                    if k == keyboard.Key.f13:
-                        logging.info("!!! Visszaváltás a hosztra (Pico F13) észlelve a streaming alatt !!!")
-                        self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
-                        return # Ne küldjük tovább az F13-at a kliensnek
-                    if k == keyboard.Key.f14:
-                        logging.info("!!! Váltás laptopra (Pico F14) észlelve a streaming alatt !!!")
-                        self.toggle_client_control('laptop', switch_monitor=False)
-                        return # Ne küldjük tovább
-                    if k == keyboard.Key.f15:
-                        logging.info("!!! Váltás EliteDeskre (Pico F15) észlelve a streaming alatt !!!")
-                        self.toggle_client_control('elitedesk', switch_monitor=True)
-                        return
-                    if k in (keyboard.Key.f18, keyboard.Key.f19, keyboard.Key.f20, keyboard.Key.f22):
-                        logging.info("Audio/mute hotkey %s captured locally during streaming", k)
-                        return
-
-                # Itt jön a már meglévő logika a Shift+Numpad0 figyelésére is.
-                # Ezt is kiegészítjük, hogy a Pico gombokkal konzisztens legyen.
-                vk = get_vk(k)
-                if vk is not None:
-                    if p:
-                        current_vks.add(vk)
-                        if getattr(k, '_flags', 0) == 0:
-                            numpad_vks.add(vk)
-                    else:
-                        current_vks.discard(vk)
-                        numpad_vks.discard(vk)
-
-                is_shift = VK_LSHIFT in current_vks or VK_RSHIFT in current_vks
-                is_num0 = VK_NUMPAD0 in current_vks or (VK_INSERT in current_vks and VK_INSERT in numpad_vks)
-                
-                # Visszaváltás Shift+Num0-val
-                if is_shift and is_num0:
-                    logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
-                    # Elengedjük a billentyűket a kliensen, mielőtt megszakítjuk a kapcsolatot
-                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_INSERT]:
-                        if vk_code in current_vks:
-                            send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                    current_vks.clear()
-                    self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
-                    return
-                
-                # --- EDDIG TART AZ ÚJ ÉS MÓDOSÍTOTT LOGIKA ---
-
-                # Az eredeti billentyű-továbbító logika marad
-                if hasattr(k, "char") and k.char is not None:
-                    key_type = "char"
-                    key_val = k.char
-                elif hasattr(k, "name"):
-                    key_type = "special"
-                    key_val = k.name
-                elif hasattr(k, "vk"):
-                    key_type = "vk"
-                    key_val = k.vk
-                else:
-                    logging.warning(f"Ismeretlen billentyű: {k}")
-                    return False
-
-                key_id = (key_type, key_val)
-                if p:
-                    pressed_keys.add(key_id)
-                else:
-                    pressed_keys.discard(key_id)
-
-                if not send({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
-                    return False
-            except Exception as e:
-                logging.error(f"Hiba az on_key függvényben: {e}", exc_info=True)
-                return False
-
-        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
-        k_listener = keyboard.Listener(on_press=lambda k:on_key(k,True), on_release=lambda k:on_key(k,False), suppress=True)
-        
-        m_listener.start()
-        k_listener.start()
-        
+    def _capture_sender_loop(self) -> None:
         while self.kvm_active and self._running:
-            time.sleep(STREAM_LOOP_DELAY)
+            if not self._capture_send_queue:
+                break
+            try:
+                event = self._capture_send_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if event is None:
+                logging.debug("Input sender loop exiting")
+                break
+            self._dispatch_input_event(event)
 
-        for ktype, kval in list(pressed_keys):
-            send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
-        pressed_keys.clear()
+    def _handle_captured_input(self, event: dict) -> None:
+        if not self.kvm_active or not self._running:
+            return
+        if event.get('type') == 'key' and self._handle_hotkeys(event):
+            return
+        self._queue_captured_event(event)
 
-        m_listener.stop()
-        k_listener.stop()
-        send_queue.put(None)
-        sender_thread.join()
-        while not send_queue.empty():
-            leftover = send_queue.get()
-            if leftover and isinstance(leftover, tuple):
-                _, evt = leftover
-            else:
-                evt = None
-            if evt:
-                record_unsent(evt)
-
-        if unsent_events_total:
+    def _queue_captured_event(self, event: dict) -> None:
+        queue_obj = self._capture_send_queue
+        if not queue_obj:
+            return
+        if not self.kvm_active:
             logging.warning(
-                "Unsent or failed events (total=%d, showing_last=%d): %s",
-                unsent_events_total,
-                len(unsent_events),
-                list(unsent_events),
+                "Dropping captured event while inactive: %s (active_client=%s, connected=%d)",
+                event,
+                self.client_infos.get(self.active_client),
+                len(self.client_sockets),
             )
+            self._record_unsent_input(event)
+            return
+        try:
+            if queue_obj.full():
+                try:
+                    queue_obj.get_nowait()
+                except queue.Empty:
+                    pass
+                logging.debug("Input send queue full, dropping oldest event")
+            queue_obj.put_nowait(event)
+            if event.get('type') == 'move_relative':
+                logging.debug(
+                    "Relative mouse move queued: dx=%s dy=%s",
+                    event.get('dx'),
+                    event.get('dy'),
+                )
+            else:
+                logging.debug("Queued event: %s", event)
+        except Exception as exc:
+            logging.error("Failed to queue input event %s: %s", event, exc, exc_info=True)
+            self._record_unsent_input(event)
+            self.deactivate_kvm(reason="queue error")
 
-        logging.info("Streaming listenerek leálltak.")
+    def _dispatch_input_event(self, event: dict) -> None:
+        if not self.kvm_active:
+            self._record_unsent_input(event)
+            return
+        if self.active_client is None and self.client_sockets:
+            self.active_client = self.client_sockets[0]
+        targets = [self.active_client] if self.active_client else []
+        to_remove = []
+        active_lost = False
+        for sock in list(targets):
+            if sock not in self.client_sockets:
+                continue
+            if not self._send_message(sock, event):
+                self._record_unsent_input(event)
+                to_remove.append(sock)
+        for sock in to_remove:
+            if sock == self.active_client:
+                active_lost = True
+            self._handle_disconnect(sock, "sender error")
+            if self.client_sockets and self.active_client is None:
+                self.active_client = self.client_sockets[0]
+        if active_lost:
+            if self.active_client:
+                self.status_update.emit(
+                    f"Kapcsolat megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
+                )
+            else:
+                self.status_update.emit(
+                    "Kapcsolat megszakadt. Várakozás új kliensre..."
+                )
+        if to_remove and not self.client_sockets:
+            self.deactivate_kvm(reason="all clients disconnected")
+
+    def _record_unsent_input(self, event: Any) -> None:
+        self._capture_unsent_total += 1
+        summary: Any = event
+        try:
+            if isinstance(event, dict):
+                summary = {}
+                for key, value in event.items():
+                    if isinstance(value, (bytes, bytearray)):
+                        summary[key] = f"<{len(value)} bytes>"
+                    elif isinstance(value, str) and len(value) > 200:
+                        summary[key] = f"<string len={len(value)}>"
+                    else:
+                        summary[key] = value
+            elif isinstance(event, (bytes, bytearray)):
+                summary = f"<{len(event)} bytes>"
+        except Exception:
+            summary = repr(event)
+        self._capture_unsent_events.append(summary)
+
+    def _handle_hotkeys(self, event: dict) -> bool:
+        pressed = bool(event.get('pressed'))
+        key_type = event.get('key_type')
+        key_val = event.get('key')
+        vk_code = event.get('vk')
+        if vk_code is not None:
+            if pressed:
+                self._capture_current_vks.add(int(vk_code))
+                if event.get('numpad'):
+                    self._capture_numpad_vks.add(int(vk_code))
+            else:
+                self._capture_current_vks.discard(int(vk_code))
+                self._capture_numpad_vks.discard(int(vk_code))
+
+        if key_type == 'special' and pressed:
+            if key_val == 'f13':
+                logging.info("F13 detected locally during streaming; deactivating controller")
+                self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
+                return True
+            if key_val == 'f14':
+                logging.info("F14 detected locally during streaming; switching to laptop")
+                self.toggle_client_control('laptop', switch_monitor=False)
+                return True
+            if key_val == 'f15':
+                logging.info("F15 detected locally during streaming; switching to elitedesk")
+                self.toggle_client_control('elitedesk', switch_monitor=True)
+                return True
+            if key_val in {'f18', 'f19', 'f20', 'f22'}:
+                logging.info("Audio hotkey %s handled locally during streaming", key_val)
+                return True
+
+        is_shift = VK_LSHIFT in self._capture_current_vks or VK_RSHIFT in self._capture_current_vks
+        is_num0 = (
+            VK_NUMPAD0 in self._capture_current_vks
+            or (
+                VK_INSERT in self._capture_current_vks
+                and VK_INSERT in self._capture_numpad_vks
+            )
+        )
+        if is_shift and is_num0:
+            logging.info("Shift+Numpad0 detected locally; returning control to host")
+            for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_INSERT]:
+                if vk_code in self._capture_current_vks:
+                    release_event = {
+                        'type': 'key',
+                        'key_type': 'vk',
+                        'key': vk_code,
+                        'pressed': False,
+                    }
+                    self._dispatch_input_event(release_event)
+            self._capture_current_vks.clear()
+            self._capture_numpad_vks.clear()
+            self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
+            return True
+        return False
 
     def run_client(self):
         """Deprecated: client logic replaced by peer discovery."""
@@ -2500,10 +2220,7 @@ class KVMService(QObject):
                 if hb_thread: hb_thread.join(timeout=0.1)
                 
                 # A többi cleanup kód
-                for k in list(self._pressed_keys):
-                    try: self.keyboard_controller.release(k)
-                    except: pass
-                self._pressed_keys.clear()
+                self.input_manager.release_simulated_keys()
                 if hk_listener: hk_listener.stop()
                 self.release_hotkey_keys()
                 # Biztonságos hívás, csak akkor fut le, ha 's' létezik és létrejött a kapcsolat
