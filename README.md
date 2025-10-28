@@ -175,17 +175,17 @@ packaged after enabling autostart from a normal Python interpreter.
 
 ## Clipboard synchronization
 
-A simple script `clipboard_sync.py` is provided to share the system clipboard between computers.
+A simple script `utils/clipboard_sync.py` is provided to share the system clipboard between computers.
 One machine runs the server:
 
 ```bash
-python clipboard_sync.py server --port 8765
+python utils/clipboard_sync.py server --port 8765
 ```
 
 Other machines connect as clients:
 
 ```bash
-python clipboard_sync.py client <server-ip> --port 8765
+python utils/clipboard_sync.py client <server-ip> --port 8765
 ```
 
 Whenever the clipboard changes on any connected computer the new contents are sent to all others.
@@ -208,7 +208,7 @@ other platforms.
 Code style checks can be performed with `pycodestyle`:
 
 ```bash
-pycodestyle --max-line-length=120 gui.py clipboard_sync.py
+pycodestyle --max-line-length=120 gui.py utils/clipboard_sync.py
 ```
 
 You can also use the provided configuration in `setup.cfg` to keep

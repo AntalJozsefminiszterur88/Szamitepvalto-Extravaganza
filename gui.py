@@ -33,7 +33,7 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 from worker import KVMWorker
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
-from stability_monitor import get_global_monitor
+from utils.stability_monitor import get_global_monitor
 from file_transfer import FileTransferWidget
 
 
