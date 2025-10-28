@@ -145,9 +145,9 @@ you can verify detection in the console.
 The `pico_hid_switch.py` example runs directly on the Pico. It emulates the hotkey
 presses for switching computers and now opens the `usb_cdc` serial connection.
 When a button is pressed the script writes `b'1'`, `b'2'` or `b'3'` to the serial
-port and briefly pauses so the host receives the byte. The `PicoSerialHandler`
-in the desktop application listens for these values to activate the appropriate
-target.
+port and briefly pauses so the host receives the byte. The desktop application's
+`ButtonInputManager` listens for these values and activates the appropriate
+target without requiring a separate Pico-specific handler.
 
 If both the console and data CDC interfaces are enabled, Windows will expose two
 COM ports. The application expects the **data** interface, so ensure this port is

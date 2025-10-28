@@ -83,7 +83,7 @@ class KVMWorker(QObject):
         '_ignore_next_clipboard_change', 'last_server_ip', 'message_queue',
         'message_processor_thread', '_host_mouse_controller', '_orig_mouse_pos',
         'mouse_controller', '_win_mouse_fraction', 'keyboard_controller',
-        '_pressed_keys', '_provider_pressed_keys', 'pico_thread', 'pico_handler',
+        '_pressed_keys', '_provider_pressed_keys',
         'discovered_peers', 'connection_manager_thread', 'resolver_thread',
         'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
         'pending_activation_target', 'provider_stop_event', 'provider_target',
@@ -145,8 +145,6 @@ class KVMWorker(QObject):
         self.keyboard_controller = keyboard.Controller()
         self._pressed_keys = set()
         self._provider_pressed_keys = set()
-        self.pico_thread = None
-        self.pico_handler = None
         self.discovered_peers = {}
         # Lock protecting access to discovered_peers from multiple threads
         self.peers_lock = threading.Lock()
@@ -218,7 +216,6 @@ class KVMWorker(QObject):
         register('resolver', lambda: self.resolver_thread)
         register('connection', lambda: self.connection_thread)
         register('heartbeat', lambda: self.heartbeat_thread)
-        register('pico', lambda: self.pico_thread)
 
     def _register_clipboard_monitoring(self) -> None:
         if not self.stability_monitor or not self.clipboard_storage_dir:
@@ -1613,8 +1610,6 @@ class KVMWorker(QObject):
             self.connection_thread.join(timeout=1)
         if self.clipboard_thread and self.clipboard_thread.is_alive():
             self.clipboard_thread.join(timeout=1)
-        if self.pico_thread and self.pico_thread.is_alive():
-            self.pico_thread.join(timeout=1)
         if self.connection_manager_thread and self.connection_manager_thread.is_alive():
             self.connection_manager_thread.join(timeout=1)
         if self.resolver_thread and self.resolver_thread.is_alive():
