@@ -927,17 +927,32 @@ class KVMWorker(QObject):
         elif msg_type == 'key':
             k_info = data.get('key')
             key_type = data.get('key_type')
-            if key_type == 'char':
-                k_press = k_info
-            elif key_type == 'special':
-                k_press = getattr(keyboard.Key, k_info, None)
-            elif key_type == 'vk':
+            vk_code = data.get('vk_code')
+            k_press = None
+
+            vk_lookup = None
+            if vk_code is not None:
                 try:
-                    k_press = keyboard.KeyCode.from_vk(int(k_info))
+                    vk_lookup = int(vk_code)
+                except (TypeError, ValueError):
+                    vk_lookup = None
+
+            if vk_lookup is not None:
+                try:
+                    k_press = keyboard.KeyCode.from_vk(vk_lookup)
                 except Exception:
                     k_press = None
-            else:
-                k_press = None
+
+            if k_press is None:
+                if key_type == 'char':
+                    k_press = k_info
+                elif key_type == 'special':
+                    k_press = getattr(keyboard.Key, k_info, None)
+                elif key_type == 'vk':
+                    try:
+                        k_press = keyboard.KeyCode.from_vk(int(k_info))
+                    except Exception:
+                        k_press = None
             if k_press:
                 if data.get('pressed'):
                     self.keyboard_controller.press(k_press)
@@ -2573,13 +2588,24 @@ class KVMWorker(QObject):
                     logging.warning(f"Ismeretlen billentyű: {k}")
                     return False
 
-                key_id = (key_type, key_val)
+                vk_code = None
+                if vk is not None:
+                    try:
+                        vk_code = int(vk)
+                    except (TypeError, ValueError):
+                        vk_code = None
+
+                key_id = (key_type, key_val, vk_code)
                 if p:
                     pressed_keys.add(key_id)
                 else:
                     pressed_keys.discard(key_id)
 
-                if not send({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
+                event_payload = {"type": "key", "key_type": key_type, "key": key_val, "pressed": p}
+                if vk_code is not None:
+                    event_payload["vk_code"] = vk_code
+
+                if not send(event_payload):
                     return False
             except Exception as e:
                 logging.error(f"Hiba az on_key függvényben: {e}", exc_info=True)
@@ -2594,8 +2620,11 @@ class KVMWorker(QObject):
         while self.kvm_active and self._running:
             time.sleep(STREAM_LOOP_DELAY)
 
-        for ktype, kval in list(pressed_keys):
-            send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
+        for ktype, kval, kvk in list(pressed_keys):
+            payload = {"type": "key", "key_type": ktype, "key": kval, "pressed": False}
+            if kvk is not None:
+                payload["vk_code"] = kvk
+            send(payload)
         pressed_keys.clear()
 
         m_listener.stop()
