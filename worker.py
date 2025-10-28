@@ -39,12 +39,12 @@ from utils.clipboard_sync import (
     write_clipboard_content,
 )
 from pynput import mouse, keyboard
-from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
+from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from kvm_core.monitor import MonitorController
+from kvm_core.network.peer_manager import PeerManager
 from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
 from PySide6.QtCore import QObject, Signal, QSettings, QStandardPaths
-import ipaddress
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
@@ -89,9 +89,8 @@ class KVMWorker(QObject):
         'clipboard_expiry_seconds', 'server_socket', 'input_provider_socket',
         '_ignore_next_clipboard_change', 'last_server_ip', 'message_queue',
         'message_processor_thread', '_host_mouse_controller', '_orig_mouse_pos',
-        'pico_thread', 'pico_handler',
-        'discovered_peers', 'connection_manager_thread', 'resolver_thread',
-        'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
+        'pico_thread', 'pico_handler', 'peer_manager',
+        'service_info', 'clients_lock',
         'pending_activation_target', 'provider_target',
         'current_target',
         'monitor_controller',
@@ -129,9 +128,6 @@ class KVMWorker(QObject):
         self.local_ip = self._detect_primary_ipv4()
         self.server_ip = None
         self.connection_thread = None
-        self.connection_manager_thread = None
-        self.resolver_thread = None
-        self.resolver_queue = queue.Queue()
         self.service_info = None
         settings_store = QSettings(ORG_NAME, APP_NAME)
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
@@ -150,9 +146,6 @@ class KVMWorker(QObject):
         self._orig_mouse_pos = None
         self.pico_thread = None
         self.pico_handler = None
-        self.discovered_peers = {}
-        # Lock protecting access to discovered_peers from multiple threads
-        self.peers_lock = threading.Lock()
         # Lock protecting client_sockets and client_infos
         self.clients_lock = threading.Lock()
         # Remember if a KVM session was active when the connection dropped
@@ -195,6 +188,18 @@ class KVMWorker(QObject):
             force_numpad_vk=FORCE_NUMPAD_VK,
         )
 
+        def _peer_message_handler(peer_connection, data):
+            sock = getattr(peer_connection, 'socket', None)
+            self.message_queue.put((sock, data))
+
+        self.peer_manager = PeerManager(
+            self,
+            self.zeroconf,
+            port=self.settings['port'],
+            device_name=self.device_name,
+            message_callback=_peer_message_handler,
+        )
+
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
         kc = keyboard.Controller()
@@ -228,8 +233,8 @@ class KVMWorker(QObject):
         register('message_processor', lambda: self.message_processor_thread)
         register('clipboard', lambda: self.clipboard_thread)
         register('streaming', lambda: self.streaming_thread, grace=15.0)
-        register('connection_manager', lambda: self.connection_manager_thread)
-        register('resolver', lambda: self.resolver_thread)
+        register('connection_manager', lambda: self.peer_manager.connection_manager_thread)
+        register('resolver', lambda: self.peer_manager.resolver_thread)
         register('connection', lambda: self.connection_thread)
         register('heartbeat', lambda: self.heartbeat_thread)
         register('pico', lambda: self.pico_thread)
@@ -696,7 +701,7 @@ class KVMWorker(QObject):
                     logging.warning("Failed to notify input provider about clipboard clear.")
                 exclude.add(provider)
             if self.client_sockets:
-                self._broadcast_message(payload, exclude=exclude)
+                self.peer_manager.broadcast(payload, exclude_peer=exclude)
 
     def _check_clipboard_expiration(self) -> None:
         if self.settings.get('role') != 'ado':
@@ -752,7 +757,7 @@ class KVMWorker(QObject):
                 else:
                     exclude.add(provider)
             if self.client_sockets:
-                self._broadcast_message(payload, exclude=exclude)
+                self.peer_manager.broadcast(payload, exclude_peer=exclude)
         else:
             if not clipboard_items_equal(item, self.last_clipboard_item):
                 self._apply_system_clipboard(item)
@@ -773,56 +778,13 @@ class KVMWorker(QObject):
     # ------------------------------------------------------------------
     # Network helpers
     # ------------------------------------------------------------------
-    def _send_message(self, sock, data) -> bool:
-        """Send a msgpack message through the given socket."""
-        try:
-            packed = msgpack.packb(data, use_bin_type=True)
-            sock.sendall(struct.pack('!I', len(packed)) + packed)
-            logging.debug(
-                "Sent message type '%s' (%d bytes)",
-                data.get('type'),
-                len(packed),
-            )
-            return True
-        except Exception as e:
-            logging.error(
-                "Failed to send message type '%s': %s",
-                data.get('type'),
-                e,
-                exc_info=True,
-            )
-            return False
-
-    def _broadcast_message(self, data, exclude=None) -> None:
-        """Broadcast a message to all connected clients."""
-        if exclude is None:
-            excluded = set()
-        elif isinstance(exclude, (set, list, tuple)):
-            excluded = set(exclude)
-        else:
-            excluded = {exclude}
-        packed = msgpack.packb(data, use_bin_type=True)
-        for s in list(self.client_sockets):
-            if s in excluded:
-                continue
-            try:
-                s.sendall(struct.pack('!I', len(packed)) + packed)
-                logging.debug(
-                    "Broadcast message type '%s' to %s (%d bytes)",
-                    data.get('type'),
-                    self.client_infos.get(s, 'unknown'),
-                    len(packed),
-                )
-            except Exception as e:
-                logging.error("Failed to broadcast message: %s", e)
-
     def _send_to_provider(self, payload: dict) -> bool:
         """Send a command to the connected input provider if available."""
         sock = self.input_provider_socket
         if not sock:
             logging.warning("No input provider socket available for payload %s", payload)
             return False
-        return self._send_message(sock, payload)
+        return self.peer_manager.send_to_peer(sock, payload)
 
     def _send_provider_event(self, payload: dict) -> bool:
         if not self._running:
@@ -831,7 +793,7 @@ class KVMWorker(QObject):
         if not sock:
             logging.error("Lost server socket while sending provider event")
             return False
-        if not self._send_message(sock, payload):
+        if not self.peer_manager.send_to_peer(sock, payload):
             logging.error("Failed to send provider event %s", payload)
             return False
         return True
@@ -843,7 +805,7 @@ class KVMWorker(QObject):
             if self.active_client is None:
                 logging.debug("No active laptop client to forward provider event %s", data)
                 return
-            if not self._send_message(self.active_client, data):
+            if not self.peer_manager.send_to_peer(self.active_client, data):
                 logging.warning("Failed to forward provider event to laptop; deactivating KVM")
                 self.deactivate_kvm(reason="forward_failed", switch_monitor=False)
         elif target == 'elitedesk':
@@ -972,66 +934,6 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.debug("IP watchdog error: %s", e)
 
-    def _handle_disconnect(self, sock, reason: str = "unknown") -> None:
-        """Cleanup for a disconnected socket with peer-awareness."""
-        addr = None
-        try:
-            addr = sock.getpeername()
-        except Exception:
-            pass
-        try:
-            sock.close()
-        except Exception:
-            pass
-
-        with self.clients_lock:
-            peer_name = self.client_infos.get(sock)
-            was_active = sock == self.active_client
-            if sock in self.client_sockets:
-                self.client_sockets.remove(sock)
-            if sock in self.client_infos:
-                del self.client_infos[sock]
-            self.client_roles.pop(sock, None)
-            peer_still_connected = (
-                peer_name is not None and peer_name in self.client_infos.values()
-            )
-            if peer_still_connected and was_active:
-                for s, name in self.client_infos.items():
-                    if name == peer_name:
-                        self.active_client = s
-                        break
-
-        if peer_still_connected:
-            logging.debug(
-                "Closed redundant connection to %s (%s)", peer_name, reason
-            )
-            return
-
-        if self.settings.get('role') == 'ado' and sock == self.input_provider_socket:
-            if self.kvm_active:
-                self.deactivate_kvm(
-                    switch_monitor=self.current_target == 'elitedesk',
-                    reason="input provider disconnect",
-                )
-            self.input_provider_socket = None
-            self.pending_activation_target = None
-        if self.settings.get('role') == 'input_provider' and sock == self.server_socket:
-            self.server_socket = None
-            self._stop_input_provider_stream()
-        if self.settings.get('role') == 'vevo' and sock == self.server_socket:
-            self.server_socket = None
-
-        if was_active and self.kvm_active:
-            logging.info("Active client disconnected, deactivating KVM")
-            self.pending_activation_target = peer_name
-            self.deactivate_kvm(reason=reason)
-        elif was_active:
-            self.active_client = None
-            self.pending_activation_target = None
-        logging.debug("Peer cleanup completed; connection manager will attempt reconnection")
-        if addr and self._running:
-            self._schedule_reconnect(addr[0], self.settings['port'])
-
     def _schedule_reconnect(self, ip: str, port: int) -> None:
         """Spawn a background thread that keeps trying to reconnect."""
 
@@ -1080,7 +982,7 @@ class KVMWorker(QObject):
                         logging.warning("Failed to forward clipboard update to input provider.")
                     exclude.add(provider)
                 if self.client_sockets:
-                    self._broadcast_message(payload, exclude=exclude)
+                    self.peer_manager.broadcast(payload, exclude_peer=exclude)
             self._check_clipboard_expiration()
             time.sleep(0.3)
         logging.info("Clipboard server loop stopped.")
@@ -1100,7 +1002,7 @@ class KVMWorker(QObject):
                 sock = self.server_socket
                 if sock:
                     payload = self._build_clipboard_payload(item)
-                    if not self._send_message(sock, payload):
+                    if not self.peer_manager.send_to_peer(sock, payload):
                         logging.warning("Failed to send clipboard update to server.")
             time.sleep(0.3)
         logging.info("Clipboard client loop stopped.")
@@ -1296,6 +1198,7 @@ class KVMWorker(QObject):
         self._running = False
         self._unregister_monitoring()
         self.pending_activation_target = None
+        self.peer_manager.stop()
         if self.settings.get('role') == 'input_provider':
             self._stop_input_provider_stream()
         elif self.kvm_active:
@@ -1341,10 +1244,12 @@ class KVMWorker(QObject):
             self.clipboard_thread.join(timeout=1)
         if self.pico_thread and self.pico_thread.is_alive():
             self.pico_thread.join(timeout=1)
-        if self.connection_manager_thread and self.connection_manager_thread.is_alive():
-            self.connection_manager_thread.join(timeout=1)
-        if self.resolver_thread and self.resolver_thread.is_alive():
-            self.resolver_thread.join(timeout=1)
+        if self.peer_manager.connection_manager_thread and self.peer_manager.connection_manager_thread.is_alive():
+            self.peer_manager.connection_manager_thread.join(timeout=1)
+        if self.peer_manager.accept_thread and self.peer_manager.accept_thread.is_alive():
+            self.peer_manager.accept_thread.join(timeout=1)
+        if self.peer_manager.resolver_thread and self.peer_manager.resolver_thread.is_alive():
+            self.peer_manager.resolver_thread.join(timeout=1)
         if self.message_processor_thread and self.message_processor_thread.is_alive():
             try:
                 self.message_queue.put_nowait((None, None))
@@ -1425,24 +1330,7 @@ class KVMWorker(QObject):
             )
             self.message_processor_thread.start()
 
-            threading.Thread(
-                target=self.accept_connections, daemon=True, name="AcceptThread"
-            ).start()
-            self.resolver_thread = threading.Thread(
-                target=self._resolver_thread,
-                daemon=True,
-                name="Resolver",
-            )
-            self.resolver_thread.start()
-            threading.Thread(
-                target=self.discover_peers, daemon=True, name="DiscoverThread"
-            ).start()
-            self.connection_manager_thread = threading.Thread(
-                target=self._connection_manager,
-                daemon=True,
-                name="ConnMgr",
-            )
-            self.connection_manager_thread.start()
+            self.peer_manager.start()
 
             if self.settings.get('role') == 'ado':
                 self.clipboard_thread = threading.Thread(
@@ -1581,213 +1469,6 @@ class KVMWorker(QObject):
             except Exception as e:
                 logging.error("Failed to process client message: %s", e, exc_info=True)
 
-
-    def accept_connections(self):
-        """Accept connections from peers; keep only if our IP wins the tie."""
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-        while self._running:
-            try:
-                server_socket.bind(('', self.settings['port']))
-                break
-            except OSError as e:
-                logging.error("Port bind failed: %s. Retrying...", e)
-                time.sleep(5)
-
-        server_socket.listen(5)
-        logging.info(f"TCP server listening on {self.settings['port']}")
-
-        while self._running:
-            try:
-                client_sock, addr = server_socket.accept()
-            except OSError:
-                break
-
-            peer_ip = addr[0]
-            try:
-                local_addr = ipaddress.ip_address(self.local_ip)
-                remote_addr = ipaddress.ip_address(peer_ip)
-                if local_addr > remote_addr:
-                    client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    threading.Thread(
-                        target=self.monitor_client,
-                        args=(client_sock, addr),
-                        daemon=True,
-                    ).start()
-                else:
-                    client_sock.close()
-            except Exception:
-                try:
-                    client_sock.close()
-                except Exception:
-                    pass
-
-        try:
-            server_socket.close()
-        except Exception:
-            pass
-
-    def monitor_client(self, sock, addr):
-        """Monitor a single connection. Handles lifecycle and incoming data."""
-        sock.settimeout(30.0)
-
-        def recv_all(s, n):
-            data = b''
-            while len(data) < n:
-                chunk = s.recv(n - len(data))
-                if not chunk:
-                    return None
-                data += chunk
-            return data
-
-        client_name = str(addr)
-
-        # Exchange device names with the peer. Each side sends first then reads.
-        try:
-            self._send_message(
-                sock,
-                {
-                    'type': 'intro',
-                    'device_name': self.device_name,
-                    'role': self.settings.get('role'),
-                },
-            )
-            raw_len = recv_all(sock, 4)
-            if raw_len:
-                msg_len = struct.unpack('!I', raw_len)[0]
-                payload = recv_all(sock, msg_len)
-                if payload:
-                    hello = msgpack.unpackb(payload, raw=False)
-                    client_name = hello.get('device_name', client_name)
-                    client_role = hello.get('role')
-                    if (
-                        self.settings.get('role') == 'vevo'
-                        and client_role == 'ado'
-                    ):
-                        try:
-                            peer_ip = sock.getpeername()[0]
-                        except Exception:
-                            peer_ip = addr[0] if isinstance(addr, tuple) else None
-                        if (
-                            peer_ip
-                            and peer_ip != self.last_server_ip
-                            and peer_ip != self.local_ip
-                        ):
-                            self.last_server_ip = peer_ip
-                            settings_store = QSettings(ORG_NAME, APP_NAME)
-                            settings_store.setValue('network/last_server_ip', peer_ip)
-                            logging.info(
-                                "Laptop client stored last server IP: %s", peer_ip
-                            )
-                else:
-                    client_role = None
-            else:
-                client_role = None
-        except Exception:
-            try:
-                sock.close()
-            except Exception:
-                pass
-            return
-
-        with self.clients_lock:
-            self.client_sockets.append(sock)
-            self.client_infos[sock] = client_name
-            if 'client_role' in locals():
-                self.client_roles[sock] = client_role
-            if self.active_client is None and client_role != 'input_provider':
-                self.active_client = sock
-
-        if self.settings.get('role') == 'ado' and client_role == 'input_provider':
-            self.input_provider_socket = sock
-            logging.info("Input provider connected: %s", client_name)
-        if self.settings.get('role') == 'input_provider' and client_role == 'ado':
-            self.server_socket = sock
-            logging.info("Controller connection established: %s", client_name)
-        if self.settings.get('role') == 'vevo' and client_role == 'ado':
-            self.server_socket = sock
-            logging.info("Laptop connected to controller: %s", client_name)
-        if (
-            self.pending_activation_target
-            and self.pending_activation_target == client_name
-            and not self.kvm_active
-        ):
-            logging.info("Reconnected to %s, resuming KVM", client_name)
-            self.active_client = sock
-            self.pending_activation_target = None
-            self.activate_kvm(switch_monitor=self.switch_monitor)
-        logging.info(f"Client connected: {client_name} ({addr})")
-        logging.debug(
-            "monitor_client start for %s",
-            client_name,
-        )
-        # send current clipboard to newly connected client
-        if self.settings.get('role') == 'ado':
-            self._check_clipboard_expiration()
-            payload = self._get_shared_clipboard_payload()
-            if payload:
-                try:
-                    self._send_message(sock, payload)
-                except Exception as exc:
-                    logging.debug(
-                        "Failed to send initial clipboard to %s: %s",
-                        client_name,
-                        exc,
-                    )
-        try:
-            buffer = bytearray()
-            logging.debug("monitor_client main loop starting for %s", client_name)
-            while self._running:
-                logging.debug("monitor_client waiting for data from %s", client_name)
-                try:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    buffer.extend(chunk)
-                    logging.debug("Received %d bytes from %s", len(chunk), client_name)
-                    while len(buffer) >= 4:
-                        msg_len = struct.unpack('!I', buffer[:4])[0]
-                        if len(buffer) < 4 + msg_len:
-                            break
-                        payload = bytes(buffer[4:4 + msg_len])
-                        del buffer[:4 + msg_len]
-                        try:
-                            data = msgpack.unpackb(payload, raw=False)
-                        except Exception as e:
-                            logging.error("Failed to unpack message from %s: %s", client_name, e, exc_info=True)
-                            continue
-                        logging.debug(
-                            "monitor_client processing message type '%s'", data.get('type') or data.get('command')
-                        )
-                        self.message_queue.put((sock, data))
-                except socket.timeout:
-                    logging.debug(
-                        "Socket timeout waiting for data from %s (timeout=%s)",
-                        client_name,
-                        sock.gettimeout(),
-                    )
-                    continue
-                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, socket.error):
-                    break
-                except Exception as e:
-                    logging.error(
-                        f"monitor_client recv error from {client_name}: {e}",
-                        exc_info=True,
-                    )
-        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
-            logging.warning(f"Hálózati hiba a kliensnél ({client_name}): {e}")
-        except Exception as e:
-            logging.error(f"Váratlan hiba a monitor_client-ben ({client_name}): {e}", exc_info=True)
-       # worker.py -> monitor_client metóduson belüli 'finally' blokk JAVÍTVA
-
-        # worker.py -> monitor_client metóduson belüli 'finally' blokk - VÉGLEGES JAVÍTÁS
-
-        finally:
-            logging.warning(f"Kliens lecsatlakozott: {client_name} ({addr}).")
-            self._handle_disconnect(sock, "monitor_client")
-            logging.debug("monitor_client exit for %s", client_name)
 
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
@@ -2143,7 +1824,7 @@ class KVMWorker(QObject):
                 for s in to_remove:
                     if s == self.active_client:
                         active_lost = True
-                    self._handle_disconnect(s, "sender error")
+                    self.peer_manager.disconnect_peer(s, "sender error")
                     if self.client_sockets and self.active_client is None:
                         self.active_client = self.client_sockets[0]
                 if active_lost:
@@ -2357,216 +2038,4 @@ class KVMWorker(QObject):
     def run_client(self):
         """Deprecated: client logic replaced by peer discovery."""
         pass
-
-    def connect_to_server(self):
-        """Deprecated: replaced by peer discovery."""
-        return
-        """
-
-        # Egyszeri, 5 másodperces kezdeti várakozás a hálózat felépülésére.
-        # Ez a metódus elején, a fő cikluson KÍVÜL van, így csak egyszer fut le.
-        logging.info("Kezdeti várakozás (5 mp) a hálózat felépülésére...")
-        self.status_update.emit("Várakozás a hálózatra...")
-        time.sleep(5)
-
-        while self._running:
-            ip = self.server_ip or self.last_server_ip
-            if not ip:
-                self.status_update.emit("Adó keresése a hálózaton...")
-                time.sleep(1) # Várunk, amíg a Zeroconf talál egy IP-t
-                continue
-
-            hb_thread = None
-            s = None # Definiáljuk a socketet a try blokk előtt, hogy a finally is lássa
-
-            try:
-                # Tiszta, egyértelmű státusz üzenet a csatlakozás előtt
-                self.status_update.emit(f"Csatlakozás: {ip}...")
-                
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                s.settimeout(5.0)
-                logging.info(f"Connecting to {ip}:{self.settings['port']}")
-                s.connect((ip, self.settings['port']))
-                s.settimeout(None)
-
-                # Send initial handshake with our device name so the server can
-                # store a friendly identifier instead of just the remote
-                # address. If this fails we continue anyway and fall back to the
-                # numeric address on the server side.
-                try:
-                    self._send_message(s, {"device_name": self.device_name})
-                except Exception:
-                    logging.warning("Failed to send device_name handshake", exc_info=True)
-                
-                self.server_socket = s
-                settings_store = QSettings(ORG_NAME, APP_NAME)
-                settings_store.setValue('network/last_server_ip', ip)
-                self.last_server_ip = ip
-                logging.info("Sikeres csatlakozás!")
-
-                # Sikeres csatlakozás után visszaállítjuk a várakozási időt
-                retry_delay = 3
-
-                # Tiszta, egyértelmű státusz üzenet a siker után
-                self.status_update.emit("Csatlakozva. Irányítás átvételre kész.")
-                
-                # Hotkey listener a kliens oldalon
-                hotkey_cmd_l = {keyboard.Key.shift, keyboard.KeyCode.from_vk(VK_F12)}
-                hotkey_cmd_r = {keyboard.Key.shift_r, keyboard.KeyCode.from_vk(VK_F12)}
-                client_pressed_special_keys = set()
-                client_pressed_vk_codes = set()
-                def hk_press(key):
-                    try: client_pressed_vk_codes.add(key.vk)
-                    except AttributeError: client_pressed_special_keys.add(key)
-                    combined_pressed = client_pressed_special_keys.union({keyboard.KeyCode.from_vk(vk) for vk in client_pressed_vk_codes})
-                    if hotkey_cmd_l.issubset(combined_pressed) or hotkey_cmd_r.issubset(combined_pressed):
-                        logging.info("Client hotkey (Shift+F12) detected, requesting switch_elitedesk")
-                        try:
-                            packed = msgpack.packb({'command': 'switch_elitedesk'}, use_bin_type=True)
-                            s.sendall(struct.pack('!I', len(packed)) + packed)
-                        except Exception: pass
-                def hk_release(key):
-                    try: client_pressed_vk_codes.discard(key.vk)
-                    except AttributeError: client_pressed_special_keys.discard(key)
-                hk_listener = keyboard.Listener(on_press=hk_press, on_release=hk_release)
-                hk_listener.start()
-
-                # A belső while ciklus, ami az üzeneteket fogadja
-                def recv_all(sock, n):
-                    data = b''
-                    while len(data) < n:
-                        chunk = sock.recv(n - len(data))
-                        if not chunk: return None
-                        data += chunk
-                    return data
-
-                while self._running and self.server_ip == ip:
-                    raw_len = recv_all(s, 4)
-                    if not raw_len: break
-                    msg_len = struct.unpack('!I', raw_len)[0]
-                    payload = recv_all(s, msg_len)
-                    if payload is None: break
-                    data = msgpack.unpackb(payload, raw=False)
-                    self.message_queue.put((s, data))
-            
-            except (ConnectionRefusedError, socket.timeout, OSError) as e:
-                if self._running:
-                    logging.warning(f"Csatlakozás sikertelen: {e.__class__.__name__}. A szerver valószínűleg nem elérhető.")
-            
-            except Exception as e:
-                if self._running:
-                    logging.error(f"Váratlan hiba a csatlakozáskor: {e}", exc_info=True)
-
-            finally:
-                logging.info("Szerverkapcsolat lezárult vagy sikertelen volt.")
-                if hb_thread: hb_thread.join(timeout=0.1)
-                
-                # A többi cleanup kód
-                self.input_receiver.release_pressed_keys()
-                if hk_listener: hk_listener.stop()
-                self.release_hotkey_keys()
-                # Biztonságos hívás, csak akkor fut le, ha 's' létezik és létrejött a kapcsolat
-                self.server_socket = None
-                
-                if self._running:
-                    # Exponenciális visszalépés
-                    self.status_update.emit(f"Újrapróbálkozás {retry_delay:.0f} mp múlva...")
-                    logging.info(f"Újracsatlakozási kísérlet {retry_delay:.1f} másodperc múlva...")
-                    time.sleep(retry_delay)
-                    retry_delay = min(retry_delay * 1.5, max_retry_delay)
-        """
-
-    def discover_peers(self):
-        """Background zeroconf browser populating discovered_peers."""
-
-        class Listener:
-            def __init__(self, worker):
-                self.worker = worker
-
-            def add_service(self, zc, type_, name):
-                self.worker.resolver_queue.put(name)
-
-            def update_service(self, zc, type_, name):
-                self.worker.resolver_queue.put(name)
-
-            def remove_service(self, zc, type_, name):
-                with self.worker.peers_lock:
-                    self.worker.discovered_peers.pop(name, None)
-
-        ServiceBrowser(self.zeroconf, SERVICE_TYPE, Listener(self))
-        while self._running:
-            time.sleep(0.1)
-
-    def _resolver_thread(self):
-        """Resolve service names queued by discover_peers."""
-        while self._running:
-            try:
-                name = self.resolver_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            try:
-                info = self.zeroconf.get_service_info(SERVICE_TYPE, name, 3000)
-                if not info:
-                    continue
-                ip = None
-                for addr in info.addresses:
-                    if isinstance(addr, bytes) and len(addr) == 4:
-                        ip = socket.inet_ntoa(addr)
-                        break
-                if not ip:
-                    continue
-                port = info.port
-                if ip == self.local_ip and port == self.settings['port']:
-                    continue
-                with self.peers_lock:
-                    self.discovered_peers[name] = {'ip': ip, 'port': port}
-            except Exception as e:
-                logging.debug("Resolver failed for %s: %s", name, e)
-
-    def _connection_manager(self):
-        """Continuously probe peers and attempt connections."""
-        while self._running:
-            with self.peers_lock:
-                peers = list(self.discovered_peers.values())
-
-            if self.settings.get('role') == 'vevo' and self.last_server_ip:
-                if self.last_server_ip != self.local_ip and not any(
-                    peer.get('ip') == self.last_server_ip for peer in peers
-                ):
-                    peers.append({'ip': self.last_server_ip, 'port': self.settings['port']})
-
-            for peer in peers:
-                ip = peer['ip']
-                port = peer['port']
-                with self.clients_lock:
-                    already = any(
-                        s.getpeername()[0] == ip
-                        for s in self.client_sockets
-                        if s.fileno() != -1
-                    )
-                if already:
-                    continue
-                self.connect_to_peer(ip, port)
-            time.sleep(2)
-
-    def connect_to_peer(self, ip, port):
-        """Active outbound connection to another peer."""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.connect((ip, port))
-        except Exception as e:
-            logging.error("Failed to connect to peer %s:%s: %s", ip, port, e)
-            try:
-                sock.close()
-            except Exception:
-                pass
-            return
-
-        threading.Thread(
-            target=self.monitor_client,
-            args=(sock, (ip, port)),
-            daemon=True,
-        ).start()
 
