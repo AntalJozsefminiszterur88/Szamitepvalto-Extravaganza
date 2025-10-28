@@ -52,6 +52,27 @@ The main dependencies are:
 - zeroconf – service discovery on the local network
 - monitorcontrol – controlling monitor inputs
 
+## Secure communication
+
+All peer-to-peer communication is now protected with TLS using Python's built-in
+`ssl` module. Before starting the application you must provide a certificate and
+private key in the `config/` directory so both the controller and clients can
+establish encrypted channels.
+
+Generate a long-lived self-signed certificate with OpenSSL and place the
+resulting files in `config/cert.pem` and `config/key.pem`:
+
+```bash
+# Run this command on a trusted machine to generate the certificate and key.
+openssl req -x509 -newkey rsa:4096 -nodes -out config/cert.pem -keyout config/key.pem -days 3650
+```
+
+After creating the certificate distribute the `cert.pem` file to every machine
+running the application and copy it into their local `config/` directory. Each
+instance uses this trusted certificate authority to verify the controller
+identity during the TLS handshake. The `key.pem` file must remain on the machine
+acting as the server.
+
 ## Usage
 
 After installing the dependencies, run `python main.py` to launch the GUI. The
