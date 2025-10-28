@@ -62,6 +62,10 @@ from config import (
     VK_RSHIFT,
     VK_INSERT,
     VK_END,
+    VK_DIVIDE,
+    VK_SUBTRACT,
+    VK_MULTIPLY,
+    VK_ADD,
 )
 from button_input_manager import ButtonInputManager
 from stability_monitor import StabilityMonitor
@@ -72,6 +76,8 @@ STREAM_LOOP_DELAY = 0.05
 SEND_QUEUE_MAXSIZE = 200
 CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
 CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+
+FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
@@ -1426,7 +1432,16 @@ class KVMWorker(QObject):
             if self.provider_stop_event.is_set():
                 return False
             try:
-                if hasattr(key, 'char') and key.char is not None:
+                forced_vk = None
+                if hasattr(key, 'vk') and key.vk in FORCE_NUMPAD_VK:
+                    forced_vk = key.vk
+                elif hasattr(key, 'value') and hasattr(key.value, 'vk') and key.value.vk in FORCE_NUMPAD_VK:
+                    forced_vk = key.value.vk
+
+                if forced_vk is not None:
+                    key_type = 'vk'
+                    key_val = forced_vk
+                elif hasattr(key, 'char') and key.char is not None:
                     key_type = 'char'
                     key_val = key.char
                 elif hasattr(key, 'name') and key.name is not None:
@@ -2560,7 +2575,16 @@ class KVMWorker(QObject):
                 # --- EDDIG TART AZ ÚJ ÉS MÓDOSÍTOTT LOGIKA ---
 
                 # Az eredeti billentyű-továbbító logika marad
-                if hasattr(k, "char") and k.char is not None:
+                forced_vk = None
+                if hasattr(k, "vk") and k.vk in FORCE_NUMPAD_VK:
+                    forced_vk = k.vk
+                elif hasattr(k, "value") and hasattr(k.value, "vk") and k.value.vk in FORCE_NUMPAD_VK:
+                    forced_vk = k.value.vk
+
+                if forced_vk is not None:
+                    key_type = "vk"
+                    key_val = forced_vk
+                elif hasattr(k, "char") and k.char is not None:
                     key_type = "char"
                     key_val = k.char
                 elif hasattr(k, "name"):
