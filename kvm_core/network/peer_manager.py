@@ -8,7 +8,7 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 import msgpack
 from PySide6.QtCore import QSettings
 
-from config import APP_NAME, ORG_NAME, SERVICE_TYPE
+from config.constants import APP_NAME, ORG_NAME, SERVICE_TYPE
 from kvm_core.network.discovery import ServiceDiscovery
 from kvm_core.network.peer_connection import PeerConnection
 

@@ -12,7 +12,7 @@ from serial.tools import list_ports
 from pynput import keyboard
 from pynput.keyboard import Controller, Key
 
-from config import PICO_SERIAL_PORT
+from config.settings import PICO_SERIAL_PORT
 
 class ButtonInputManager:
     """Coordinate host F-key hotkeys and Pico button messages."""

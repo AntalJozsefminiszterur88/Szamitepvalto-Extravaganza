@@ -32,7 +32,8 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
 from kvm_core.orchestrator import KVMOrchestrator
-from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
+from config.constants import APP_NAME, ORG_NAME, ICON_PATH
+from config.settings import DEFAULT_PORT
 from utils.stability_monitor import get_global_monitor
 from file_transfer import FileTransferWidget
 

@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from PySide6.QtCore import QStandardPaths
 
-from config import BRAND_NAME
+from config.constants import BRAND_NAME
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
