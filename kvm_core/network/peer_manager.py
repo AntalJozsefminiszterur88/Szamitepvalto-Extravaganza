@@ -1,6 +1,7 @@
 import ipaddress
 import logging
 import socket
+import ssl
 import threading
 import time
 from typing import Callable, Dict, Iterable, Optional, Sequence
@@ -11,6 +12,7 @@ from PySide6.QtCore import QSettings
 from config.constants import APP_NAME, ORG_NAME, SERVICE_TYPE
 from kvm_core.network.discovery import ServiceDiscovery
 from kvm_core.network.peer_connection import PeerConnection
+from .secure_socket import *
 
 
 from kvm_core.state import KVMState
@@ -40,6 +42,8 @@ class PeerManager:
         self.connection_manager_thread: Optional[threading.Thread] = None
         self._connections: Dict[socket.socket, PeerConnection] = {}
         self._connections_lock = threading.Lock()
+        self._server_context = create_server_context()
+        self._client_context = create_client_context()
         self._discovery = ServiceDiscovery(
             zeroconf,
             SERVICE_TYPE,
@@ -276,17 +280,28 @@ class PeerManager:
                 break
 
             peer_ip = addr[0]
+            secure_sock: Optional[socket.socket] = None
             try:
+                client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                try:
+                    secure_sock = wrap_socket_server_side(client_sock, self._server_context)
+                except ssl.SSLError as e:
+                    logging.error(f"SSL hiba a bejövő kapcsolatnál ({addr[0]}): {e}")
+                    client_sock.close()
+                    continue
                 local_addr = ipaddress.ip_address(self._worker.local_ip)
                 remote_addr = ipaddress.ip_address(peer_ip)
                 if local_addr > remote_addr:
-                    client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    self._spawn_connection(client_sock, addr)
+                    secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    self._spawn_connection(secure_sock, addr)
                 else:
-                    client_sock.close()
+                    secure_sock.close()
             except Exception:
                 try:
-                    client_sock.close()
+                    if secure_sock is not None:
+                        secure_sock.close()
+                    else:
+                        client_sock.close()
                 except Exception:
                     pass
 
@@ -331,19 +346,32 @@ class PeerManager:
             time.sleep(2)
 
     def connect_to_peer(self, ip: str, port: int) -> None:
+        secure_sock: Optional[socket.socket] = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.connect((ip, port))
+            try:
+                secure_sock = wrap_socket_client_side(
+                    sock, self._client_context, server_hostname=ip
+                )
+            except ssl.SSLError as e:
+                logging.error(f"SSL hiba a kimenő kapcsolatnál ({ip}): {e}")
+                sock.close()
+                return
+            secure_sock.connect((ip, port))
         except Exception as exc:
             logging.error("Failed to connect to peer %s:%s: %s", ip, port, exc)
             try:
-                sock.close()
+                if secure_sock is not None:
+                    secure_sock.close()
+                else:
+                    sock.close()
             except Exception:
                 pass
             return
 
-        self._spawn_connection(sock, (ip, port))
+        assert secure_sock is not None
+        self._spawn_connection(secure_sock, (ip, port))
 
     def _normalize_exclude(self, exclude_peer: Optional[Iterable]) -> set:
         if exclude_peer is None:
