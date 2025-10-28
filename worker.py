@@ -77,6 +77,7 @@ CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
 CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
+MOUSE_SYNC_INACTIVITY_TIMEOUT = 1.0
 class KVMWorker(QObject):
     __slots__ = (
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
@@ -2297,6 +2298,13 @@ class KVMWorker(QObject):
         accumulated_movement = {'dx': 0, 'dy': 0}
         movement_lock = threading.Lock()
 
+        sync_state_lock = threading.Lock()
+        sync_state = {
+            'last_activity': time.monotonic(),
+            'paused': False,
+            'resume_requested': False,
+        }
+
         send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
         unsent_events = deque(maxlen=50)
         unsent_events_total = 0
@@ -2322,7 +2330,7 @@ class KVMWorker(QObject):
             unsent_events.append(summary)
 
         def sender():
-            last_tick = time.time()
+            last_tick = time.monotonic()
             while self.kvm_active and self._running:
                 events = []
                 try:
@@ -2341,17 +2349,39 @@ class KVMWorker(QObject):
                     else:
                         events.append((payload, None))
 
-                now = time.time()
+                dx = dy = 0
+                now = time.monotonic()
                 if now - last_tick >= 0.015:
                     with movement_lock:
                         dx = accumulated_movement['dx']
                         dy = accumulated_movement['dy']
                         accumulated_movement['dx'] = 0
                         accumulated_movement['dy'] = 0
-                    if dx != 0 or dy != 0:
-                        move_evt = {'type': 'move_relative', 'dx': dx, 'dy': dy}
-                        events.append((msgpack.packb(move_evt, use_bin_type=True), move_evt))
                     last_tick = now
+
+                sync_message = None
+                with sync_state_lock:
+                    paused = sync_state['paused']
+                    last_activity = sync_state['last_activity']
+                    if sync_state['resume_requested']:
+                        sync_state['resume_requested'] = False
+                        sync_state['paused'] = False
+                        paused = False
+                        sync_message = {'type': 'sync_resume'}
+                    elif not paused and (now - last_activity) >= MOUSE_SYNC_INACTIVITY_TIMEOUT:
+                        sync_state['paused'] = True
+                        paused = True
+                        sync_message = {'type': 'sync_pause'}
+
+                if sync_message is not None:
+                    logging.debug("Mouse synchronization state changed: %s", sync_message['type'])
+                    events.append((msgpack.packb(sync_message, use_bin_type=True), sync_message))
+
+                if (dx != 0 or dy != 0) and not paused:
+                    move_evt = {'type': 'move_relative', 'dx': dx, 'dy': dy}
+                    events.append((msgpack.packb(move_evt, use_bin_type=True), move_evt))
+                elif (dx != 0 or dy != 0) and paused:
+                    logging.debug("Mouse movement suppressed due to inactivity pause: dx=%s dy=%s", dx, dy)
 
                 if not events:
                     continue
@@ -2469,6 +2499,10 @@ class KVMWorker(QObject):
                 with movement_lock:
                     accumulated_movement['dx'] += dx
                     accumulated_movement['dy'] += dy
+                with sync_state_lock:
+                    sync_state['last_activity'] = time.monotonic()
+                    if sync_state['paused']:
+                        sync_state['resume_requested'] = True
             is_warping = True
             host_mouse_controller.position = (center_x, center_y)
             last_pos['x'], last_pos['y'] = center_x, center_y
