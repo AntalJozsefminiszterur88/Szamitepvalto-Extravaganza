@@ -10,7 +10,6 @@ import struct
 from typing import Any, Callable, Iterable, Optional
 import msgpack
 import random
-import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
 
 if os.name == 'nt':
@@ -27,6 +26,7 @@ else:
 from pynput import keyboard
 from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from kvm_core.monitor import MonitorController
+from kvm_core.diagnostics import DiagnosticsManager
 from kvm_core.network.peer_manager import PeerManager
 from kvm_core.input.host_capture import HostInputCapture
 from kvm_core.input.provider import InputProvider
@@ -73,7 +73,6 @@ class KVMOrchestrator(QObject):
         self.pynput_listeners = []
         self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
         self.streaming_thread = None
-        self.heartbeat_thread = None
         self.switch_monitor = True
         self.local_ip = self._detect_primary_ipv4()
         self.server_ip = None
@@ -170,6 +169,12 @@ class KVMOrchestrator(QObject):
             state=self.state,
         )
 
+        self.diagnostics_manager = DiagnosticsManager(
+            orchestrator=self,
+            state=self.state,
+            zeroconf=self.zeroconf,
+        )
+
         if self.stability_monitor:
             self._register_core_monitoring()
             if self.settings.get('role') == 'ado':
@@ -218,7 +223,7 @@ class KVMOrchestrator(QObject):
         register('connection_manager', lambda: self.peer_manager.connection_manager_thread)
         register('resolver', lambda: self.peer_manager.resolver_thread)
         register('connection', lambda: self.connection_thread)
-        register('heartbeat', lambda: self.heartbeat_thread)
+        register('heartbeat', lambda: self.diagnostics_manager.heartbeat_thread)
         register('pico', lambda: self.pico_thread)
 
     def _register_clipboard_monitoring(self) -> None:
@@ -420,35 +425,6 @@ class KVMOrchestrator(QObject):
                 pass
         return ip or "127.0.0.1"
 
-    def _ip_watchdog(self):
-        """Periodically check for IP changes and re-register Zeroconf service."""
-        while self._running:
-            time.sleep(5)
-            try:
-                new_ip = self._detect_primary_ipv4()
-                if not new_ip or new_ip == self.local_ip:
-                    continue
-                logging.info("Local IP changed from %s to %s", self.local_ip, new_ip)
-                if self.service_info:
-                    try:
-                        self.zeroconf.unregister_service(self.service_info)
-                    except Exception as e:
-                        logging.debug("Failed to unregister Zeroconf service: %s", e)
-                self.local_ip = new_ip
-                try:
-                    addr = socket.inet_aton(self.local_ip)
-                    self.service_info = ServiceInfo(
-                        SERVICE_TYPE,
-                        f"{self.device_name}.{SERVICE_TYPE}",
-                        addresses=[addr],
-                        port=self.settings['port'],
-                    )
-                    self.zeroconf.register_service(self.service_info)
-                except Exception as e:
-                    logging.error("Failed to register Zeroconf service: %s", e)
-            except Exception as e:
-                logging.debug("IP watchdog error: %s", e)
-
     def _schedule_reconnect(self, ip: str, port: int) -> None:
         """Spawn a background thread that keeps trying to reconnect."""
 
@@ -606,6 +582,7 @@ class KVMOrchestrator(QObject):
             self._stop_input_provider_stream()
         elif self.state.is_active():
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
+        self.diagnostics_manager.stop()
         if self.service_info:
             try:
                 self.zeroconf.unregister_service(self.service_info)
@@ -653,47 +630,8 @@ class KVMOrchestrator(QObject):
             except Exception:
                 pass
             self.message_processor_thread.join(timeout=1)
-        if self.heartbeat_thread and self.heartbeat_thread.is_alive():
-            self.heartbeat_thread.join(timeout=1)
-        self.heartbeat_thread = None
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
-
-    def _heartbeat_monitor(self):
-        """Logs detailed diagnostics every 30 seconds."""
-        process = psutil.Process(os.getpid())
-        logging.info("Heartbeat monitor thread started.")
-        while self._running:
-            try:
-                mem_usage = process.memory_info().rss / (1024 * 1024)
-                cpu_usage = process.cpu_percent(interval=1.0)
-                active_threads = threading.active_count()
-                stream_thread_alive = (
-                    self.streaming_thread.is_alive() if self.streaming_thread else "N/A"
-                )
-                msg_proc_alive = (
-                    self.message_processor_thread.is_alive() if self.message_processor_thread else "N/A"
-                )
-                client_infos = self.state.get_client_infos()
-                connected_clients_count = len(client_infos)
-                client_names = list(client_infos.values())
-                active_client_name = client_infos.get(self.state.get_active_client(), "None")
-                log_message = (
-                    f"HEARTBEAT - "
-                    f"Mem: {mem_usage:.2f} MB, CPU: {cpu_usage:.1f}%, Threads: {active_threads} | "
-                    f"KVM Active: {self.state.is_active()}, Target: {active_client_name} | "
-                    f"Clients: {connected_clients_count} {client_names} | "
-                    f"StreamThread: {stream_thread_alive}, MsgProc: {msg_proc_alive}"
-                )
-                logging.debug(log_message)
-                for _ in range(29):
-                    if not self._running:
-                        break
-                    time.sleep(1)
-            except Exception as e:
-                logging.error(f"Heartbeat monitor failed: {e}", exc_info=True)
-                time.sleep(30)
-        logging.info("Heartbeat monitor thread stopped.")
 
     def run(self):
         """Unified entry point starting peer threads and services."""
@@ -713,12 +651,7 @@ class KVMOrchestrator(QObject):
             except Exception as e:
                 logging.error("Failed to register Zeroconf service: %s", e)
 
-            if register_ok:
-                threading.Thread(
-                    target=self._ip_watchdog,
-                    daemon=True,
-                    name="IPWatchdog",
-                ).start()
+            self.diagnostics_manager.set_ip_watchdog_enabled(register_ok)
 
             self.message_processor_thread = threading.Thread(
                 target=self._process_messages,
@@ -734,10 +667,7 @@ class KVMOrchestrator(QObject):
                 if self.settings.get('role') == 'ado':
                     self.start_main_hotkey_listener()
 
-            self.heartbeat_thread = threading.Thread(
-                target=self._heartbeat_monitor, daemon=True, name="Heartbeat"
-            )
-            self.heartbeat_thread.start()
+            self.diagnostics_manager.start()
 
             while self._running:
                 time.sleep(0.5)
