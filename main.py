@@ -12,7 +12,7 @@ import threading
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
-from gui import MainWindow
+from ui.main_window import MainWindow
 from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
 

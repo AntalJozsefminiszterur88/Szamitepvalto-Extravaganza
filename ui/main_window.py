@@ -35,7 +35,7 @@ from kvm_core.orchestrator import KVMOrchestrator
 from config.constants import APP_NAME, ORG_NAME, ICON_PATH
 from config.settings import DEFAULT_PORT
 from utils.stability_monitor import get_global_monitor
-from file_transfer import FileTransferWidget
+from ui.file_transfer_widget import FileTransferWidget
 
 
 # gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
@@ -52,7 +52,7 @@ def set_autostart(enabled: bool) -> None:
                 arguments = '--tray'
             else:  # Ha sima python szkriptként fut
                 executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
-                script_path = os.path.join(os.path.dirname(__file__), "main.py")
+                script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "main.py")
                 arguments = f'"{script_path}" --tray'
 
             # --- JAVÍTOTT RÉSZ ---
