@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable, Optional
 import msgpack
 from pynput import keyboard, mouse
 
-from config import (
+from config.constants import (
     VK_INSERT,
     VK_LSHIFT,
     VK_NUMPAD0,

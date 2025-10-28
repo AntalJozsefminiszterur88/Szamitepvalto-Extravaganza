@@ -33,7 +33,7 @@ from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
 from kvm_core.state import KVMState
 from PySide6.QtCore import QObject, Signal, QSettings
-from config import (
+from config.constants import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
     APP_NAME,

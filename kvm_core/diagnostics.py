@@ -11,7 +11,7 @@ from typing import Optional, TYPE_CHECKING
 import psutil
 from zeroconf import ServiceInfo, Zeroconf
 
-from config import SERVICE_TYPE
+from config.constants import SERVICE_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover
     from .orchestrator import KVMOrchestrator

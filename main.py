@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from gui import MainWindow
-from config import ICON_PATH, APP_NAME, ORG_NAME
+from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
 
 # Windows-specifikus importok
