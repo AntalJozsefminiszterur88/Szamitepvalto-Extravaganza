@@ -469,7 +469,7 @@ class KVMWorker(QObject):
                         if s.fileno() != -1
                     ):
                         break
-                self.connect_to_peer(ip, port)
+                self.peer_manager.connect_to_peer(ip, port)
                 time.sleep(5)
             with self.reconnect_lock:
                 self.reconnect_threads.pop((ip, port), None)
