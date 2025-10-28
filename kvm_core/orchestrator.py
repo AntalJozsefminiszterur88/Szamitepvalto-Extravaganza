@@ -5,10 +5,8 @@ import socket
 import time
 import threading
 import logging
-import tkinter
 import queue
 import struct
-from collections import deque
 from typing import Any, Callable, Iterable, Optional
 import msgpack
 import random
@@ -26,10 +24,11 @@ if os.name == 'nt':
     _SM_CYVIRTUALSCREEN = 79
 else:
     _USER32 = None
-from pynput import mouse, keyboard
+from pynput import keyboard
 from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from kvm_core.monitor import MonitorController
 from kvm_core.network.peer_manager import PeerManager
+from kvm_core.input.host_capture import HostInputCapture
 from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
 from kvm_core.state import KVMState
@@ -59,12 +58,7 @@ from hardware.button_input_manager import ButtonInputManager
 from utils.stability_monitor import StabilityMonitor
 from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
 
-# Delay between iterations in the streaming loop to lower CPU usage
-STREAM_LOOP_DELAY = 0.05
-# Maximum number of events queued for sending before old ones are dropped
-SEND_QUEUE_MAXSIZE = 200
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
-MOUSE_SYNC_INACTIVITY_TIMEOUT = 1.0
 class KVMOrchestrator(QObject):
 
     finished = Signal()
@@ -92,8 +86,6 @@ class KVMOrchestrator(QObject):
         self.input_provider_socket = None
         self.message_queue = queue.Queue()
         self.message_processor_thread = None
-        self._host_mouse_controller = None
-        self._orig_mouse_pos = None
         self.pico_thread = None
         self.pico_handler = None
         # Track ongoing reconnect attempts to avoid duplicates
@@ -119,6 +111,18 @@ class KVMOrchestrator(QObject):
         self.input_provider = InputProvider(
             self._send_provider_event,
             is_running=lambda: self._running,
+            force_numpad_vk=FORCE_NUMPAD_VK,
+        )
+
+        self.host_capture = HostInputCapture(
+            self._send_host_event,
+            state=self.state,
+            monitor_controller=self.monitor_controller,
+            status_update=self.status_update,
+            deactivate_callback=self.deactivate_kvm,
+            toggle_client_control=self.toggle_client_control,
+            is_running=lambda: self._running,
+            get_switch_monitor=lambda: getattr(self, 'switch_monitor', True),
             force_numpad_vk=FORCE_NUMPAD_VK,
         )
 
@@ -192,7 +196,11 @@ class KVMOrchestrator(QObject):
             'clipboard',
             lambda: self.clipboard_manager.thread if self.clipboard_manager else None,
         )
-        register('streaming', lambda: self.streaming_thread, grace=15.0)
+        register(
+            'streaming',
+            lambda: self.streaming_thread or (self.host_capture.thread if self.host_capture else None),
+            grace=15.0,
+        )
         register('connection_manager', lambda: self.peer_manager.connection_manager_thread)
         register('resolver', lambda: self.peer_manager.resolver_thread)
         register('connection', lambda: self.connection_thread)
@@ -630,6 +638,8 @@ class KVMOrchestrator(QObject):
     def stop(self):
         logging.info("stop() metódus meghívva.")
         self._running = False
+        self.host_capture.stop()
+        self.streaming_thread = self.host_capture.thread
         if self.clipboard_manager:
             self.clipboard_manager.stop()
         self._unregister_monitoring()
@@ -958,17 +968,9 @@ class KVMOrchestrator(QObject):
 
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
-        self.streaming_thread = threading.Thread(target=self._streaming_loop, daemon=True, name="StreamingThread")
-        self.streaming_thread.start()
-        logging.debug("Streaming thread started")
-
-    def _streaming_loop(self):
-        """Keep streaming active and restart if it stops unexpectedly."""
-        while self.state.is_active() and self._running:
-            self.start_kvm_streaming()
-            if self.state.is_active() and self._running:
-                logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
-                time.sleep(1)
+        self.host_capture.start()
+        self.streaming_thread = self.host_capture.thread
+        logging.debug("Streaming capture started")
 
     # worker.py -> JAVÍTOTT deactivate_kvm metódus
 
@@ -1029,6 +1031,9 @@ class KVMOrchestrator(QObject):
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
 
+        self.host_capture.stop()
+        self.streaming_thread = self.host_capture.thread
+
         switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
         if switch:
             time.sleep(0.2)
@@ -1042,15 +1047,6 @@ class KVMOrchestrator(QObject):
 
         if release_keys:
             self.release_hotkey_keys()
-
-        if hasattr(self, '_host_mouse_controller') and self._host_mouse_controller and hasattr(self, '_orig_mouse_pos'):
-            try:
-                self._host_mouse_controller.position = self._orig_mouse_pos
-            except Exception as e:
-                logging.error(f"Failed to restore mouse position: {e}", exc_info=True)
-
-        self._host_mouse_controller = None
-        self._orig_mouse_pos = None
 
         if self.state.get_active_client() not in self.state.get_client_sockets():
             if self.state.get_active_client() is not None:
@@ -1069,385 +1065,88 @@ class KVMOrchestrator(QObject):
         success, error = self.monitor_controller.switch_to_input(input_code)
         if not success and error:
             self.status_update.emit(f"Monitor hiba: {error}")
-    
-    def start_kvm_streaming(self):
-        logging.info("start_kvm_streaming: initiating control transfer")
-        if getattr(self, 'switch_monitor', True):
-            success, error = self.monitor_controller.switch_to_client()
-            if not success:
-                message = error or "bemenet váltása sikertelen"
-                self.status_update.emit(f"Monitor hiba: {message}")
-                logging.error("Monitor hiba a kliensre váltáskor: %s", message)
-                self.deactivate_kvm(reason="monitor switch failed")
-                return
-        
-        host_mouse_controller = mouse.Controller()
-        self._host_mouse_controller = host_mouse_controller
-        self._orig_mouse_pos = host_mouse_controller.position
-        try:
-            root = tkinter.Tk()
-            root.withdraw()
-            center_x, center_y = root.winfo_screenwidth()//2, root.winfo_screenheight()//2
-            root.destroy()
-        except:
-            center_x, center_y = 800, 600
-        
-        host_mouse_controller.position = (center_x, center_y)
-        last_pos = {'x': center_x, 'y': center_y}
-        is_warping = False
 
-        accumulated_movement = {'dx': 0, 'dy': 0}
-        movement_lock = threading.Lock()
+    def _send_host_event(self, packed: bytes, event: Optional[dict]) -> bool:
+        """Forward a single packed host event to the active client."""
+        if not self.state.is_active():
+            return False
 
-        sync_state_lock = threading.Lock()
-        sync_state = {
-            'last_activity': time.monotonic(),
-            'paused': False,
-            'resume_requested': False,
-        }
+        if self.state.get_active_client() is None and self.state.get_client_sockets():
+            self.state.set_active_client(self.state.get_client_sockets()[0])
 
-        send_queue = queue.Queue(maxsize=SEND_QUEUE_MAXSIZE)
-        unsent_events = deque(maxlen=50)
-        unsent_events_total = 0
+        targets = [self.state.get_active_client()] if self.state.get_active_client() else []
+        if not targets:
+            logging.debug("No active client available for event %s", event)
+            return True
 
-        def record_unsent(event: Any) -> None:
-            nonlocal unsent_events_total
-            unsent_events_total += 1
-            summary: Any = event
+        to_remove = []
+        active_lost = False
+
+        for sock in list(targets):
+            if sock not in self.state.get_client_sockets():
+                continue
             try:
-                if isinstance(event, dict):
-                    summary = {}
-                    for key, value in event.items():
-                        if isinstance(value, (bytes, bytearray)):
-                            summary[key] = f"<{len(value)} bytes>"
-                        elif isinstance(value, str) and len(value) > 200:
-                            summary[key] = f"<string len={len(value)}>"
-                        else:
-                            summary[key] = value
-                elif isinstance(event, (bytes, bytearray)):
-                    summary = f"<{len(event)} bytes>"
-            except Exception:
-                summary = repr(event)
-            unsent_events.append(summary)
-
-        def sender():
-            last_tick = time.monotonic()
-            while self.state.is_active() and self._running:
-                events = []
-                try:
-                    payload = send_queue.get(timeout=0.01)
-                    got_q = True
-                except queue.Empty:
-                    payload = None
-                    got_q = False
-
-                if got_q and payload is None:
-                    logging.debug("Sender thread exiting")
-                    break
-                if got_q and payload is not None:
-                    if isinstance(payload, tuple):
-                        events.append(payload)
-                    else:
-                        events.append((payload, None))
-
-                dx = dy = 0
-                now = time.monotonic()
-                if now - last_tick >= 0.015:
-                    with movement_lock:
-                        dx = accumulated_movement['dx']
-                        dy = accumulated_movement['dy']
-                        accumulated_movement['dx'] = 0
-                        accumulated_movement['dy'] = 0
-                    last_tick = now
-
-                sync_message = None
-                with sync_state_lock:
-                    paused = sync_state['paused']
-                    last_activity = sync_state['last_activity']
-                    if sync_state['resume_requested']:
-                        sync_state['resume_requested'] = False
-                        sync_state['paused'] = False
-                        paused = False
-                        sync_message = {'type': 'sync_resume'}
-                    elif not paused and (now - last_activity) >= MOUSE_SYNC_INACTIVITY_TIMEOUT:
-                        sync_state['paused'] = True
-                        paused = True
-                        sync_message = {'type': 'sync_pause'}
-
-                if sync_message is not None:
-                    logging.debug("Mouse synchronization state changed: %s", sync_message['type'])
-                    events.append((msgpack.packb(sync_message, use_bin_type=True), sync_message))
-
-                if (dx != 0 or dy != 0) and not paused:
-                    move_evt = {'type': 'move_relative', 'dx': dx, 'dy': dy}
-                    events.append((msgpack.packb(move_evt, use_bin_type=True), move_evt))
-                elif (dx != 0 or dy != 0) and paused:
-                    logging.debug("Mouse movement suppressed due to inactivity pause: dx=%s dy=%s", dx, dy)
-
-                if not events:
-                    continue
-
-                to_remove = []
-                active_lost = False
-                if self.state.get_active_client() is None and self.state.get_client_sockets():
-                    self.state.set_active_client(self.state.get_client_sockets()[0])
-                targets = [self.state.get_active_client()] if self.state.get_active_client() else []
-                for sock in list(targets):
-                    if sock not in self.state.get_client_sockets():
-                        continue
-                    for packed, event in events:
-                        try:
-                            prev_to = sock.gettimeout()
-                            sock.settimeout(0.1)
-                            sock.sendall(struct.pack('!I', len(packed)) + packed)
-                            sock.settimeout(prev_to)
-                            if event and event.get('type') == 'move_relative':
-                                logging.debug(
-                                    "Mouse move sent to %s: dx=%s dy=%s",
-                                    self.state.get_client_name(sock, sock.getpeername()),
-                                    event.get('dx'),
-                                    event.get('dy'),
-                                )
-                            else:
-                                logging.debug(
-                                    "Sent %d bytes to %s",
-                                    len(packed),
-                                    self.state.get_client_name(sock, sock.getpeername()),
-                                )
-                        except (socket.timeout, BlockingIOError):
-                            logging.warning(
-                                "Client not reading, disconnecting %s",
-                                self.state.get_client_name(sock, sock.getpeername()),
-                            )
-                            to_remove.append(sock)
-                            break
-                        except Exception as e:
-                            try:
-                                event_dbg = msgpack.unpackb(packed, raw=False)
-                            except Exception:
-                                event_dbg = '<unpack failed>'
-                            logging.error(
-                                f"Failed sending event {event_dbg} to {self.state.get_client_name(sock, sock.getpeername())}: {e}",
-                                exc_info=True,
-                            )
-                            if event_dbg != '<unpack failed>':
-                                record_unsent(event_dbg)
-                            to_remove.append(sock)
-                            break
-                for s in to_remove:
-                    if s == self.state.get_active_client():
-                        active_lost = True
-                    self.peer_manager.disconnect_peer(s, "sender error")
-                    if self.state.get_client_sockets() and self.state.get_active_client() is None:
-                        self.state.set_active_client(self.state.get_client_sockets()[0])
-                if active_lost:
-                    if self.state.get_active_client():
-                        self.status_update.emit(
-                            f"Kapcsolat megszakadt. Átváltás: {self.state.get_client_name(self.state.get_active_client(), 'ismeretlen')}"
-                        )
-                    else:
-                        self.status_update.emit(
-                            "Kapcsolat megszakadt. Várakozás új kliensre..."
-                        )
-                if to_remove and not self.state.get_client_sockets():
-                    self.deactivate_kvm(reason="all clients disconnected")
-                    break
-
-        sender_thread = threading.Thread(target=sender, daemon=True)
-        sender_thread.start()
-
-        def send(data):
-            """Queue an event for sending and log the details."""
-            if not self.state.is_active():
-                logging.warning(
-                    "Send called while KVM inactive. Event=%s active_client=%s connected_clients=%d",
-                    data,
-                    self.state.get_client_name(self.state.get_active_client()),
-                    len(self.state.get_client_sockets()),
-                )
-                record_unsent(data)
-                return False
-            try:
-                packed = msgpack.packb(data, use_bin_type=True)
-                if send_queue.full():
-                    try:
-                        send_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    logging.debug("Send queue full, dropping oldest event")
-                send_queue.put_nowait((packed, data))
-                if data.get('type') == 'move_relative':
+                prev_to = sock.gettimeout()
+                sock.settimeout(0.1)
+                sock.sendall(struct.pack('!I', len(packed)) + packed)
+                sock.settimeout(prev_to)
+                if event and event.get('type') == 'move_relative':
                     logging.debug(
-                        f"Egér pozíció elküldve: dx={data['dx']} dy={data['dy']}"
+                        "Mouse move sent to %s: dx=%s dy=%s",
+                        self.state.get_client_name(sock, sock.getpeername()),
+                        event.get('dx'),
+                        event.get('dy'),
                     )
                 else:
-                    logging.debug(f"Queued event: {data}")
-                return True
-            except Exception as e:
-                logging.error(f"Failed to queue event {data}: {e}", exc_info=True)
-                record_unsent(data)
-                self.deactivate_kvm(reason="queue error")
-                return False
+                    logging.debug(
+                        "Sent %d bytes to %s",
+                        len(packed),
+                        self.state.get_client_name(sock, sock.getpeername()),
+                    )
+            except (socket.timeout, BlockingIOError):
+                logging.warning(
+                    "Client not reading, disconnecting %s",
+                    self.state.get_client_name(sock, sock.getpeername()),
+                )
+                to_remove.append(sock)
+                break
+            except Exception as exc:
+                try:
+                    event_dbg = msgpack.unpackb(packed, raw=False)
+                except Exception:
+                    event_dbg = '<unpack failed>'
+                logging.error(
+                    "Failed sending event %s to %s: %s",
+                    event_dbg,
+                    self.state.get_client_name(sock, sock.getpeername()),
+                    exc,
+                    exc_info=True,
+                )
+                to_remove.append(sock)
+                break
 
-        def on_move(x, y):
-            nonlocal is_warping
-            if is_warping:
-                is_warping = False
-                return
-            dx = x - last_pos['x']
-            dy = y - last_pos['y']
-            if dx != 0 or dy != 0:
-                with movement_lock:
-                    accumulated_movement['dx'] += dx
-                    accumulated_movement['dy'] += dy
-                with sync_state_lock:
-                    sync_state['last_activity'] = time.monotonic()
-                    if sync_state['paused']:
-                        sync_state['resume_requested'] = True
-            is_warping = True
-            host_mouse_controller.position = (center_x, center_y)
-            last_pos['x'], last_pos['y'] = center_x, center_y
+        for sock in to_remove:
+            if sock == self.state.get_active_client():
+                active_lost = True
+            self.peer_manager.disconnect_peer(sock, "sender error")
+            if self.state.get_client_sockets() and self.state.get_active_client() is None:
+                self.state.set_active_client(self.state.get_client_sockets()[0])
 
-        def on_click(x,y,b,p):
-            send({'type':'click','button':b.name,'pressed':p})
-
-        def on_scroll(x,y,dx,dy):
-            send({'type':'scroll','dx':dx,'dy':dy})
-        
-        pressed_keys = set()
-        current_vks = set()
-        numpad_vks = set()
-
-        def get_vk(key):
-            if hasattr(key, "vk") and key.vk is not None:
-                return key.vk
-            if hasattr(key, "value") and hasattr(key.value, "vk"):
-                return key.value.vk
-            return None
-
-        # worker.py -> start_kvm_streaming metóduson belüli on_key JAVÍTVA
-
-        def on_key(k, p):
-            """Forward keyboard events and handle Pico/host hotkeys DURING streaming."""
-            try:
-                # --- ÚJ, FONTOS RÉSZ: VEZÉRLÉS FIGYELÉSE STREAMING ALATT ---
-                # A billentyű lenyomásakor (p=True) ellenőrizzük a vezérlőgombokat.
-                if p:
-                    if k == keyboard.Key.f13:
-                        logging.info("!!! Visszaváltás a hosztra (Pico F13) észlelve a streaming alatt !!!")
-                        self.deactivate_kvm(switch_monitor=True, reason='streaming pico F13')
-                        return # Ne küldjük tovább az F13-at a kliensnek
-                    if k == keyboard.Key.f14:
-                        logging.info("!!! Váltás laptopra (Pico F14) észlelve a streaming alatt !!!")
-                        self.toggle_client_control('laptop', switch_monitor=False)
-                        return # Ne küldjük tovább
-                    if k == keyboard.Key.f15:
-                        logging.info("!!! Váltás EliteDeskre (Pico F15) észlelve a streaming alatt !!!")
-                        self.toggle_client_control('elitedesk', switch_monitor=True)
-                        return
-                    if k in (keyboard.Key.f18, keyboard.Key.f19, keyboard.Key.f20, keyboard.Key.f22):
-                        logging.info("Audio/mute hotkey %s captured locally during streaming", k)
-                        return
-
-                # Itt jön a már meglévő logika a Shift+Numpad0 figyelésére is.
-                # Ezt is kiegészítjük, hogy a Pico gombokkal konzisztens legyen.
-                vk = get_vk(k)
-                if vk is not None:
-                    if p:
-                        current_vks.add(vk)
-                        if getattr(k, '_flags', 0) == 0:
-                            numpad_vks.add(vk)
-                    else:
-                        current_vks.discard(vk)
-                        numpad_vks.discard(vk)
-
-                is_shift = VK_LSHIFT in current_vks or VK_RSHIFT in current_vks
-                is_num0 = VK_NUMPAD0 in current_vks or (VK_INSERT in current_vks and VK_INSERT in numpad_vks)
-                
-                # Visszaváltás Shift+Num0-val
-                if is_shift and is_num0:
-                    logging.info("!!! Visszaváltás a hosztra (Shift+Numpad0) észlelve a streaming alatt !!!")
-                    # Elengedjük a billentyűket a kliensen, mielőtt megszakítjuk a kapcsolatot
-                    for vk_code in [VK_LSHIFT, VK_RSHIFT, VK_NUMPAD0, VK_INSERT]:
-                        if vk_code in current_vks:
-                            send({"type": "key", "key_type": "vk", "key": vk_code, "pressed": False})
-                    current_vks.clear()
-                    self.deactivate_kvm(switch_monitor=True, reason='streaming hotkey')
-                    return
-                
-                # --- EDDIG TART AZ ÚJ ÉS MÓDOSÍTOTT LOGIKA ---
-
-                # Az eredeti billentyű-továbbító logika marad
-                forced_vk = None
-                if hasattr(k, "vk") and k.vk in FORCE_NUMPAD_VK:
-                    forced_vk = k.vk
-                elif hasattr(k, "value") and hasattr(k.value, "vk") and k.value.vk in FORCE_NUMPAD_VK:
-                    forced_vk = k.value.vk
-
-                if forced_vk is not None:
-                    key_type = "vk"
-                    key_val = forced_vk
-                elif hasattr(k, "char") and k.char is not None:
-                    key_type = "char"
-                    key_val = k.char
-                elif hasattr(k, "name"):
-                    key_type = "special"
-                    key_val = k.name
-                elif hasattr(k, "vk"):
-                    key_type = "vk"
-                    key_val = k.vk
-                else:
-                    logging.warning(f"Ismeretlen billentyű: {k}")
-                    return False
-
-                key_id = (key_type, key_val)
-                if p:
-                    pressed_keys.add(key_id)
-                else:
-                    pressed_keys.discard(key_id)
-
-                if not send({"type": "key", "key_type": key_type, "key": key_val, "pressed": p}):
-                    return False
-            except Exception as e:
-                logging.error(f"Hiba az on_key függvényben: {e}", exc_info=True)
-                return False
-
-        m_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll, suppress=True)
-        k_listener = keyboard.Listener(on_press=lambda k:on_key(k,True), on_release=lambda k:on_key(k,False), suppress=True)
-        
-        m_listener.start()
-        k_listener.start()
-        
-        while self.state.is_active() and self._running:
-            time.sleep(STREAM_LOOP_DELAY)
-
-        for ktype, kval in list(pressed_keys):
-            send({"type": "key", "key_type": ktype, "key": kval, "pressed": False})
-        pressed_keys.clear()
-
-        m_listener.stop()
-        k_listener.stop()
-        send_queue.put(None)
-        sender_thread.join()
-        while not send_queue.empty():
-            leftover = send_queue.get()
-            if leftover and isinstance(leftover, tuple):
-                _, evt = leftover
+        if active_lost:
+            if self.state.get_active_client():
+                self.status_update.emit(
+                    "Kapcsolat megszakadt. Átváltás: "
+                    f"{self.state.get_client_name(self.state.get_active_client(), 'ismeretlen')}"
+                )
             else:
-                evt = None
-            if evt:
-                record_unsent(evt)
+                self.status_update.emit("Kapcsolat megszakadt. Várakozás új kliensre...")
 
-        if unsent_events_total:
-            logging.warning(
-                "Unsent or failed events (total=%d, showing_last=%d): %s",
-                unsent_events_total,
-                len(unsent_events),
-                list(unsent_events),
-            )
+        if to_remove and not self.state.get_client_sockets():
+            self.deactivate_kvm(reason="all clients disconnected")
+            return False
 
-        logging.info("Streaming listenerek leálltak.")
-
+        return True
+    
     def run_client(self):
         """Deprecated: client logic replaced by peer discovery."""
         pass
