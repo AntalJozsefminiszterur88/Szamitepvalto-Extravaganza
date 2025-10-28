@@ -9,16 +9,11 @@ import tkinter
 import queue
 import struct
 from collections import deque
-from datetime import datetime
-from typing import Any, Callable, Optional
-import io
+from typing import Any, Callable, Iterable, Optional
 import msgpack
 import random
 import psutil  # ÚJ IMPORT
 import os      # ÚJ IMPORT
-import shutil
-import zipfile
-from pathlib import PurePosixPath
 
 if os.name == 'nt':
     import ctypes
@@ -31,26 +26,18 @@ if os.name == 'nt':
     _SM_CYVIRTUALSCREEN = 79
 else:
     _USER32 = None
-from utils.clipboard_sync import (
-    clear_clipboard,
-    clipboard_items_equal,
-    normalize_clipboard_item,
-    read_clipboard_content,
-    write_clipboard_content,
-)
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from kvm_core.monitor import MonitorController
 from kvm_core.network.peer_manager import PeerManager
 from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
-from PySide6.QtCore import QObject, Signal, QSettings, QStandardPaths
+from PySide6.QtCore import QObject, Signal, QSettings
 from config import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
     APP_NAME,
     ORG_NAME,
-    BRAND_NAME,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -69,14 +56,12 @@ from config import (
 )
 from hardware.button_input_manager import ButtonInputManager
 from utils.stability_monitor import StabilityMonitor
+from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
 # Maximum number of events queued for sending before old ones are dropped
 SEND_QUEUE_MAXSIZE = 200
-CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
-CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
-
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 MOUSE_SYNC_INACTIVITY_TIMEOUT = 1.0
 class KVMWorker(QObject):
@@ -84,10 +69,9 @@ class KVMWorker(QObject):
         'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
         'client_roles', 'active_client', 'pynput_listeners', 'zeroconf',
         'streaming_thread', 'heartbeat_thread', 'switch_monitor', 'local_ip', 'server_ip',
-        'connection_thread', 'device_name', 'clipboard_thread',
-        'last_clipboard_item', 'shared_clipboard_item', 'clipboard_lock',
-        'clipboard_expiry_seconds', 'server_socket', 'input_provider_socket',
-        '_ignore_next_clipboard_change', 'last_server_ip', 'message_queue',
+        'connection_thread', 'device_name', 'clipboard_manager',
+        'server_socket', 'input_provider_socket',
+        'last_server_ip', 'message_queue',
         'message_processor_thread', '_host_mouse_controller', '_orig_mouse_pos',
         'pico_thread', 'pico_handler', 'peer_manager',
         'service_info', 'clients_lock',
@@ -95,10 +79,6 @@ class KVMWorker(QObject):
         'current_target',
         'monitor_controller',
         'button_manager',
-        'clipboard_storage_dir',
-        '_clipboard_cleanup_marker',
-        '_clipboard_last_cleanup',
-        '_clipboard_last_persisted_digest',
         'stability_monitor', '_monitor_prefix', '_monitor_thread_keys',
         '_monitor_directory_keys', '_monitor_task_keys', '_monitor_memory_callback',
         'input_provider', 'input_receiver'
@@ -132,14 +112,9 @@ class KVMWorker(QObject):
         settings_store = QSettings(ORG_NAME, APP_NAME)
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
-        self.clipboard_thread = None
-        self.last_clipboard_item = None
-        self.shared_clipboard_item = None
-        self.clipboard_lock = threading.Lock()
-        self.clipboard_expiry_seconds = 12 * 60 * 60
+        self.clipboard_manager = None
         self.server_socket = None
         self.input_provider_socket = None
-        self._ignore_next_clipboard_change = threading.Event()
         self.message_queue = queue.Queue()
         self.message_processor_thread = None
         self._host_mouse_controller = None
@@ -163,10 +138,6 @@ class KVMWorker(QObject):
             client_input=client_code,
         )
         self.button_manager: Optional[ButtonInputManager] = None
-        self.clipboard_storage_dir: Optional[str] = None
-        self._clipboard_cleanup_marker: Optional[str] = None
-        self._clipboard_last_cleanup: float = 0.0
-        self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
 
         self.stability_monitor: Optional[StabilityMonitor] = stability_monitor
         self._monitor_prefix = f"kvm-{id(self):x}"
@@ -174,12 +145,6 @@ class KVMWorker(QObject):
         self._monitor_directory_keys: list[str] = []
         self._monitor_task_keys: list[str] = []
         self._monitor_memory_callback: Optional[Callable[[], None]] = None
-
-        if self.stability_monitor:
-            self._register_core_monitoring()
-
-        if self.settings.get('role') == 'ado':
-            self._initialize_clipboard_storage()
 
         self.input_receiver = InputReceiver()
         self.input_provider = InputProvider(
@@ -199,6 +164,28 @@ class KVMWorker(QObject):
             device_name=self.device_name,
             message_callback=_peer_message_handler,
         )
+
+        def _broadcast_clipboard(payload: dict, exclude: Optional[Iterable[Any]] = None) -> None:
+            exclude_set = set(exclude or [])
+            self.peer_manager.broadcast(
+                payload,
+                exclude_peer=exclude_set if exclude_set else None,
+            )
+
+        self.clipboard_manager = ClipboardManager(
+            self.settings,
+            _broadcast_clipboard,
+            send_to_peer_callback=self.peer_manager.send_to_peer,
+            get_server_socket=lambda: self.server_socket,
+            send_to_provider_callback=self._send_to_provider,
+            get_input_provider_socket=lambda: self.input_provider_socket,
+            get_client_sockets=lambda: list(self.client_sockets),
+        )
+
+        if self.stability_monitor:
+            self._register_core_monitoring()
+            if self.settings.get('role') == 'ado':
+                self._register_clipboard_monitoring()
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -231,7 +218,10 @@ class KVMWorker(QObject):
             self._monitor_thread_keys.append(key)
 
         register('message_processor', lambda: self.message_processor_thread)
-        register('clipboard', lambda: self.clipboard_thread)
+        register(
+            'clipboard',
+            lambda: self.clipboard_manager.thread if self.clipboard_manager else None,
+        )
         register('streaming', lambda: self.streaming_thread, grace=15.0)
         register('connection_manager', lambda: self.peer_manager.connection_manager_thread)
         register('resolver', lambda: self.peer_manager.resolver_thread)
@@ -240,11 +230,15 @@ class KVMWorker(QObject):
         register('pico', lambda: self.pico_thread)
 
     def _register_clipboard_monitoring(self) -> None:
-        if not self.stability_monitor or not self.clipboard_storage_dir:
+        if not self.stability_monitor or not self.clipboard_manager:
+            return
+
+        storage_dir = self.clipboard_manager.storage_dir
+        if not storage_dir:
             return
 
         monitor = self.stability_monitor
-        directory = os.path.abspath(self.clipboard_storage_dir)
+        directory = os.path.abspath(storage_dir)
         if directory not in self._monitor_directory_keys:
             monitor.add_directory_quota(directory, max_mb=512, min_free_mb=256)
             self._monitor_directory_keys.append(directory)
@@ -254,7 +248,7 @@ class KVMWorker(QObject):
             monitor.add_periodic_task(
                 task_name,
                 max(3600.0, CLIPBOARD_CLEANUP_INTERVAL_SECONDS / 2),
-                lambda: self._ensure_clipboard_storage_cleanup(force=True),
+                lambda: self.clipboard_manager.ensure_storage_cleanup(force=True),
             )
             self._monitor_task_keys.append(task_name)
 
@@ -295,485 +289,14 @@ class KVMWorker(QObject):
             logging.exception("Failed to trim message queue during memory cleanup")
         finally:
             try:
-                self._ensure_clipboard_storage_cleanup(force=True)
+                if self.clipboard_manager:
+                    self.clipboard_manager.ensure_storage_cleanup(force=True)
             except Exception:
                 logging.exception("Clipboard cleanup failed during memory pressure mitigation")
 
     def toggle_monitor_power(self) -> None:
         """Toggle the primary monitor power state between on and soft off."""
         self.monitor_controller.toggle_power()
-
-    # ------------------------------------------------------------------
-    # Clipboard utilities
-    # ------------------------------------------------------------------
-    def _initialize_clipboard_storage(self) -> None:
-        documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
-        if not documents_dir:
-            documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
-            logging.debug(
-                "Qt did not return a Documents path; using fallback %s for clipboard storage.",
-                documents_dir,
-            )
-
-        base_dir = os.path.join(
-            documents_dir,
-            BRAND_NAME,
-            "Szamitepvalto-Extravaganza",
-            CLIPBOARD_STORAGE_DIRNAME,
-        )
-        try:
-            os.makedirs(base_dir, exist_ok=True)
-        except Exception as exc:
-            logging.error(
-                "Unable to create shared clipboard directory %s: %s",
-                base_dir,
-                exc,
-                exc_info=True,
-            )
-            return
-
-        self.clipboard_storage_dir = base_dir
-        self._clipboard_cleanup_marker = os.path.join(base_dir, ".last_cleanup")
-        logging.info("Shared clipboard storage initialised at %s", base_dir)
-        self._ensure_clipboard_storage_cleanup()
-        self._register_clipboard_monitoring()
-
-    def _ensure_clipboard_storage_cleanup(self, *, force: bool = False) -> None:
-        directory = self.clipboard_storage_dir
-        marker = self._clipboard_cleanup_marker
-        if not directory or not marker:
-            return
-
-        now = time.time()
-        last_cleanup = self._clipboard_last_cleanup or 0.0
-
-        marker_timestamp: Optional[float] = None
-        if os.path.exists(marker):
-            try:
-                with open(marker, "r", encoding="utf-8") as handle:
-                    content = handle.read().strip()
-                if content:
-                    marker_timestamp = float(content)
-            except Exception as exc:
-                logging.debug(
-                    "Failed to read clipboard cleanup marker %s: %s",
-                    marker,
-                    exc,
-                )
-                marker_timestamp = None
-            if marker_timestamp is None:
-                try:
-                    marker_timestamp = os.path.getmtime(marker)
-                except OSError:
-                    marker_timestamp = None
-
-        if marker_timestamp:
-            last_cleanup = marker_timestamp
-            self._clipboard_last_cleanup = last_cleanup
-
-        if not force and last_cleanup and now - last_cleanup < CLIPBOARD_CLEANUP_INTERVAL_SECONDS:
-            return
-
-        logging.info(
-            "Performing daily cleanup of shared clipboard storage at %s",
-            directory,
-        )
-
-        try:
-            entries = os.listdir(directory)
-        except Exception as exc:
-            logging.warning(
-                "Failed to list clipboard storage directory %s: %s",
-                directory,
-                exc,
-            )
-            entries = []
-
-        for entry in entries:
-            path = os.path.join(directory, entry)
-            try:
-                if marker and os.path.abspath(path) == os.path.abspath(marker):
-                    continue
-            except OSError:
-                # Fallback to simple comparison if abspath fails for any reason
-                if marker and path == marker:
-                    continue
-            try:
-                if os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=False)
-                else:
-                    os.remove(path)
-            except FileNotFoundError:
-                continue
-            except Exception as exc:
-                logging.warning(
-                    "Failed to remove clipboard artifact %s: %s",
-                    path,
-                    exc,
-                )
-
-        try:
-            with open(marker, "w", encoding="utf-8") as handle:
-                handle.write(str(now))
-            os.utime(marker, (now, now))
-        except Exception as exc:
-            logging.warning(
-                "Failed to update clipboard cleanup marker %s: %s",
-                marker,
-                exc,
-            )
-        else:
-            self._clipboard_last_cleanup = now
-
-    def _build_unique_storage_name(
-        self, base_name: str, *, extension: Optional[str] = None
-    ) -> str:
-        directory = self.clipboard_storage_dir
-        if not directory:
-            return base_name
-
-        safe_base = base_name.replace(os.sep, "_")
-        if os.altsep:
-            safe_base = safe_base.replace(os.altsep, "_")
-        candidate = safe_base
-        counter = 1
-
-        def _target(name: str) -> str:
-            if extension:
-                return os.path.join(directory, f"{name}{extension}")
-            return os.path.join(directory, name)
-
-        while os.path.exists(_target(candidate)):
-            counter += 1
-            candidate = f"{safe_base}_{counter:02d}"
-
-        return candidate
-
-    def _persist_clipboard_item(self, item: dict) -> None:
-        if self.settings.get('role') != 'ado':
-            return
-
-        directory = self.clipboard_storage_dir
-        if not directory:
-            logging.debug("Clipboard storage directory is not initialised; skipping persistence.")
-            return
-
-        fmt = item.get('format')
-        if fmt not in {'image', 'files'}:
-            return
-
-        digest = item.get('digest')
-        key: Optional[tuple[str, str]] = None
-        if digest:
-            key = (fmt, str(digest))
-            if key == self._clipboard_last_persisted_digest:
-                logging.debug(
-                    "Skipping clipboard persistence for duplicate %s payload (digest=%s).",
-                    fmt,
-                    digest,
-                )
-                return
-
-        raw_data = item.get('data')
-        if isinstance(raw_data, bytes):
-            payload = raw_data
-        elif isinstance(raw_data, bytearray):
-            payload = bytes(raw_data)
-        elif isinstance(raw_data, memoryview):
-            payload = raw_data.tobytes()
-        else:
-            logging.debug(
-                "Clipboard item in format %s does not provide raw bytes; skipping persistence.",
-                fmt,
-            )
-            return
-
-        self._ensure_clipboard_storage_cleanup()
-
-        digest_fragment = str(item.get('digest') or 'nohash')[:12]
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_name = f"{timestamp}_{fmt}_{digest_fragment}"
-
-        if fmt == 'image':
-            encoding = str(item.get('encoding') or 'dib').lower()
-            extension = '.png' if encoding == 'png' else '.dib'
-            unique_name = self._build_unique_storage_name(base_name, extension=extension)
-            target_path = os.path.join(directory, f"{unique_name}{extension}")
-            try:
-                with open(target_path, 'wb') as handle:
-                    handle.write(payload)
-            except Exception as exc:
-                logging.error(
-                    "Failed to persist clipboard image to %s: %s",
-                    target_path,
-                    exc,
-                    exc_info=True,
-                )
-                return
-
-            logging.info(
-                "Clipboard image saved to %s (%d bytes, encoding=%s).",
-                target_path,
-                len(payload),
-                encoding,
-            )
-            if key:
-                self._clipboard_last_persisted_digest = key
-            return
-
-        # fmt == 'files'
-        unique_name = self._build_unique_storage_name(base_name)
-
-        extracted_files = []
-        skipped_members = 0
-        try:
-            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-
-                    normalized = PurePosixPath(info.filename.replace("\\", "/"))
-                    parts = [
-                        part
-                        for part in normalized.parts
-                        if part not in {"", ".", ".."}
-                    ]
-                    if not parts:
-                        skipped_members += 1
-                        continue
-
-                    original_name = parts[-1]
-                    stem, extension = os.path.splitext(original_name)
-
-                    prefix = "_".join(parts[:-1])
-                    if prefix:
-                        stem = f"{prefix}_{stem}" if stem else prefix
-
-                    candidate_base = f"{unique_name}_{stem}" if stem else unique_name
-                    safe_base = self._build_unique_storage_name(
-                        candidate_base,
-                        extension=extension if extension else None,
-                    )
-                    if extension:
-                        target_path = os.path.join(directory, f"{safe_base}{extension}")
-                    else:
-                        target_path = os.path.join(directory, safe_base)
-
-                    try:
-                        with archive.open(info, "r") as source, open(
-                            target_path, "wb"
-                        ) as destination:
-                            shutil.copyfileobj(source, destination)
-                    except Exception as exc:
-                        logging.warning(
-                            "Failed to extract clipboard file %s: %s",
-                            info.filename,
-                            exc,
-                        )
-                        try:
-                            os.remove(target_path)
-                        except OSError:
-                            pass
-                        continue
-
-                    extracted_files.append(target_path)
-        except zipfile.BadZipFile as exc:
-            logging.error(
-                "Clipboard file payload is not a valid archive: %s",
-                exc,
-            )
-            return
-        except Exception as exc:
-            logging.error(
-                "Failed to unpack clipboard files into %s: %s",
-                directory,
-                exc,
-                exc_info=True,
-            )
-            for path in extracted_files:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-            return
-
-        if not extracted_files:
-            logging.info(
-                "Clipboard file payload did not contain any extractable files (skipped %d members).",
-                skipped_members,
-            )
-            return
-
-        file_count = item.get('file_count')
-        if not file_count and item.get('entries'):
-            file_count = len(item['entries'])
-        try:
-            file_count_int = int(file_count) if file_count is not None else None
-        except (TypeError, ValueError):
-            file_count_int = None
-
-        logging.info(
-            "Clipboard files saved into %s (%s item%s, %d bytes payload, %d skipped).",
-            directory,
-            file_count_int if file_count_int is not None else 'unknown',
-            '' if file_count_int == 1 else 's',
-            len(payload),
-            skipped_members,
-        )
-        if key:
-            self._clipboard_last_persisted_digest = key
-
-    def _remember_last_clipboard(self, item: Optional[dict]) -> None:
-        self.last_clipboard_item = item.copy() if item else None
-
-    def _apply_system_clipboard(self, item: dict) -> None:
-        if not item:
-            return
-        try:
-            self._ignore_next_clipboard_change.set()
-            write_clipboard_content(item)
-            logging.debug("System clipboard updated from shared data.")
-        except Exception as exc:
-            logging.error("Failed to set clipboard: %s", exc, exc_info=True)
-
-    def _store_shared_clipboard(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
-        stored = item.copy()
-        stored['timestamp'] = float(timestamp if timestamp is not None else time.time())
-        with self.clipboard_lock:
-            self.shared_clipboard_item = stored
-        if self.settings.get('role') == 'ado':
-            try:
-                self._persist_clipboard_item(stored)
-            except Exception as exc:
-                logging.error(
-                    "Failed to persist clipboard payload locally: %s",
-                    exc,
-                    exc_info=True,
-                )
-        return stored
-
-    def _build_clipboard_payload(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
-        ts = float(timestamp if timestamp is not None else item.get('timestamp', time.time()))
-        payload = {
-            'type': 'clipboard_data',
-            'format': item['format'],
-            'encoding': item.get('encoding'),
-            'size': item.get('size'),
-            'digest': item.get('digest'),
-            'timestamp': ts,
-            'data': item['data'],
-        }
-        if 'length' in item:
-            payload['length'] = item['length']
-        if 'width' in item:
-            payload['width'] = item['width']
-        if 'height' in item:
-            payload['height'] = item['height']
-        if 'bits_per_pixel' in item:
-            payload['bits_per_pixel'] = item['bits_per_pixel']
-        if 'entries' in item:
-            payload['entries'] = item['entries']
-        if 'file_count' in item:
-            payload['file_count'] = item['file_count']
-        if 'total_size' in item:
-            payload['total_size'] = item['total_size']
-        return payload
-
-    def _apply_clipboard_clear(self) -> None:
-        self._ignore_next_clipboard_change.set()
-        try:
-            clear_clipboard()
-        except Exception as exc:
-            logging.error("Failed to clear clipboard: %s", exc, exc_info=True)
-        self._remember_last_clipboard(None)
-        with self.clipboard_lock:
-            self.shared_clipboard_item = None
-
-    def _clear_shared_clipboard(self, *, broadcast: bool = False) -> None:
-        logging.info("Clearing shared clipboard contents.")
-        self._apply_clipboard_clear()
-        if broadcast and self.settings.get('role') == 'ado':
-            payload = {'type': 'clipboard_clear', 'timestamp': time.time()}
-            provider = self.input_provider_socket
-            exclude: set[Any] = set()
-            if provider:
-                if not self._send_to_provider(payload):
-                    logging.warning("Failed to notify input provider about clipboard clear.")
-                exclude.add(provider)
-            if self.client_sockets:
-                self.peer_manager.broadcast(payload, exclude_peer=exclude)
-
-    def _check_clipboard_expiration(self) -> None:
-        if self.settings.get('role') != 'ado':
-            return
-        with self.clipboard_lock:
-            item = self.shared_clipboard_item
-        if not item:
-            return
-        timestamp = item.get('timestamp')
-        if not timestamp:
-            return
-        if time.time() - float(timestamp) >= self.clipboard_expiry_seconds:
-            logging.info(
-                "Shared clipboard entry expired after %.0f seconds.",
-                self.clipboard_expiry_seconds,
-            )
-            self._clear_shared_clipboard(broadcast=True)
-
-    def _get_shared_clipboard_payload(self) -> Optional[dict]:
-        with self.clipboard_lock:
-            item = self.shared_clipboard_item
-        if not item:
-            return None
-        timestamp = item.get('timestamp')
-        if timestamp and time.time() - float(timestamp) >= self.clipboard_expiry_seconds:
-            return None
-        return self._build_clipboard_payload(item)
-
-    def _handle_clipboard_data_message(self, sock, data: dict, *, from_local: bool = False) -> None:
-        item = normalize_clipboard_item(data)
-        if not item:
-            logging.debug("Ignoring invalid clipboard payload from %s", sock)
-            return
-        timestamp = data.get('timestamp')
-        if from_local or timestamp is None:
-            timestamp = time.time()
-        role = self.settings.get('role')
-        if role == 'ado':
-            stored = self._store_shared_clipboard(item, timestamp=timestamp)
-            if not from_local and not clipboard_items_equal(item, self.last_clipboard_item):
-                self._apply_system_clipboard(item)
-            self._remember_last_clipboard(item)
-            payload = self._build_clipboard_payload(stored)
-            provider = self.input_provider_socket
-            exclude: set[Any] = set()
-            if sock:
-                exclude.add(sock)
-            if provider:
-                if provider is not sock:
-                    if not self._send_to_provider(payload):
-                        logging.warning("Failed to forward clipboard update to input provider.")
-                    exclude.add(provider)
-                else:
-                    exclude.add(provider)
-            if self.client_sockets:
-                self.peer_manager.broadcast(payload, exclude_peer=exclude)
-        else:
-            if not clipboard_items_equal(item, self.last_clipboard_item):
-                self._apply_system_clipboard(item)
-            self._remember_last_clipboard(item)
-            if timestamp is not None:
-                stored = item.copy()
-                stored['timestamp'] = float(timestamp)
-                with self.clipboard_lock:
-                    self.shared_clipboard_item = stored
-
-    def _handle_clipboard_clear_message(self, sock) -> None:
-        role = self.settings.get('role')
-        if role == 'ado':
-            self._clear_shared_clipboard(broadcast=True)
-        else:
-            self._apply_clipboard_clear()
 
     # ------------------------------------------------------------------
     # Network helpers
@@ -958,55 +481,6 @@ class KVMWorker(QObject):
             self.reconnect_threads[(ip, port)] = t
             t.start()
 
-    # ------------------------------------------------------------------
-    # Clipboard synchronization
-    # ------------------------------------------------------------------
-    def _clipboard_loop_server(self) -> None:
-        """Continuously monitor the host clipboard and broadcast changes."""
-        logging.info("Clipboard server loop started.")
-        while self._running:
-            if self._ignore_next_clipboard_change.is_set():
-                self._ignore_next_clipboard_change.clear()
-                time.sleep(0.5)
-                continue
-
-            item = read_clipboard_content()
-            if item and not clipboard_items_equal(item, self.last_clipboard_item):
-                self._remember_last_clipboard(item)
-                stored = self._store_shared_clipboard(item)
-                payload = self._build_clipboard_payload(stored)
-                provider = self.input_provider_socket
-                exclude: set[Any] = set()
-                if provider:
-                    if not self._send_to_provider(payload):
-                        logging.warning("Failed to forward clipboard update to input provider.")
-                    exclude.add(provider)
-                if self.client_sockets:
-                    self.peer_manager.broadcast(payload, exclude_peer=exclude)
-            self._check_clipboard_expiration()
-            time.sleep(0.3)
-        logging.info("Clipboard server loop stopped.")
-
-    def _clipboard_loop_client(self) -> None:
-        """Monitor local clipboard changes and forward them to the server."""
-        logging.info("Clipboard client loop started.")
-        while self._running:
-            if self._ignore_next_clipboard_change.is_set():
-                self._ignore_next_clipboard_change.clear()
-                time.sleep(0.5)
-                continue
-
-            item = read_clipboard_content()
-            if item and not clipboard_items_equal(item, self.last_clipboard_item):
-                self._remember_last_clipboard(item)
-                sock = self.server_socket
-                if sock:
-                    payload = self._build_clipboard_payload(item)
-                    if not self.peer_manager.send_to_peer(sock, payload):
-                        logging.warning("Failed to send clipboard update to server.")
-            time.sleep(0.3)
-        logging.info("Clipboard client loop stopped.")
-
     def _process_messages(self):
         """Unified message handler for all peers."""
         logging.debug("Message processor thread started")
@@ -1027,13 +501,9 @@ class KVMWorker(QObject):
                     if cmd == 'switch_laptop':
                         self.toggle_client_control('laptop', switch_monitor=False)
                         continue
+                    if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
+                        continue
                     msg_type = data.get('type')
-                    if msg_type == 'clipboard_data':
-                        self._handle_clipboard_data_message(sock, data)
-                        continue
-                    if msg_type == 'clipboard_clear':
-                        self._handle_clipboard_clear_message(sock)
-                        continue
                     if msg_type in {'move_relative', 'click', 'scroll', 'key'} and sock == self.input_provider_socket:
                         self._handle_provider_event(data)
                         continue
@@ -1058,13 +528,9 @@ class KVMWorker(QObject):
                         source = data.get('source')
                         self._simulate_provider_key_tap(key_type, key_value, source)
                         continue
+                    if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
+                        continue
                     msg_type = data.get('type')
-                    if msg_type == 'clipboard_data':
-                        self._handle_clipboard_data_message(sock, data)
-                        continue
-                    if msg_type == 'clipboard_clear':
-                        self._handle_clipboard_clear_message(sock)
-                        continue
                     logging.debug(
                         "Unhandled message type '%s' in input provider context",
                         data.get('type') or data.get('command'),
@@ -1072,12 +538,10 @@ class KVMWorker(QObject):
                     continue
 
                 msg_type = data.get('type')
+                if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
+                    continue
                 if msg_type in {'move_relative', 'click', 'scroll', 'key'}:
                     self.input_receiver.apply_event(data)
-                elif msg_type == 'clipboard_data':
-                    self._handle_clipboard_data_message(sock, data)
-                elif msg_type == 'clipboard_clear':
-                    self._handle_clipboard_clear_message(sock)
                 else:
                     logging.debug(
                         "Unhandled message type '%s' in peer message processor",
@@ -1196,6 +660,8 @@ class KVMWorker(QObject):
     def stop(self):
         logging.info("stop() metódus meghívva.")
         self._running = False
+        if self.clipboard_manager:
+            self.clipboard_manager.stop()
         self._unregister_monitoring()
         self.pending_activation_target = None
         self.peer_manager.stop()
@@ -1240,8 +706,6 @@ class KVMWorker(QObject):
             self.kvm_active = False
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
-        if self.clipboard_thread and self.clipboard_thread.is_alive():
-            self.clipboard_thread.join(timeout=1)
         if self.pico_thread and self.pico_thread.is_alive():
             self.pico_thread.join(timeout=1)
         if self.peer_manager.connection_manager_thread and self.peer_manager.connection_manager_thread.is_alive():
@@ -1332,21 +796,10 @@ class KVMWorker(QObject):
 
             self.peer_manager.start()
 
-            if self.settings.get('role') == 'ado':
-                self.clipboard_thread = threading.Thread(
-                    target=self._clipboard_loop_server,
-                    daemon=True,
-                    name="ClipboardSrv",
-                )
-                self.clipboard_thread.start()
-                self.start_main_hotkey_listener()
-            else:
-                self.clipboard_thread = threading.Thread(
-                    target=self._clipboard_loop_client,
-                    daemon=True,
-                    name="ClipboardCli",
-                )
-                self.clipboard_thread.start()
+            if self.clipboard_manager:
+                self.clipboard_manager.start()
+                if self.settings.get('role') == 'ado':
+                    self.start_main_hotkey_listener()
 
             self.heartbeat_thread = threading.Thread(
                 target=self._heartbeat_monitor, daemon=True, name="Heartbeat"
@@ -1425,17 +878,13 @@ class KVMWorker(QObject):
                         self.toggle_client_control('laptop', switch_monitor=False)
                         continue
 
-                    msg_type = data.get('type')
-                    if msg_type == 'clipboard_data':
-                        self._handle_clipboard_data_message(sock, data)
-                    elif msg_type == 'clipboard_clear':
-                        self._handle_clipboard_clear_message(sock)
-                    else:
-                        logging.debug(
-                            "Unhandled server message type '%s' from %s",
-                            data.get('type') or data.get('command'),
-                            self.client_infos.get(sock, sock),
-                        )
+                    if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
+                        continue
+                    logging.debug(
+                        "Unhandled server message type '%s' from %s",
+                        data.get('type') or data.get('command'),
+                        self.client_infos.get(sock, sock),
+                    )
         finally:
             buffers.clear()
 
@@ -1454,13 +903,11 @@ class KVMWorker(QObject):
                     "Client handling message type '%s'",
                     data.get('type'),
                 )
+                if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
+                    continue
                 msg_type = data.get('type')
                 if msg_type in {'move_relative', 'click', 'scroll', 'key'}:
                     self.input_receiver.apply_event(data)
-                elif msg_type == 'clipboard_data':
-                    self._handle_clipboard_data_message(sock, data)
-                elif msg_type == 'clipboard_clear':
-                    self._handle_clipboard_clear_message(sock)
                 else:
                     logging.debug(
                         "Unhandled client message type '%s'",
