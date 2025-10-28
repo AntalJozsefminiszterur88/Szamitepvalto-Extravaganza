@@ -138,24 +138,22 @@ the application monitors it with a dedicated background thread. Boards using
 the Raspberry Pi VID ``0x2E8A`` or Adafruit's ``0x239A`` are detected
 automatically. Button `1` returns control to the desktop, `2` selects the laptop
 and `3` selects the EliteDesk. Connection and disconnection events are logged so
-you can verify detection in the console.
+you can verify detection in the console. The same manager also captures the F13
+to F17 keys when pressed on any attached keyboard, so the hardware buttons and
+manual shortcuts share a single handling path.
 
 ### CircuitPython HID script
 
-The `pico_hid_switch.py` example runs directly on the Pico. It emulates the hotkey
-presses for switching computers and now opens the `usb_cdc` serial connection.
-When a button is pressed the script writes `b'1'`, `b'2'` or `b'3'` to the serial
-port and briefly pauses so the host receives the byte. The `PicoSerialHandler`
-in the desktop application listens for these values to activate the appropriate
-target.
+The `pico_hid_switch.py` example runs directly on the Pico. It emulates the
+hotkey presses for switching computers by sending the F13–F16 keys as a USB HID
+keyboard. The desktop application's button manager listens for these key events
+alongside regular keyboards and routes them to the right action immediately.
 
 If both the console and data CDC interfaces are enabled, Windows will expose two
-COM ports. The application expects the **data** interface, so ensure this port is
-available or disable the console interface in `boot.py` to avoid connecting to
-the wrong one.
-
-After copying `boot.py` to the Pico you must reset the board for the new
-configuration to take effect.
+COM ports. The optional serial protocol still expects the **data** interface, so
+ensure this port is available or disable the console interface in `boot.py` to
+avoid connecting to the wrong one. After copying `boot.py` to the Pico you must
+reset the board for the new configuration to take effect.
 
 ### Autostart
 
