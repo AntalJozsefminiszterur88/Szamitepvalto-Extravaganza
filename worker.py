@@ -32,7 +32,7 @@ if os.name == 'nt':
     _SM_CYVIRTUALSCREEN = 79
 else:
     _USER32 = None
-from clipboard_sync import (
+from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
     normalize_clipboard_item,
@@ -66,8 +66,8 @@ from config import (
     VK_MULTIPLY,
     VK_ADD,
 )
-from button_input_manager import ButtonInputManager
-from stability_monitor import StabilityMonitor
+from hardware.button_input_manager import ButtonInputManager
+from utils.stability_monitor import StabilityMonitor
 
 # Delay between iterations in the streaming loop to lower CPU usage
 STREAM_LOOP_DELAY = 0.05
