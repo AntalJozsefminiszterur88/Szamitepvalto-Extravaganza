@@ -57,6 +57,7 @@ from config import (
 from hardware.button_input_manager import ButtonInputManager
 from utils.stability_monitor import StabilityMonitor
 from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
+from kvm_core.message_handler import MessageHandler
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 class KVMOrchestrator(QObject):
@@ -154,6 +155,19 @@ class KVMOrchestrator(QObject):
             send_to_provider_callback=self._send_to_provider,
             get_input_provider_socket=lambda: self.input_provider_socket,
             get_client_sockets=self.state.get_client_sockets,
+        )
+
+        self.message_handler = MessageHandler(
+            get_role=lambda: self.settings.get('role'),
+            toggle_client_control=self.toggle_client_control,
+            get_clipboard_manager=lambda: self.clipboard_manager,
+            handle_provider_event=self._handle_provider_event,
+            input_receiver=self.input_receiver,
+            start_input_provider_stream=self._start_input_provider_stream,
+            stop_input_provider_stream=self._stop_input_provider_stream,
+            simulate_provider_key_tap=self._simulate_provider_key_tap,
+            get_input_provider_socket=lambda: self.input_provider_socket,
+            state=self.state,
         )
 
         if self.stability_monitor:
@@ -462,7 +476,6 @@ class KVMOrchestrator(QObject):
     def _process_messages(self):
         """Unified message handler for all peers."""
         logging.debug("Message processor thread started")
-        role = self.settings.get('role')
         while self._running:
             try:
                 sock, data = self.message_queue.get()
@@ -470,63 +483,7 @@ class KVMOrchestrator(QObject):
                 break
             if sock is None and data is None:
                 break
-            try:
-                cmd = data.get('command')
-                if role == 'ado':
-                    if cmd == 'switch_elitedesk':
-                        self.toggle_client_control('elitedesk', switch_monitor=True)
-                        continue
-                    if cmd == 'switch_laptop':
-                        self.toggle_client_control('laptop', switch_monitor=False)
-                        continue
-                    if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
-                        continue
-                    msg_type = data.get('type')
-                    if msg_type in {'move_relative', 'click', 'scroll', 'key'} and sock == self.input_provider_socket:
-                        self._handle_provider_event(data)
-                        continue
-                    logging.debug(
-                        "Unhandled message type '%s' in controller context from %s",
-                        data.get('type') or data.get('command'),
-                        self.state.get_client_name(sock, sock),
-                    )
-                    continue
-
-                if role == 'input_provider':
-                    if cmd == 'start_stream':
-                        target = data.get('target', 'elitedesk')
-                        self._start_input_provider_stream(target)
-                        continue
-                    if cmd == 'stop_stream':
-                        self._stop_input_provider_stream()
-                        continue
-                    if cmd == 'host_key_tap':
-                        key_type = data.get('key_type', 'vk')
-                        key_value = data.get('key')
-                        source = data.get('source')
-                        self._simulate_provider_key_tap(key_type, key_value, source)
-                        continue
-                    if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
-                        continue
-                    msg_type = data.get('type')
-                    logging.debug(
-                        "Unhandled message type '%s' in input provider context",
-                        data.get('type') or data.get('command'),
-                    )
-                    continue
-
-                msg_type = data.get('type')
-                if self.clipboard_manager and self.clipboard_manager.handle_network_message(sock, data):
-                    continue
-                if msg_type in {'move_relative', 'click', 'scroll', 'key'}:
-                    self.input_receiver.apply_event(data)
-                else:
-                    logging.debug(
-                        "Unhandled message type '%s' in peer message processor",
-                        data.get('type') or data.get('command'),
-                    )
-            except Exception as e:
-                logging.error("Failed to process message: %s", e, exc_info=True)
+            self.message_handler.handle(sock, data)
 
     def _start_input_provider_stream(self, target: str) -> None:
         """Start streaming local input toward the controller when requested."""
