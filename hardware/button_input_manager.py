@@ -20,7 +20,7 @@ class ButtonInputManager:
     BAUD_RATE = 115200
     SERIAL_TIMEOUT = 1
 
-    def __init__(self, worker: "KVMWorker") -> None:
+    def __init__(self, worker: "KVMOrchestrator") -> None:
         self.worker = worker
         self._running = threading.Event()
         self._serial_thread: Optional[threading.Thread] = None

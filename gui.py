@@ -31,7 +31,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QGuiApplication, QShowEvent
 from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
-from worker import KVMWorker
+from kvm_core.orchestrator import KVMOrchestrator
 from config import APP_NAME, ORG_NAME, DEFAULT_PORT, ICON_PATH
 from utils.stability_monitor import get_global_monitor
 from file_transfer import FileTransferWidget
@@ -253,7 +253,7 @@ class MainWindow(QMainWindow):
         """Start the background KVM worker and temporarily disable the start
         button to avoid duplicate launches from rapid clicks."""
         self.kvm_thread = QThread()
-        self.kvm_worker = KVMWorker(
+        self.kvm_worker = KVMOrchestrator(
             self.get_settings(), stability_monitor=get_global_monitor()
         )
         self.kvm_worker.moveToThread(self.kvm_thread)
