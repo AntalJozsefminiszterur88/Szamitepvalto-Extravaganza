@@ -41,8 +41,7 @@ from clipboard_sync import (
 )
 from pynput import mouse, keyboard
 from zeroconf import ServiceInfo, Zeroconf, ServiceBrowser, IPVersion
-from monitorcontrol import get_monitors
-from monitorcontrol.monitorcontrol import PowerMode
+from kvm_core.monitor import MonitorController
 from PySide6.QtCore import QObject, Signal, QSettings, QStandardPaths
 import ipaddress
 from config import (
@@ -93,7 +92,8 @@ class KVMWorker(QObject):
         'discovered_peers', 'connection_manager_thread', 'resolver_thread',
         'resolver_queue', 'service_info', 'peers_lock', 'clients_lock',
         'pending_activation_target', 'provider_stop_event', 'provider_target',
-        'current_target', 'current_monitor_input', 'monitor_power_on',
+        'current_target',
+        'monitor_controller',
         'button_manager',
         'clipboard_storage_dir',
         '_clipboard_cleanup_marker',
@@ -166,8 +166,13 @@ class KVMWorker(QObject):
         self.provider_stop_event = threading.Event()
         self.provider_target = None
         self.current_target = 'desktop'
-        self.current_monitor_input = None
-        self.monitor_power_on = True
+        monitor_codes = self.settings.get('monitor_codes', {}) or {}
+        host_code = monitor_codes.get('host')
+        client_code = monitor_codes.get('client')
+        self.monitor_controller = MonitorController(
+            host_input=host_code,
+            client_input=client_code,
+        )
         self.button_manager: Optional[ButtonInputManager] = None
         self.clipboard_storage_dir: Optional[str] = None
         self._clipboard_cleanup_marker: Optional[str] = None
@@ -288,38 +293,7 @@ class KVMWorker(QObject):
 
     def toggle_monitor_power(self) -> None:
         """Toggle the primary monitor power state between on and soft off."""
-        try:
-            monitors = list(get_monitors())
-            if not monitors:
-                logging.warning("No monitors detected for power toggle (F21).")
-                return
-
-            with monitors[0] as monitor:
-                try:
-                    current_mode = monitor.get_power_mode()
-                    monitor_is_on = current_mode == PowerMode.on
-                    self.monitor_power_on = monitor_is_on
-                except Exception as exc:
-                    logging.warning(
-                        "Failed to query monitor power state, assuming current value (%s): %s",
-                        self.monitor_power_on,
-                        exc,
-                    )
-                    monitor_is_on = self.monitor_power_on
-
-                try:
-                    if monitor_is_on:
-                        monitor.set_power_mode(PowerMode.off_soft)
-                        self.monitor_power_on = False
-                        logging.info("Monitor power toggled OFF via F21 hotkey.")
-                    else:
-                        monitor.set_power_mode(PowerMode.on)
-                        self.monitor_power_on = True
-                        logging.info("Monitor power toggled ON via F21 hotkey.")
-                except Exception as exc:
-                    logging.error("Failed to toggle monitor power state: %s", exc, exc_info=True)
-        except Exception as exc:
-            logging.error("Unexpected error while toggling monitor power: %s", exc, exc_info=True)
+        self.monitor_controller.toggle_power()
 
     # ------------------------------------------------------------------
     # Clipboard utilities
@@ -1030,16 +1004,14 @@ class KVMWorker(QObject):
             desired = self.settings['monitor_codes']['client']
         elif target == 'desktop':
             desired = self.settings['monitor_codes']['host']
-        if desired is None or desired == self.current_monitor_input:
+        current_input = self.monitor_controller.current_input
+        if desired is None or desired == current_input:
             return
-        try:
-            with list(get_monitors())[0] as monitor:
-                monitor.set_input_source(desired)
-            self.current_monitor_input = desired
-            logging.info("Monitor input switched to %s for target %s", desired, target)
-        except Exception as exc:
-            logging.error("Failed to switch monitor input for %s: %s", target, exc)
-            self.status_update.emit(f"Monitor hiba: {exc}")
+        success, error = self.monitor_controller.switch_to_input(desired, label=target)
+        if not success:
+            self.status_update.emit(
+                f"Monitor hiba: {error}" if error else "Monitor hiba: bemenet váltása sikertelen"
+            )
 
     def _detect_primary_ipv4(self) -> str:
         """Determine the primary IPv4 address for outgoing connections."""
@@ -2217,7 +2189,7 @@ class KVMWorker(QObject):
             if self.input_provider_socket:
                 self._send_to_provider({'command': 'stop_stream'})
             host_code = self.settings['monitor_codes']['host']
-            need_switch = self.current_monitor_input != host_code
+            need_switch = self.monitor_controller.current_input != host_code
             do_switch = switch_monitor
             if do_switch is None:
                 do_switch = prev_target == 'elitedesk' or need_switch
@@ -2258,13 +2230,13 @@ class KVMWorker(QObject):
         switch = switch_monitor if switch_monitor is not None else getattr(self, 'switch_monitor', True)
         if switch:
             time.sleep(0.2)
-            try:
-                with list(get_monitors())[0] as monitor:
-                    monitor.set_input_source(self.settings['monitor_codes']['host'])
-                    logging.info("Monitor sikeresen visszaváltva a hosztra.")
-            except Exception as e:
-                self.status_update.emit(f"Monitor hiba: {e}")
-                logging.error(f"Monitor hiba: {e}", exc_info=True)
+            success, error = self.monitor_controller.switch_to_host()
+            if not success:
+                if error:
+                    self.status_update.emit(f"Monitor hiba: {error}")
+                    logging.error("Monitor hiba a hosztra váltáskor: %s", error)
+                else:
+                    logging.error("Monitor hiba a hosztra váltáskor")
 
         if release_keys:
             self.release_hotkey_keys()
@@ -2292,22 +2264,18 @@ class KVMWorker(QObject):
 
     def switch_monitor_input(self, input_code):
         """Switch the primary monitor to the given input source."""
-        try:
-            with list(get_monitors())[0] as monitor:
-                monitor.set_input_source(input_code)
-                logging.info("Monitor input switched to %s", input_code)
-        except Exception as exc:
-            logging.error("Failed to switch monitor input: %s", exc)
+        success, error = self.monitor_controller.switch_to_input(input_code)
+        if not success and error:
+            self.status_update.emit(f"Monitor hiba: {error}")
     
     def start_kvm_streaming(self):
         logging.info("start_kvm_streaming: initiating control transfer")
         if getattr(self, 'switch_monitor', True):
-            try:
-                with list(get_monitors())[0] as monitor:
-                    monitor.set_input_source(self.settings['monitor_codes']['client'])
-            except Exception as e:
-                logging.error(f"Monitor hiba: {e}", exc_info=True)
-                self.status_update.emit(f"Monitor hiba: {e}")
+            success, error = self.monitor_controller.switch_to_client()
+            if not success:
+                message = error or "bemenet váltása sikertelen"
+                self.status_update.emit(f"Monitor hiba: {message}")
+                logging.error("Monitor hiba a kliensre váltáskor: %s", message)
                 self.deactivate_kvm(reason="monitor switch failed")
                 return
         
