@@ -15,7 +15,8 @@ python main.py
 ```
 
 This starts the Qt based interface defined in `gui.py` and launches the
-background worker defined in `worker.py` for handling networking and hotkeys.
+background orchestrator defined in `kvm_core/orchestrator.py` for handling
+networking and hotkeys.
 For troubleshooting, you can enable verbose logging by changing the `level`
 argument of `logging.basicConfig` to `DEBUG` in `main.py`. Log entries are
 stored in the `logs` directory beside the executable with automatic rotation.

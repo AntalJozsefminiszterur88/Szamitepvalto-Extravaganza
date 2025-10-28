@@ -19,6 +19,7 @@ class PeerManager:
     def __init__(
         self,
         worker,
+        state,
         zeroconf,
         *,
         port: int,
@@ -26,6 +27,7 @@ class PeerManager:
         message_callback: Callable[[PeerConnection, dict], None],
     ) -> None:
         self._worker = worker
+        self._state = state
         self._zeroconf = zeroconf
         self._port = port
         self._device_name = device_name
@@ -125,13 +127,10 @@ class PeerManager:
             self._connections[sock] = connection
 
         worker = self._worker
+        state = self._state
         with worker.clients_lock:
-            worker.client_sockets.append(sock)
-            worker.client_infos[sock] = peer_name
-            if peer_role is not None:
-                worker.client_roles[sock] = peer_role
-            if worker.active_client is None and peer_role != "input_provider":
-                worker.active_client = sock
+            make_active = state.get_active_client() is None and peer_role != "input_provider"
+            state.add_client(sock, peer_name, role=peer_role, make_active=make_active)
 
         if worker.settings.get("role") == "ado" and peer_role == "input_provider":
             worker.input_provider_socket = sock
@@ -158,10 +157,10 @@ class PeerManager:
         if (
             worker.pending_activation_target
             and worker.pending_activation_target == peer_name
-            and not worker.kvm_active
+            and not state.is_active()
         ):
             logging.info("Reconnected to %s, resuming KVM", peer_name)
-            worker.active_client = sock
+            state.set_active_client(sock)
             worker.pending_activation_target = None
             worker.activate_kvm(switch_monitor=worker.switch_monitor)
 
@@ -177,20 +176,17 @@ class PeerManager:
             self._connections.pop(sock, None)
 
         worker = self._worker
-        peer_name = worker.client_infos.get(sock)
+        state = self._state
+        peer_name = state.get_client_info(sock)
         with worker.clients_lock:
-            was_active = sock == worker.active_client
-            if sock in worker.client_sockets:
-                worker.client_sockets.remove(sock)
-            worker.client_infos.pop(sock, None)
-            worker.client_roles.pop(sock, None)
-            peer_still_connected = (
-                peer_name is not None and peer_name in worker.client_infos.values()
-            )
+            was_active = sock == state.get_active_client()
+            state.remove_client(sock)
+            client_infos = state.get_client_infos()
+            peer_still_connected = peer_name is not None and peer_name in client_infos.values()
             if peer_still_connected and was_active:
-                for existing_sock, name in worker.client_infos.items():
+                for existing_sock, name in client_infos.items():
                     if name == peer_name:
-                        worker.active_client = existing_sock
+                        state.set_active_client(existing_sock)
                         break
 
         if peer_still_connected:
@@ -198,9 +194,9 @@ class PeerManager:
             return
 
         if worker.settings.get("role") == "ado" and sock == worker.input_provider_socket:
-            if worker.kvm_active:
+            if state.is_active():
                 worker.deactivate_kvm(
-                    switch_monitor=worker.current_target == "elitedesk",
+                    switch_monitor=state.get_target() == "elitedesk",
                     reason="input provider disconnect",
                 )
             worker.input_provider_socket = None
@@ -211,12 +207,12 @@ class PeerManager:
         if worker.settings.get("role") == "vevo" and sock == worker.server_socket:
             worker.server_socket = None
 
-        if was_active and worker.kvm_active:
+        if was_active and state.is_active():
             logging.info("Active client disconnected, deactivating KVM")
             worker.pending_activation_target = peer_name
             worker.deactivate_kvm(reason=reason)
         elif was_active:
-            worker.active_client = None
+            state.set_active_client(None)
             worker.pending_activation_target = None
 
         if addr and worker._running:
@@ -332,7 +328,7 @@ class PeerManager:
                 with worker.clients_lock:
                     already = any(
                         self._safe_peername(s) == ip
-                        for s in worker.client_sockets
+                        for s in self._state.get_client_sockets()
                         if s.fileno() != -1
                     )
                 if already:

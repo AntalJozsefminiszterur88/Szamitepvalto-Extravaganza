@@ -1,4 +1,4 @@
-# worker.py - VÉGLEGES JAVÍTOTT VERZIÓ
+# orchestrator.py - VÉGLEGES JAVÍTOTT VERZIÓ
 # Javítva: Streaming listener `AttributeError`, "sticky key" hiba, visszaváltási logika, egér-akadás.
 
 import socket
@@ -32,6 +32,7 @@ from kvm_core.monitor import MonitorController
 from kvm_core.network.peer_manager import PeerManager
 from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
+from kvm_core.state import KVMState
 from PySide6.QtCore import QObject, Signal, QSettings
 from config import (
     SERVICE_TYPE,
@@ -64,10 +65,9 @@ STREAM_LOOP_DELAY = 0.05
 SEND_QUEUE_MAXSIZE = 200
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 MOUSE_SYNC_INACTIVITY_TIMEOUT = 1.0
-class KVMWorker(QObject):
+class KVMOrchestrator(QObject):
     __slots__ = (
-        'settings', '_running', 'kvm_active', 'client_sockets', 'client_infos',
-        'client_roles', 'active_client', 'pynput_listeners', 'zeroconf',
+        'settings', '_running', 'state', 'pynput_listeners', 'zeroconf',
         'streaming_thread', 'heartbeat_thread', 'switch_monitor', 'local_ip', 'server_ip',
         'connection_thread', 'device_name', 'clipboard_manager',
         'server_socket', 'input_provider_socket',
@@ -76,7 +76,6 @@ class KVMWorker(QObject):
         'pico_thread', 'pico_handler', 'peer_manager',
         'service_info', 'clients_lock',
         'pending_activation_target', 'provider_target',
-        'current_target',
         'monitor_controller',
         'button_manager',
         'stability_monitor', '_monitor_prefix', '_monitor_thread_keys',
@@ -91,15 +90,7 @@ class KVMWorker(QObject):
         super().__init__()
         self.settings = settings
         self._running = True
-        self.kvm_active = False
-        # Active client connections (multiple receivers can connect)
-        self.client_sockets = []
-        # Mapping from socket to human readable client name
-        self.client_infos = {}
-        # Mapping from socket to declared remote role
-        self.client_roles = {}
-        # Currently selected client to forward events to
-        self.active_client = None
+        self.state = KVMState()
         self.pynput_listeners = []
         self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
         self.streaming_thread = None
@@ -121,7 +112,7 @@ class KVMWorker(QObject):
         self._orig_mouse_pos = None
         self.pico_thread = None
         self.pico_handler = None
-        # Lock protecting client_sockets and client_infos
+        # Lock protecting operations that need to coordinate with other resources
         self.clients_lock = threading.Lock()
         # Remember if a KVM session was active when the connection dropped
         self.pending_activation_target = None
@@ -129,7 +120,7 @@ class KVMWorker(QObject):
         self.reconnect_threads = {}
         self.reconnect_lock = threading.Lock()
         self.provider_target = None
-        self.current_target = 'desktop'
+        self.state.set_target('desktop')
         monitor_codes = self.settings.get('monitor_codes', {}) or {}
         host_code = monitor_codes.get('host')
         client_code = monitor_codes.get('client')
@@ -159,6 +150,7 @@ class KVMWorker(QObject):
 
         self.peer_manager = PeerManager(
             self,
+            self.state,
             self.zeroconf,
             port=self.settings['port'],
             device_name=self.device_name,
@@ -179,7 +171,7 @@ class KVMWorker(QObject):
             get_server_socket=lambda: self.server_socket,
             send_to_provider_callback=self._send_to_provider,
             get_input_provider_socket=lambda: self.input_provider_socket,
-            get_client_sockets=lambda: list(self.client_sockets),
+            get_client_sockets=lambda: self.state.get_client_sockets(),
         )
 
         if self.stability_monitor:
@@ -323,12 +315,13 @@ class KVMWorker(QObject):
 
     def _handle_provider_event(self, data: dict) -> None:
         """Route events coming from the input provider based on the active target."""
-        target = self.current_target
+        target = self.state.get_target()
         if target == 'laptop':
-            if self.active_client is None:
+            active_client = self.state.get_active_client()
+            if active_client is None:
                 logging.debug("No active laptop client to forward provider event %s", data)
                 return
-            if not self.peer_manager.send_to_peer(self.active_client, data):
+            if not self.peer_manager.send_to_peer(active_client, data):
                 logging.warning("Failed to forward provider event to laptop; deactivating KVM")
                 self.deactivate_kvm(reason="forward_failed", switch_monitor=False)
         elif target == 'elitedesk':
@@ -465,7 +458,7 @@ class KVMWorker(QObject):
                 with self.clients_lock:
                     if any(
                         s.getpeername()[0] == ip
-                        for s in self.client_sockets
+                        for s in self.state.get_client_sockets()
                         if s.fileno() != -1
                     ):
                         break
@@ -510,7 +503,7 @@ class KVMWorker(QObject):
                     logging.debug(
                         "Unhandled message type '%s' in controller context from %s",
                         data.get('type') or data.get('command'),
-                        self.client_infos.get(sock, sock),
+                        self.state.get_client_info(sock) or sock,
                     )
                     continue
 
@@ -563,7 +556,7 @@ class KVMWorker(QObject):
             self.status_update.emit(f"Állapot: Továbbítás aktív ({target})")
             return
         self.provider_target = target
-        self.kvm_active = True
+        self.state.set_active(True)
         self.status_update.emit(f"Állapot: Továbbítás aktív ({target})")
         self.input_provider.start()
         self.streaming_thread = self.input_provider.thread
@@ -576,16 +569,16 @@ class KVMWorker(QObject):
         self.input_provider.stop()
         self.streaming_thread = None
         self.provider_target = None
-        self.kvm_active = False
+        self.state.set_active(False)
         self.status_update.emit("Állapot: Helyi vezérlés aktív")
         logging.info("Input provider streaming stopped")
 
     def set_active_client_by_name(self, name):
         """Select a connected client by name as the active target."""
         logging.debug(f"set_active_client_by_name called with name={name}")
-        for sock, cname in self.client_infos.items():
+        for sock, cname in self.state.iter_clients():
             if cname.lower().startswith(name.lower()):
-                self.active_client = sock
+                self.state.set_active_client(sock)
                 logging.info(f"Active client set to {cname}")
                 return True
         logging.warning(f"No client matching '{name}' found")
@@ -596,28 +589,30 @@ class KVMWorker(QObject):
         if self.settings.get('role') == 'ado':
             target = name.lower()
             desired_switch_monitor = switch_monitor
+            current_target = self.state.get_target()
+            is_active = self.state.is_active()
             logging.info(
                 "Controller toggle requested for target=%s current=%s active=%s",
                 target,
-                self.current_target,
-                self.kvm_active,
+                current_target,
+                is_active,
             )
             if target not in {'laptop', 'elitedesk'}:
                 logging.warning("Unknown controller target: %s", target)
                 return
-            if self.kvm_active and self.current_target == target:
+            if is_active and current_target == target:
                 logging.info(
                     "Toggle request ignored because target %s is already active",
                     target,
                 )
                 self.pending_activation_target = None
                 return
-            if self.kvm_active:
-                prior_was_elitedesk = self.current_target == 'elitedesk'
+            if is_active:
+                prior_was_elitedesk = current_target == 'elitedesk'
                 switching_between_main_targets = (
-                    self.current_target in {'laptop', 'elitedesk'}
+                    current_target in {'laptop', 'elitedesk'}
                     and target in {'laptop', 'elitedesk'}
-                    and self.current_target != target
+                    and current_target != target
                 )
                 deactivate_switch_monitor = False if switching_between_main_targets else prior_was_elitedesk
                 self.deactivate_kvm(
@@ -632,24 +627,25 @@ class KVMWorker(QObject):
                     self.pending_activation_target = None
                     return
             else:
-                self.active_client = None
+                self.state.set_active_client(None)
             self.activate_kvm(switch_monitor=desired_switch_monitor, target=target)
             return
 
-        current = self.client_infos.get(self.active_client, "").lower()
+        active_client = self.state.get_active_client()
+        current = (self.state.get_client_info(active_client) or "").lower() if active_client else ""
         target = name.lower()
         logging.info(
             "toggle_client_control start: target=%s current=%s kvm_active=%s switch_monitor=%s",
             target,
             current,
-            self.kvm_active,
+            self.state.is_active(),
             switch_monitor,
         )
-        if self.kvm_active and current.startswith(target):
+        if self.state.is_active() and current.startswith(target):
             logging.debug("Deactivating KVM because active client matches target")
             self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control same client")
             return
-        if self.kvm_active:
+        if self.state.is_active():
             logging.debug("Deactivating current KVM session before switching client")
             self.deactivate_kvm(release_keys=release_keys, reason="toggle_client_control switch")
         if self.set_active_client_by_name(name):
@@ -667,7 +663,7 @@ class KVMWorker(QObject):
         self.peer_manager.stop()
         if self.settings.get('role') == 'input_provider':
             self._stop_input_provider_stream()
-        elif self.kvm_active:
+        elif self.state.is_active():
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
         if self.service_info:
             try:
@@ -690,20 +686,17 @@ class KVMWorker(QObject):
                 logging.exception("Failed to stop button manager cleanly")
             self.button_manager = None
         with self.clients_lock:
-            for sock in list(self.client_sockets):
+            for sock in list(self.state.get_client_sockets()):
                 try:
                     sock.close()
                 except Exception:
                     pass
-            self.client_sockets.clear()
-            self.client_infos.clear()
-            self.client_roles.clear()
-            self.active_client = None
+            self.state.clear_clients()
         self.server_socket = None if self.settings.get('role') != 'ado' else self.server_socket
         if self.settings.get('role') == 'ado':
             self.input_provider_socket = None
-            self.current_target = 'desktop'
-            self.kvm_active = False
+            self.state.set_target('desktop')
+            self.state.set_active(False)
         if self.connection_thread and self.connection_thread.is_alive():
             self.connection_thread.join(timeout=1)
         if self.pico_thread and self.pico_thread.is_alive():
@@ -742,13 +735,15 @@ class KVMWorker(QObject):
                     self.message_processor_thread.is_alive() if self.message_processor_thread else "N/A"
                 )
                 with self.clients_lock:
-                    connected_clients_count = len(self.client_sockets)
-                    client_names = list(self.client_infos.values())
-                active_client_name = self.client_infos.get(self.active_client, "None")
+                    client_infos = self.state.get_client_infos()
+                connected_clients_count = len(client_infos)
+                client_names = list(client_infos.values())
+                active_client = self.state.get_active_client()
+                active_client_name = client_infos.get(active_client, "None")
                 log_message = (
                     f"HEARTBEAT - "
                     f"Mem: {mem_usage:.2f} MB, CPU: {cpu_usage:.1f}%, Threads: {active_threads} | "
-                    f"KVM Active: {self.kvm_active}, Target: {active_client_name} | "
+                    f"KVM Active: {self.state.is_active()}, Target: {active_client_name} | "
                     f"Clients: {connected_clients_count} {client_names} | "
                     f"StreamThread: {stream_thread_alive}, MsgProc: {msg_proc_alive}"
                 )
@@ -847,7 +842,7 @@ class KVMWorker(QObject):
                     try:
                         msg_len = struct.unpack('!I', buffer[:4])[0]
                     except struct.error:
-                        logging.error("Invalid length header from %s", self.client_infos.get(sock, sock))
+                        logging.error("Invalid length header from %s", self.state.get_client_info(sock) or sock)
                         buffers.pop(sock, None)
                         break
                     if len(buffer) < 4 + msg_len:
@@ -859,7 +854,7 @@ class KVMWorker(QObject):
                     except Exception as e:
                         logging.error(
                             "Failed to unpack message from %s: %s",
-                            self.client_infos.get(sock, sock),
+                            self.state.get_client_info(sock) or sock,
                             e,
                             exc_info=True,
                         )
@@ -867,7 +862,7 @@ class KVMWorker(QObject):
                     logging.debug(
                         "Server handling message type '%s' from %s",
                         data.get('type') or data.get('command'),
-                        self.client_infos.get(sock, sock),
+                        self.state.get_client_info(sock) or sock,
                     )
 
                     cmd = data.get('command')
@@ -883,7 +878,7 @@ class KVMWorker(QObject):
                     logging.debug(
                         "Unhandled server message type '%s' from %s",
                         data.get('type') or data.get('command'),
-                        self.client_infos.get(sock, sock),
+                        self.state.get_client_info(sock) or sock,
                     )
         finally:
             buffers.clear()
@@ -919,23 +914,28 @@ class KVMWorker(QObject):
 
     def toggle_kvm_active(self, switch_monitor=True):
         """Toggle KVM state with optional monitor switching."""
+        active_client = self.state.get_active_client()
+        active_client_name = (
+            self.state.get_client_info(active_client) if active_client else None
+        )
         logging.info(
             "toggle_kvm_active called. current_state=%s switch_monitor=%s active_client=%s",
-            self.kvm_active,
+            self.state.is_active(),
             switch_monitor,
-            self.client_infos.get(self.active_client),
+            active_client_name,
         )
         if self.settings.get('role') == 'ado':
-            target = self.current_target if self.current_target != 'desktop' else 'elitedesk'
-            if not self.kvm_active:
+            current_target = self.state.get_target()
+            target = current_target if current_target != 'desktop' else 'elitedesk'
+            if not self.state.is_active():
                 self.activate_kvm(switch_monitor=switch_monitor, target=target)
             else:
                 self.deactivate_kvm(switch_monitor=switch_monitor, reason="toggle_kvm_active")
             self.release_hotkey_keys()
             return
-        if self.active_client is None:
+        if active_client is None:
             logging.warning("toggle_kvm_active invoked with no active_client")
-        if not self.kvm_active:
+        if not self.state.is_active():
             self.activate_kvm(switch_monitor=switch_monitor)
         else:
             self.deactivate_kvm(switch_monitor=switch_monitor, reason="toggle_kvm_active")
@@ -947,12 +947,13 @@ class KVMWorker(QObject):
                 self.status_update.emit("Hiba: Nincs input szolgáltató")
                 logging.error("Activation requested without connected input provider")
                 return
+            active_client = self.state.get_active_client()
             if target is None:
-                target = 'laptop' if self.active_client else 'elitedesk'
+                target = 'laptop' if active_client else 'elitedesk'
             self.switch_monitor = switch_monitor
-            self.current_target = target
+            self.state.set_target(target)
             self.pending_activation_target = None
-            self.kvm_active = True
+            self.state.set_active(True)
             if target == 'elitedesk':
                 self.status_update.emit("Állapot: EliteDesk irányítása aktív")
                 self._switch_monitor_for_target('elitedesk', allow_switch=switch_monitor)
@@ -963,8 +964,8 @@ class KVMWorker(QObject):
                 logging.error("Failed to start input streaming for target %s", target)
                 if target == 'elitedesk':
                     self._switch_monitor_for_target('desktop', allow_switch=True)
-                self.current_target = 'desktop'
-                self.kvm_active = False
+                self.state.set_target('desktop')
+                self.state.set_active(False)
                 self.status_update.emit("Hiba: nem érhető el az input szolgáltató")
                 return
             logging.info("Controller activated for %s", target)
@@ -973,22 +974,26 @@ class KVMWorker(QObject):
         logging.info(
             "activate_kvm called. switch_monitor=%s active_client=%s",
             switch_monitor,
-            self.client_infos.get(self.active_client, "unknown"),
+            self.state.get_client_info(self.state.get_active_client()) or "unknown",
         )
         self.pending_activation_target = None
-        if self.active_client is None and self.client_sockets:
-            self.active_client = self.client_sockets[0]
-            logging.info(
-                "No active client selected. Defaulting to %s",
-                self.client_infos.get(self.active_client, "ismeretlen"),
-            )
-        if not self.client_sockets:
+        active_client = self.state.get_active_client()
+        if active_client is None:
+            sockets = self.state.get_client_sockets()
+            if sockets:
+                active_client = sockets[0]
+                self.state.set_active_client(active_client)
+                logging.info(
+                    "No active client selected. Defaulting to %s",
+                    self.state.get_client_info(active_client) or "ismeretlen",
+                )
+        if not self.state.has_clients():
             self.status_update.emit("Hiba: Nincs csatlakozott kliens a váltáshoz!")
             logging.warning("Váltási kísérlet kliens kapcsolat nélkül.")
             return
 
         self.switch_monitor = switch_monitor
-        self.kvm_active = True
+        self.state.set_active(True)
 
         self.status_update.emit("Állapot: Aktív...")
         logging.info("KVM aktiválva.")
@@ -998,9 +1003,9 @@ class KVMWorker(QObject):
 
     def _streaming_loop(self):
         """Keep streaming active and restart if it stops unexpectedly."""
-        while self.kvm_active and self._running:
+        while self.state.is_active() and self._running:
             self.start_kvm_streaming()
-            if self.kvm_active and self._running:
+            if self.state.is_active() and self._running:
                 logging.warning("Egér szinkronizáció megszakadt, újraindítás...")
                 time.sleep(1)
 
@@ -1014,14 +1019,15 @@ class KVMWorker(QObject):
         reason: Optional[str] = None,
     ):
         if self.settings.get('role') == 'ado':
-            if not self.kvm_active and self.current_target == 'desktop':
+            current_target = self.state.get_target()
+            if not self.state.is_active() and current_target == 'desktop':
                 logging.info("Controller deactivate requested but already idle")
                 if release_keys:
                     self.release_hotkey_keys()
                 return
-            prev_target = self.current_target
-            self.kvm_active = False
-            self.current_target = 'desktop'
+            prev_target = current_target
+            self.state.set_active(False)
+            self.state.set_target('desktop')
             if self.input_provider_socket:
                 self._send_to_provider({'command': 'stop_stream'})
             host_code = self.settings['monitor_codes']['host']
@@ -1039,7 +1045,7 @@ class KVMWorker(QObject):
             logging.info("Controller deactivated (reason=%s)", reason)
             return
 
-        if not self.kvm_active:
+        if not self.state.is_active():
             logging.info(
                 "deactivate_kvm called, but KVM was already inactive. Reason: %s. No action taken.",
                 reason or "unknown",
@@ -1048,18 +1054,25 @@ class KVMWorker(QObject):
                 self.release_hotkey_keys()
             return
 
+        active_client = self.state.get_active_client()
+        active_client_name = self.state.get_client_info(active_client) if active_client else None
         if reason:
             logging.info(
                 "deactivate_kvm called. reason=%s switch_monitor=%s kvm_active=%s active_client=%s",
-                reason, switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
+                reason,
+                switch_monitor,
+                self.state.is_active(),
+                active_client_name,
             )
         else:
             logging.info(
                 "deactivate_kvm called. switch_monitor=%s kvm_active=%s active_client=%s",
-                switch_monitor, self.kvm_active, self.client_infos.get(self.active_client),
+                switch_monitor,
+                self.state.is_active(),
+                active_client_name,
             )
 
-        self.kvm_active = False
+        self.state.set_active(False)
         self.status_update.emit("Állapot: Inaktív...")
         logging.info("KVM deaktiválva.")
 
@@ -1086,17 +1099,23 @@ class KVMWorker(QObject):
         self._host_mouse_controller = None
         self._orig_mouse_pos = None
 
-        if self.active_client not in self.client_sockets:
-            if self.active_client is not None:
+        client_sockets = self.state.get_client_sockets()
+        active_client = self.state.get_active_client()
+        if active_client not in client_sockets:
+            if active_client is not None:
                 logging.warning("Active client disconnected during deactivation")
             else:
                 logging.debug("No active client set after deactivation")
 
-            if self.client_sockets:
-                self.active_client = self.client_sockets[0]
-                logging.info("Reselected active client: %s", self.client_infos.get(self.active_client))
+            if client_sockets:
+                new_active = client_sockets[0]
+                self.state.set_active_client(new_active)
+                logging.info(
+                    "Reselected active client: %s",
+                    self.state.get_client_info(new_active),
+                )
             else:
-                self.active_client = None
+                self.state.set_active_client(None)
 
     def switch_monitor_input(self, input_code):
         """Switch the primary monitor to the given input source."""
@@ -1106,6 +1125,7 @@ class KVMWorker(QObject):
     
     def start_kvm_streaming(self):
         logging.info("start_kvm_streaming: initiating control transfer")
+        state = self.state
         if getattr(self, 'switch_monitor', True):
             success, error = self.monitor_controller.switch_to_client()
             if not success:
@@ -1166,7 +1186,7 @@ class KVMWorker(QObject):
 
         def sender():
             last_tick = time.monotonic()
-            while self.kvm_active and self._running:
+            while state.is_active() and self._running:
                 events = []
                 try:
                     payload = send_queue.get(timeout=0.01)
@@ -1223,11 +1243,14 @@ class KVMWorker(QObject):
 
                 to_remove = []
                 active_lost = False
-                if self.active_client is None and self.client_sockets:
-                    self.active_client = self.client_sockets[0]
-                targets = [self.active_client] if self.active_client else []
+                active_client = state.get_active_client()
+                client_sockets = state.get_client_sockets()
+                if active_client is None and client_sockets:
+                    active_client = client_sockets[0]
+                    state.set_active_client(active_client)
+                targets = [active_client] if active_client else []
                 for sock in list(targets):
-                    if sock not in self.client_sockets:
+                    if sock not in client_sockets:
                         continue
                     for packed, event in events:
                         try:
@@ -1238,7 +1261,7 @@ class KVMWorker(QObject):
                             if event and event.get('type') == 'move_relative':
                                 logging.debug(
                                     "Mouse move sent to %s: dx=%s dy=%s",
-                                    self.client_infos.get(sock, sock.getpeername()),
+                                    state.get_client_info(sock) or sock.getpeername(),
                                     event.get('dx'),
                                     event.get('dy'),
                                 )
@@ -1246,12 +1269,12 @@ class KVMWorker(QObject):
                                 logging.debug(
                                     "Sent %d bytes to %s",
                                     len(packed),
-                                    self.client_infos.get(sock, sock.getpeername()),
+                                    state.get_client_info(sock) or sock.getpeername(),
                                 )
                         except (socket.timeout, BlockingIOError):
                             logging.warning(
                                 "Client not reading, disconnecting %s",
-                                self.client_infos.get(sock, sock.getpeername()),
+                                state.get_client_info(sock) or sock.getpeername(),
                             )
                             to_remove.append(sock)
                             break
@@ -1261,7 +1284,7 @@ class KVMWorker(QObject):
                             except Exception:
                                 event_dbg = '<unpack failed>'
                             logging.error(
-                                f"Failed sending event {event_dbg} to {self.client_infos.get(sock, sock.getpeername())}: {e}",
+                                f"Failed sending event {event_dbg} to {state.get_client_info(sock) or sock.getpeername()}: {e}",
                                 exc_info=True,
                             )
                             if event_dbg != '<unpack failed>':
@@ -1269,21 +1292,25 @@ class KVMWorker(QObject):
                             to_remove.append(sock)
                             break
                 for s in to_remove:
-                    if s == self.active_client:
+                    current_active = state.get_active_client()
+                    if s == current_active:
                         active_lost = True
                     self.peer_manager.disconnect_peer(s, "sender error")
-                    if self.client_sockets and self.active_client is None:
-                        self.active_client = self.client_sockets[0]
+                    if state.get_active_client() is None:
+                        remaining = state.get_client_sockets()
+                        if remaining:
+                            state.set_active_client(remaining[0])
                 if active_lost:
-                    if self.active_client:
+                    current_active = state.get_active_client()
+                    if current_active:
                         self.status_update.emit(
-                            f"Kapcsolat megszakadt. Átváltás: {self.client_infos.get(self.active_client, 'ismeretlen')}"
+                            f"Kapcsolat megszakadt. Átváltás: {state.get_client_info(current_active) or 'ismeretlen'}"
                         )
                     else:
                         self.status_update.emit(
                             "Kapcsolat megszakadt. Várakozás új kliensre..."
                         )
-                if to_remove and not self.client_sockets:
+                if to_remove and not state.has_clients():
                     self.deactivate_kvm(reason="all clients disconnected")
                     break
 
@@ -1292,12 +1319,12 @@ class KVMWorker(QObject):
 
         def send(data):
             """Queue an event for sending and log the details."""
-            if not self.kvm_active:
+            if not state.is_active():
                 logging.warning(
                     "Send called while KVM inactive. Event=%s active_client=%s connected_clients=%d",
                     data,
-                    self.client_infos.get(self.active_client),
-                    len(self.client_sockets),
+                    state.get_client_info(state.get_active_client()),
+                    len(state.get_client_sockets()),
                 )
                 record_unsent(data)
                 return False
@@ -1452,7 +1479,7 @@ class KVMWorker(QObject):
         m_listener.start()
         k_listener.start()
         
-        while self.kvm_active and self._running:
+        while state.is_active() and self._running:
             time.sleep(STREAM_LOOP_DELAY)
 
         for ktype, kval in list(pressed_keys):
