@@ -84,6 +84,12 @@ class PeerConnection(threading.Thread):
             "device_name": self._manager.device_name,
             "role": self._manager.role,
         }
+        self._log.debug(
+            "[Handshake] 'hello' küldése: név=%s, szerep=%s, cím=%s",
+            intro["device_name"],
+            intro["role"],
+            self.addr,
+        )
         if not self.send(intro):
             return False
 
@@ -103,6 +109,12 @@ class PeerConnection(threading.Thread):
 
         self.peer_name = hello.get("device_name", self.peer_name)
         self.peer_role = hello.get("role")
+        self._log.debug(
+            "[Handshake] 'hello' fogadva: név=%s, szerep=%s, cím=%s",
+            self.peer_name,
+            self.peer_role,
+            self.addr,
+        )
         if not self._manager.register_connection(self, self.peer_name, self.peer_role):
             return False
 
