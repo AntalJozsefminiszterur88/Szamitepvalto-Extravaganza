@@ -291,6 +291,7 @@ class PeerManager:
         while self._running.is_set():
             try:
                 client_sock, addr = server_socket.accept()
+                logging.debug(f"[Szerver] Bejövő kapcsolati kísérlet innen: {addr}")
             except socket.timeout:
                 continue
             except OSError:
@@ -311,13 +312,16 @@ class PeerManager:
                     continue
 
                 if local_addr > remote_addr:
+                    logging.debug(
+                        f"[Szerver] Kapcsolat elfogadva {addr} felől, SSL kézfogás indítása..."
+                    )
                     try:
                         secure_sock = wrap_socket_server_side(
                             client_sock, self._server_context
                         )
                     except ssl.SSLError as e:
                         logging.error(
-                            f"SSL hiba a bejövő kapcsolatnál ({addr[0]}): {e}"
+                            f"[Szerver] SSL hiba a bejövő kapcsolatnál {addr} felől: {e}"
                         )
                         client_sock.close()
                         continue
@@ -325,6 +329,9 @@ class PeerManager:
                     secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     self._spawn_connection(secure_sock, addr)
                 else:
+                    logging.debug(
+                        f"[Szerver] Kapcsolat elutasítva {addr} felé (IP-cím szabály)."
+                    )
                     client_sock.close()
                     continue
             except Exception:
@@ -398,16 +405,26 @@ class PeerManager:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
+                logging.debug(
+                    f"[Kliens] Kimenő kapcsolat indítása ide: {ip}:{port}"
+                )
                 secure_sock = wrap_socket_client_side(
                     sock, self._client_context, server_hostname=ip
                 )
             except ssl.SSLError as e:
-                logging.error(f"SSL hiba a kimenő kapcsolatnál ({ip}): {e}")
+                logging.error(
+                    f"[Kliens] SSL hiba a kimenő kapcsolatnál {ip}:{port} felé: {e}"
+                )
                 sock.close()
                 return
             secure_sock.connect((ip, port))
+            logging.debug(
+                f"[Kliens] Sikeres TCP & SSL kapcsolat felépítve ide: {ip}:{port}"
+            )
         except Exception as exc:
-            logging.error("Failed to connect to peer %s:%s: %s", ip, port, exc)
+            logging.error(
+                f"[Kliens] Nem sikerült csatlakozni ide: {ip}:{port}. Hiba: {exc}"
+            )
             try:
                 if secure_sock is not None:
                     secure_sock.close()
