@@ -308,20 +308,30 @@ class HostInputCapture:
             if is_warping:
                 is_warping = False
                 return
+
             dx = x - last_pos['x']
             dy = y - last_pos['y']
+
             if dx != 0 or dy != 0:
                 with movement_lock:
                     accumulated_movement['dx'] += dx
                     accumulated_movement['dy'] += dy
-                with sync_state_lock:
-                    sync_state['last_activity'] = time.monotonic()
-                    if sync_state['paused']:
-                        sync_state['resume_requested'] = True
-            is_warping = True
-            host_mouse_controller.position = (center_x, center_y)
-            last_pos['x'] = center_x
-            last_pos['y'] = center_y
+
+            with sync_state_lock:
+                sync_state['last_activity'] = time.monotonic()
+                if sync_state['paused']:
+                    sync_state['resume_requested'] = True
+
+            try:
+                is_warping = True
+                host_mouse_controller.position = (center_x, center_y)
+                last_pos['x'] = center_x
+                last_pos['y'] = center_y
+            except Exception as exc:
+                logging.debug("Failed to recenter host cursor: %s", exc, exc_info=True)
+                is_warping = False
+                last_pos['x'] = x
+                last_pos['y'] = y
 
         def on_click(x: int, y: int, button: mouse.Button, pressed: bool) -> None:
             if self._stop_event.is_set():
@@ -466,6 +476,18 @@ class HostInputCapture:
                 and not self._stop_event.is_set()
             ):
                 time.sleep(STREAM_LOOP_DELAY)
+                if not mouse_listener.is_alive() or not keyboard_listener.is_alive():
+                    if not self._stop_event.is_set():
+                        logging.warning(
+                            "Input listener thread stopped unexpectedly; restarting mouse sync",
+                        )
+                        break
+                if not sender_thread.is_alive():
+                    if not self._stop_event.is_set():
+                        logging.warning(
+                            "Input sender thread stopped unexpectedly; restarting mouse sync",
+                        )
+                        break
         finally:
             for key_type, key_val in list(pressed_keys):
                 send({'type': 'key', 'key_type': key_type, 'key': key_val, 'pressed': False})
