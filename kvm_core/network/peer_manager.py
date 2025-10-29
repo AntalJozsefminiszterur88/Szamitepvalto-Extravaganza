@@ -200,10 +200,17 @@ class PeerManager:
             logging.debug("Closed redundant connection to %s (%s)", peer_name, reason)
             return
 
+        suppress_switch_reasons = {"peer_connection_exit", "manager stop", "manual", "sender error"}
+
         if worker.settings.get("role") == "ado" and sock == worker.input_provider_socket:
             if state.is_active():
+                switch_monitor = (
+                    False
+                    if reason in suppress_switch_reasons
+                    else state.get_current_target() == "elitedesk"
+                )
                 worker.deactivate_kvm(
-                    switch_monitor=state.get_current_target() == "elitedesk",
+                    switch_monitor=switch_monitor,
                     reason="input provider disconnect",
                 )
             worker.input_provider_socket = None
@@ -217,7 +224,8 @@ class PeerManager:
         if was_active and state.is_active():
             logging.info("Active client disconnected, deactivating KVM")
             state.set_pending_activation_target(peer_name)
-            worker.deactivate_kvm(reason=reason)
+            switch_monitor = False if reason in suppress_switch_reasons else None
+            worker.deactivate_kvm(switch_monitor=switch_monitor, reason=reason)
         elif was_active:
             state.set_active_client(None)
             state.set_pending_activation_target(None)
