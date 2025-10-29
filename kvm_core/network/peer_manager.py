@@ -300,19 +300,25 @@ class PeerManager:
             secure_sock: Optional[socket.socket] = None
             try:
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                try:
-                    secure_sock = wrap_socket_server_side(client_sock, self._server_context)
-                except ssl.SSLError as e:
-                    logging.error(f"SSL hiba a bejövő kapcsolatnál ({addr[0]}): {e}")
-                    client_sock.close()
-                    continue
                 local_addr = ipaddress.ip_address(self._worker.local_ip)
                 remote_addr = ipaddress.ip_address(peer_ip)
+
                 if local_addr > remote_addr:
+                    try:
+                        secure_sock = wrap_socket_server_side(
+                            client_sock, self._server_context
+                        )
+                    except ssl.SSLError as e:
+                        logging.error(
+                            f"SSL hiba a bejövő kapcsolatnál ({addr[0]}): {e}"
+                        )
+                        client_sock.close()
+                        continue
+
                     secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     self._spawn_connection(secure_sock, addr)
                 else:
-                    secure_sock.close()
+                    client_sock.close()
             except Exception:
                 try:
                     if secure_sock is not None:
