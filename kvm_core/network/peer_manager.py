@@ -300,8 +300,15 @@ class PeerManager:
             secure_sock: Optional[socket.socket] = None
             try:
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                local_addr = ipaddress.ip_address(self._worker.local_ip)
-                remote_addr = ipaddress.ip_address(peer_ip)
+                try:
+                    local_addr = ipaddress.ip_address(self._worker.local_ip)
+                    remote_addr = ipaddress.ip_address(peer_ip)
+                except ValueError:
+                    logging.warning(
+                        f"Érvénytelen IP-cím a bejövő kapcsolatnál: {peer_ip}"
+                    )
+                    client_sock.close()
+                    continue
 
                 if local_addr > remote_addr:
                     try:
@@ -319,6 +326,7 @@ class PeerManager:
                     self._spawn_connection(secure_sock, addr)
                 else:
                     client_sock.close()
+                    continue
             except Exception:
                 try:
                     if secure_sock is not None:
@@ -357,6 +365,10 @@ class PeerManager:
             for peer in peers:
                 ip = peer["ip"]
                 port = peer["port"]
+
+                if ip == self._worker.local_ip and port == self._port:
+                    continue
+
                 sockets = self._state.get_client_sockets()
                 already = any(
                     self._safe_peername(s) == ip
@@ -365,6 +377,18 @@ class PeerManager:
                 )
                 if already:
                     continue
+
+                try:
+                    local_addr = ipaddress.ip_address(self._worker.local_ip)
+                    remote_addr = ipaddress.ip_address(ip)
+                    if local_addr > remote_addr:
+                        continue
+                except ValueError:
+                    logging.warning(
+                        f"Érvénytelen IP-cím a kapcsolatkezelőben: {ip}"
+                    )
+                    continue
+
                 self.connect_to_peer(ip, port)
             time.sleep(2)
 
