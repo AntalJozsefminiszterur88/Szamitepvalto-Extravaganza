@@ -1,0 +1,22 @@
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+C = HU
+ST = Pest
+L = Budapest
+O = MyKVM
+OU = KVMApp
+CN = YOUR_SERVER_HOSTNAME_OR_IP
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+# Fontos: Cseréld le ezt a szerver gép (EliteDesk) tényleges IP-címére!
+IP.1 = 192.168.0.100
+# DNS.1 = elitedesk.local  # Szükség esetén hosztnevet is megadhatsz

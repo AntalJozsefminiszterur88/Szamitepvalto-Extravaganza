@@ -73,6 +73,28 @@ instance uses this trusted certificate authority to verify the controller
 identity during the TLS handshake. The `key.pem` file must remain on the machine
 acting as the server.
 
+## TLS/SSL Titkosítás Beállítása
+
+A biztonságos működéshez a szervernek és a klienseknek olyan tanúsítványt kell
+használniuk, amely tartalmazza a szerver IP-címét a Subject Alternative Name
+(SAN) kiterjesztésben. Kövesd az alábbi lépéseket:
+
+1. Nyisd meg a `config/openssl.cnf` fájlt egy szövegszerkesztővel.
+2. Az `[alt_names]` szekció alatt, az `IP.1` értékét cseréld le a szerverként
+   funkcionáló gép (pl. EliteDesk) pontos IP-címére.
+3. Töröld a `config/` mappából a régi `cert.pem` és `key.pem` fájlokat, ha
+   léteznek.
+4. A projekt gyökérmappájából futtasd a következő parancsot egy terminálban
+   (pl. Git Bash):
+
+   ```bash
+   openssl req -x509 -newkey rsa:4096 -nodes -out config/cert.pem -keyout config/key.pem -days 3650 -config config/openssl.cnf
+   ```
+
+5. A frissen generált `cert.pem` fájlt másold át az összes kliens gép (laptop,
+   asztali gép) `config/` mappájába. A `key.pem` fájlnak csak a szerveren szabad
+   léteznie!
+
 ## Usage
 
 After installing the dependencies, run `python main.py` to launch the GUI. The
