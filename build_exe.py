@@ -30,6 +30,12 @@ def build():
         "pythoncom",
     ]
 
+    project_root = Path(__file__).resolve().parent
+    data_mappings = [
+        (project_root / "keyboard_mouse_switch_icon.ico", "."),
+        (project_root / "config", "config"),
+    ]
+
     cmd = [
         sys.executable,
         "-m",
@@ -40,11 +46,21 @@ def build():
         "--name",
         "Szamitepvalto-Extravaganza",
         "--icon",
-        "keyboard_mouse_switch_icon.ico",
-        "--add-data",
-        "keyboard_mouse_switch_icon.ico;.",
-        "main.py",
+        str(project_root / "keyboard_mouse_switch_icon.ico"),
     ]
+
+    for source, target in data_mappings:
+        if not source.exists():
+            continue
+
+        cmd.extend(
+            [
+                "--add-data",
+                f"{source}{os.pathsep}{target}",
+            ]
+        )
+
+    cmd.append("main.py")
 
     for module in hidden_imports:
         cmd.extend(["--hidden-import", module])
