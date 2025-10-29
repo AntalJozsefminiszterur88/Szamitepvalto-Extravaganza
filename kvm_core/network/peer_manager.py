@@ -42,7 +42,16 @@ class PeerManager:
         self.connection_manager_thread: Optional[threading.Thread] = None
         self._connections: Dict[socket.socket, PeerConnection] = {}
         self._connections_lock = threading.Lock()
-        self._server_context = create_server_context()
+
+        role = worker.settings.get("role")
+        self._server_context = None
+        if role == "ado":
+            try:
+                self._server_context = create_server_context()
+            except FileNotFoundError:
+                logging.critical("Server TLS key missing for 'ado' role")
+                raise
+
         self._client_context = create_client_context()
         self._discovery = ServiceDiscovery(
             zeroconf,
