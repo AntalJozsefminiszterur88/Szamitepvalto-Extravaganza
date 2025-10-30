@@ -53,6 +53,7 @@ class PeerManager:
                 raise
 
         self._client_context = create_client_context()
+        self._client_context_no_hostname = create_client_context(enforce_hostname=False)
         self._discovery = ServiceDiscovery(
             zeroconf,
             SERVICE_TYPE,
@@ -408,8 +409,19 @@ class PeerManager:
                 logging.debug(
                     f"[Kliens] Kimenő kapcsolat indítása ide: {ip}:{port}"
                 )
+                context = self._client_context
+                server_hostname = ip
+                if self._is_literal_ip(ip):
+                    context = self._client_context_no_hostname
+                    server_hostname = None
+                    logging.debug(
+                        "[Kliens] TLS hosztnév-ellenőrzés kikapcsolva a %s címen",
+                        ip,
+                    )
                 secure_sock = wrap_socket_client_side(
-                    sock, self._client_context, server_hostname=ip
+                    sock,
+                    context,
+                    server_hostname=server_hostname,
                 )
             except ssl.SSLError as e:
                 logging.error(
@@ -436,6 +448,14 @@ class PeerManager:
 
         assert secure_sock is not None
         self._spawn_connection(secure_sock, (ip, port))
+
+    @staticmethod
+    def _is_literal_ip(value: str) -> bool:
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return True
 
     def _normalize_exclude(self, exclude_peer: Optional[Iterable]) -> set:
         if exclude_peer is None:
