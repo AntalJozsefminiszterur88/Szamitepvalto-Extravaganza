@@ -58,7 +58,7 @@ from hardware.button_input_manager import ButtonInputManager
 from utils.stability_monitor import StabilityMonitor
 from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
 from kvm_core.message_handler import MessageHandler
-from log_aggregator import LogAggregator
+from config.log_aggregator import LogAggregator
 from utils.remote_logging import RemoteLogHandler, get_remote_log_handler
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
