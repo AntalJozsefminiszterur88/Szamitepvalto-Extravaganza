@@ -19,15 +19,21 @@ from typing import Callable, Optional
 class RemoteLogHandler(logging.Handler):
     """Logging handler that forwards records to the controller asynchronously."""
 
-    def __init__(self, *, source: str | None = None, sender: Optional[Callable[[dict], bool]] = None) -> None:
+    def __init__(
+        self,
+        *,
+        source: str | None = None,
+        send_callback: Optional[Callable[[dict], bool]] = None,
+    ) -> None:
         super().__init__(level=logging.WARNING)
         self._queue: "queue.Queue[Optional[dict]]" = queue.Queue()
         self._stop_event = threading.Event()
         self._sender_lock = threading.Lock()
-        self._sender: Optional[Callable[[dict], bool]] = sender
+        self._send_callback: Optional[Callable[[dict], bool]] = None
         self._source = source or ""
-        self._worker = threading.Thread(target=self._process_queue, daemon=True, name="RemoteLogSender")
-        self._worker.start()
+        self._worker: Optional[threading.Thread] = None
+        if send_callback is not None:
+            self.set_send_callback(send_callback)
 
     def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - logging integration
         try:
@@ -51,14 +57,19 @@ class RemoteLogHandler(logging.Handler):
         with self._sender_lock:
             self._source = source
 
-    def set_sender(self, sender: Optional[Callable[[dict], bool]]) -> None:
+    def set_send_callback(self, callback: Optional[Callable[[dict], bool]]) -> None:
+        should_start = False
         with self._sender_lock:
-            self._sender = sender
+            self._send_callback = callback
+            if callback is not None and (self._worker is None or not self._worker.is_alive()):
+                should_start = True
+        if should_start:
+            self._start_worker()
 
     def close(self) -> None:  # pragma: no cover - cleanup hook
         self._stop_event.set()
         self._queue.put_nowait(None)
-        if self._worker.is_alive():
+        if self._worker and self._worker.is_alive():
             self._worker.join(timeout=1.0)
         super().close()
 
@@ -98,9 +109,21 @@ class RemoteLogHandler(logging.Handler):
             if backlog:
                 time.sleep(0.5)
 
+    def _start_worker(self) -> None:
+        with self._sender_lock:
+            if self._worker and self._worker.is_alive():
+                return
+            self._stop_event.clear()
+            self._worker = threading.Thread(
+                target=self._process_queue,
+                daemon=True,
+                name="RemoteLogSender",
+            )
+            self._worker.start()
+
     def _current_sender(self) -> Optional[Callable[[dict], bool]]:
         with self._sender_lock:
-            return self._sender
+            return self._send_callback
 
 
 _global_handler: Optional[RemoteLogHandler] = None
