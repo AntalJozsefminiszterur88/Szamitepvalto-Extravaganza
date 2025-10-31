@@ -3,6 +3,7 @@
 
 import sys
 import os
+import socket
 import logging
 from logging.handlers import RotatingFileHandler
 import ctypes
@@ -15,6 +16,16 @@ from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from ui.main_window import MainWindow
 from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
+from utils.remote_logging import get_remote_log_handler
+
+
+class _RemoteSourceFilter(logging.Filter):
+    """Ensure the log record always exposes a `remote_source` attribute."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - logging integration
+        if not hasattr(record, "remote_source"):
+            record.remote_source = ""
+        return True
 
 # Windows-specifikus importok
 try:
@@ -31,46 +42,6 @@ if getattr(sys, 'frozen', False):
 else:
     # Ha a program scriptként fut
     application_path = os.path.dirname(os.path.abspath(__file__))
-
-# Log könyvtár létrehozása a felhasználó Dokumentumok mappájában
-documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
-if not documents_dir:
-    # Biztonsági tartalék, ha a Qt nem ad vissza érvényes elérési utat
-    documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
-
-log_dir = os.path.join(documents_dir, "UMKGL Solutions", "Szamitepvalto-Extravaganza")
-os.makedirs(log_dir, exist_ok=True)
-log_file_path = os.path.join(log_dir, "kvm_app.log")
-
-stability_monitor = initialize_global_monitor(
-    check_interval=60.0,
-    memory_warning_mb=600,
-    memory_critical_mb=900,
-    log_file_path=log_file_path,
-)
-stability_monitor.add_directory_quota(log_dir, max_mb=200, min_free_mb=512)
-
-# Naplózás beállítása fájlba, rotációval
-# 5 MB-onként új fájlt kezd, és 3 régi fájlt tart meg.
-file_handler = RotatingFileHandler(
-    log_file_path, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8'
-)
-file_handler.setFormatter(
-    logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
-)
-
-# Konzolra író handler (fejlesztéshez hasznos marad)
-stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setFormatter(
-    logging.Formatter('%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
-)
-
-# A gyökeres logger konfigurálása mindkét handlerrel
-logging.basicConfig(
-    level=logging.INFO,  # Állítsd DEBUG-ra a részletesebb hibakereséshez
-    handlers=[file_handler, stream_handler]
-)
-
 
 def _log_thread_exception(args):
     """Globálisan naplózza a kezeletlen szálhibákat, hogy ne záródjon be csendben az alkalmazás."""
@@ -144,6 +115,51 @@ def set_high_priority():
 
 
 if __name__ == "__main__":
+    documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+    if not documents_dir:
+        documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
+
+    settings = QSettings(ORG_NAME, APP_NAME)
+    startup_role = settings.value("role/mode", "input_provider")
+    device_name = settings.value("device/name", socket.gethostname())
+
+    log_dir = os.path.join(documents_dir, "UMKGL Solutions", "Szamitepvalto-Extravaganza")
+    log_file_path = os.path.join(log_dir, "kvm_app.log")
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter('%(asctime)s - %(remote_source)s%(levelname)s - %(threadName)s - %(message)s')
+    stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(_RemoteSourceFilter())
+
+    handlers = [stream_handler]
+    if startup_role == "ado":
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_file_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(_RemoteSourceFilter())
+        handlers.append(file_handler)
+    else:
+        remote_handler = get_remote_log_handler()
+        remote_handler.set_source(str(device_name))
+        handlers.append(remote_handler)
+
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
+
+    stability_monitor = initialize_global_monitor(
+        check_interval=60.0,
+        memory_warning_mb=600,
+        memory_critical_mb=900,
+        log_file_path=log_file_path if startup_role == "ado" else None,
+        role=startup_role,
+    )
+    if startup_role == "ado":
+        stability_monitor.add_directory_quota(log_dir, max_mb=200, min_free_mb=512)
+
     logging.info("Alkalmazás indítása...")
     set_high_priority()
 
