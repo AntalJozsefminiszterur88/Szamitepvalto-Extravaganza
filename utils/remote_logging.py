@@ -66,6 +66,10 @@ class RemoteLogHandler(logging.Handler):
         if should_start:
             self._start_worker()
 
+    def has_callback(self) -> bool:
+        with self._sender_lock:
+            return self._send_callback is not None
+
     def close(self) -> None:  # pragma: no cover - cleanup hook
         self._stop_event.set()
         self._queue.put_nowait(None)
