@@ -100,6 +100,10 @@ class StabilityMonitor:
         self._pending_statistics: Dict[str, dict] = {}
         self._pending_period: Optional[str] = None
         self._statistics_event = threading.Event()
+        self._stats_received_event = threading.Event()
+        self._expected_stats_clients: set[str] = set()
+        self._received_stats_clients: set[str] = set()
+        self._stats_received_event.set()
 
     # ------------------------------------------------------------------
     # Life-cycle management
@@ -209,6 +213,15 @@ class StabilityMonitor:
             if get_client_names_callback is not None:
                 self._get_client_names_callback = get_client_names_callback
 
+    def expect_stats_from(self, clients: Iterable[str]) -> None:
+        with self._remote_stats_lock:
+            self._expected_stats_clients = {str(client) for client in clients}
+            self._received_stats_clients.clear()
+            if not self._expected_stats_clients:
+                self._stats_received_event.set()
+            else:
+                self._stats_received_event.clear()
+
     def track_method_call(self, method_name: str) -> Callable[[Callable], Callable]:
         with self._lock:
             if method_name not in self._tracked_method_names:
@@ -286,7 +299,21 @@ class StabilityMonitor:
         now = datetime.now()
         start_time = now - config["delta"]
 
+        self._stats_received_event.clear()
+        expected_clients: list[str] = []
+        if self._get_client_names_callback:
+            try:
+                expected_clients = list(self._get_client_names_callback())
+            except Exception:
+                logging.exception("Failed to enumerate clients for statistics expectation")
+                expected_clients = []
+        self.expect_stats_from(expected_clients)
+
         remote_statistics = self._request_remote_statistics(period)
+        if expected_clients:
+            self._stats_received_event.wait(timeout=5.0)
+        with self._remote_stats_lock:
+            remote_statistics = dict(self._remote_statistics_latest.get(period, remote_statistics))
         method_names, call_counts = self._consume_call_counts(period)
 
         per_source_stats, overall_messages = self._analyse_log_file(log_file_path, start_time)
@@ -454,14 +481,46 @@ class StabilityMonitor:
 
         return per_source, overall_messages
 
+    def add_remote_statistics(self, client_name: str, stats: dict) -> None:
+        period_raw = stats.get("period")
+        if not period_raw:
+            return
+        period = str(period_raw)
+        methods = list(stats.get("methods", []))
+        counters_raw = stats.get("counters", {})
+        counters: Dict[str, int] = {}
+        if isinstance(counters_raw, dict):
+            for key, value in counters_raw.items():
+                try:
+                    counters[str(key)] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        payload = {
+            "methods": methods,
+            "counters": counters,
+            "received_at": datetime.now(),
+        }
+        with self._remote_stats_lock:
+            latest = self._remote_statistics_latest.setdefault(period, {})
+            latest[str(client_name)] = payload
+            if self._pending_period == period:
+                self._pending_statistics[str(client_name)] = payload
+            self._statistics_event.set()
+            self._received_stats_clients.add(str(client_name))
+            if self._expected_stats_clients and self._expected_stats_clients.issubset(
+                self._received_stats_clients
+            ):
+                self._stats_received_event.set()
+
     def _request_remote_statistics(self, period: str) -> Dict[str, dict]:
         callback = self._request_statistics_callback
         if callback is None:
             with self._remote_stats_lock:
                 return dict(self._remote_statistics_latest.get(period, {}))
 
-        expected = None
-        if self._get_client_names_callback:
+        with self._remote_stats_lock:
+            expected = len(self._expected_stats_clients) if self._expected_stats_clients else None
+        if expected is None and self._get_client_names_callback:
             try:
                 names = list(self._get_client_names_callback())
                 expected = len(names)
@@ -511,16 +570,11 @@ class StabilityMonitor:
         counters: Dict[str, int],
     ) -> None:
         payload = {
+            "period": period,
             "methods": list(methods),
             "counters": {str(k): int(v) for k, v in counters.items()},
-            "received_at": datetime.now(),
         }
-        with self._remote_stats_lock:
-            latest = self._remote_statistics_latest.setdefault(period, {})
-            latest[source] = payload
-            if self._pending_period == period:
-                self._pending_statistics[source] = payload
-            self._statistics_event.set()
+        self.add_remote_statistics(source, payload)
 
     def generate_statistics_snapshot(self, period: str) -> Dict[str, dict]:
         methods, counters = self._consume_call_counts(period)

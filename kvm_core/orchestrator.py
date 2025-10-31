@@ -573,6 +573,13 @@ class KVMOrchestrator(QObject):
     def _request_client_statistics(self, period: str) -> None:
         if self.settings.get('role') != 'ado':
             return
+        if self.stability_monitor:
+            try:
+                client_names = list(self._get_connected_client_names())
+            except Exception:
+                logging.exception("Failed to enumerate clients before requesting statistics")
+                client_names = []
+            self.stability_monitor.expect_stats_from(client_names)
         payload = {"command": "get_statistics", "period": period}
         self.peer_manager.broadcast(payload)
 
