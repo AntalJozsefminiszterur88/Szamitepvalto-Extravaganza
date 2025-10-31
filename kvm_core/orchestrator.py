@@ -101,6 +101,9 @@ class KVMOrchestrator(QObject):
         self.button_manager: Optional[ButtonInputManager] = None
 
         self.stability_monitor: Optional[StabilityMonitor] = stability_monitor
+        self._instrumented_methods: set[str] = set()
+        if self.stability_monitor:
+            self._instrument_monitored_methods()
         self._monitor_prefix = f"kvm-{id(self):x}"
         self._monitor_thread_keys: list[str] = []
         self._monitor_directory_keys: list[str] = []
@@ -199,6 +202,30 @@ class KVMOrchestrator(QObject):
     # ------------------------------------------------------------------
     # Stability monitor integration
     # ------------------------------------------------------------------
+    def _instrument_monitored_methods(self) -> None:
+        if not self.stability_monitor:
+            return
+
+        monitored_methods = [
+            "activate_kvm",
+            "deactivate_kvm",
+            "toggle_client_control",
+            "_send_host_event",
+            "send_provider_function_key",
+            "switch_monitor_input",
+        ]
+
+        for name in monitored_methods:
+            if name in self._instrumented_methods:
+                continue
+            original = getattr(self, name, None)
+            if original is None:
+                continue
+            decorator = self.stability_monitor.track_method_call(name)
+            wrapped = decorator(original)
+            setattr(self, name, wrapped)
+            self._instrumented_methods.add(name)
+
     def _register_core_monitoring(self) -> None:
         if not self.stability_monitor:
             return
