@@ -13,7 +13,10 @@ import os
 import shutil
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from functools import wraps
 from typing import Callable, Dict, Iterable, Optional
 
 import psutil
@@ -57,6 +60,7 @@ class StabilityMonitor:
         check_interval: float = 60.0,
         memory_warning_mb: int = 800,
         memory_critical_mb: int = 1024,
+        log_file_path: Optional[str] = None,
     ) -> None:
         self._check_interval = max(10.0, float(check_interval))
         self._memory_warning = max(0, memory_warning_mb) * 1024 * 1024
@@ -77,6 +81,15 @@ class StabilityMonitor:
         self._periodic_tasks: Dict[str, _PeriodicTask] = {}
         self._memory_cleanup_callbacks: list[CleanupCallback] = []
         self._last_cleanup_run: float = 0.0
+
+        self._log_file_path = log_file_path
+        self._last_daily_report_date: Optional[date] = None
+        self._last_weekly_report_date: Optional[date] = None
+        self._call_counters: Dict[str, Counter[str]] = {
+            "daily": Counter(),
+            "weekly": Counter(),
+        }
+        self._tracked_method_names: list[str] = []
 
     # ------------------------------------------------------------------
     # Life-cycle management
@@ -164,6 +177,170 @@ class StabilityMonitor:
             except ValueError:
                 pass
 
+    def update_log_file_path(self, path: Optional[str]) -> None:
+        with self._lock:
+            self._log_file_path = path
+
+    def track_method_call(self, method_name: str) -> Callable[[Callable], Callable]:
+        with self._lock:
+            if method_name not in self._tracked_method_names:
+                self._tracked_method_names.append(method_name)
+            for counter in self._call_counters.values():
+                counter.setdefault(method_name, 0)
+
+        def decorator(func: Callable) -> Callable:
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                with self._lock:
+                    for counter in self._call_counters.values():
+                        counter[method_name] += 1
+                return func(*args, **kwargs)
+
+            return wrapper
+
+        return decorator
+
+    def _consume_call_counts(self, period: str) -> tuple[list[str], Dict[str, int]]:
+        with self._lock:
+            method_names = list(self._tracked_method_names)
+            counter = self._call_counters.get(period)
+            if counter is None:
+                return method_names, {name: 0 for name in method_names}
+            snapshot = {name: counter.get(name, 0) for name in method_names}
+            counter.clear()
+        return method_names, snapshot
+
+    def _check_and_generate_reports(self) -> None:
+        with self._lock:
+            log_file_path = self._log_file_path
+            last_daily = self._last_daily_report_date
+            last_weekly = self._last_weekly_report_date
+
+        if not log_file_path:
+            return
+
+        today = date.today()
+        try:
+            if last_daily != today:
+                self._generate_report("daily", log_file_path)
+                with self._lock:
+                    self._last_daily_report_date = today
+
+            if last_weekly is None or (today - last_weekly).days >= 7:
+                self._generate_report("weekly", log_file_path)
+                with self._lock:
+                    self._last_weekly_report_date = today
+        except Exception:
+            logging.exception("Failed to generate stability monitor report")
+
+    def _generate_report(self, period: str, log_file_path: str) -> None:
+        period_config = {
+            "daily": {
+                "title": "Napi Működési Jelentés",
+                "timeframe": "Az elmúlt 24 óra",
+                "delta": timedelta(days=1),
+                "filename": "daily_report.md",
+            },
+            "weekly": {
+                "title": "Heti Működési Jelentés",
+                "timeframe": "Az elmúlt 7 nap",
+                "delta": timedelta(days=7),
+                "filename": "weekly_report.md",
+            },
+        }
+
+        if period not in period_config:
+            raise ValueError(f"Unsupported report period: {period}")
+
+        config = period_config[period]
+        now = datetime.now()
+        start_time = now - config["delta"]
+
+        warnings = 0
+        errors = 0
+        frequent_messages: Counter[str] = Counter()
+
+        if os.path.exists(log_file_path):
+            try:
+                with open(log_file_path, "r", encoding="utf-8") as log_file:
+                    for line in log_file:
+                        parts = line.strip().split(" - ", 3)
+                        if len(parts) < 4:
+                            continue
+                        timestamp_str, level, _thread_name, message = parts
+                        try:
+                            timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S,%f")
+                        except ValueError:
+                            continue
+                        if timestamp < start_time:
+                            continue
+                        if level == "WARNING":
+                            warnings += 1
+                            frequent_messages[message] += 1
+                        elif level in {"ERROR", "CRITICAL"}:
+                            errors += 1
+                            frequent_messages[message] += 1
+            except Exception:
+                logging.exception("Failed to analyse log file for %s report", period)
+
+        method_names, call_counts = self._consume_call_counts(period)
+
+        report_lines = [
+            f"# KVM Alkalmazás - {config['title']}",
+            "",
+            f"**Jelentés időpontja:** {now.strftime('%Y-%m-%d %H:%M')}",
+            "",
+            f"**Vizsgált időszak:** {config['timeframe']}",
+            "",
+            "---",
+            "",
+            "## Működési Stabilitás",
+            "",
+            "| Szint       | Események Száma |",
+            "|-------------|-----------------|",
+            f"| FIGYELMEZTETÉS (WARNING) | {warnings:,} |",
+            f"| HIBA (ERROR)        | {errors:,} |",
+            "",
+        ]
+
+        report_lines.append("**Leggyakoribb hibák/figyelmeztetések:**")
+        common_messages = frequent_messages.most_common(3)
+        if common_messages:
+            for idx, (message, count) in enumerate(common_messages, start=1):
+                report_lines.append(f"{idx}. `{message}` ({count} alkalommal)")
+        else:
+            report_lines.append("Nincs rögzített hiba vagy figyelmeztetés az időszakban.")
+
+        report_lines.extend([
+            "",
+            "---",
+            "",
+            "## Fő Funkciók Használata",
+            "",
+            "| Funkció Neve              | Hívások Száma |",
+            "|---------------------------|---------------|",
+        ])
+
+        if not method_names:
+            report_lines.append("| *(nincs monitorozott függvény)* | 0 |")
+        else:
+            for name in method_names:
+                report_lines.append(f"| `{name}` | {call_counts.get(name, 0):,} |")
+
+        report_lines.extend([
+            "",
+            "---",
+            "*Ez egy automatikusan generált jelentés.*",
+            "",
+        ])
+
+        report_path = os.path.join(os.path.dirname(log_file_path), config["filename"])
+        try:
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                report_file.write("\n".join(report_lines))
+            logging.info("Stability report generated: %s", report_path)
+        except Exception:
+            logging.exception("Failed to write %s report", period)
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -172,6 +349,7 @@ class StabilityMonitor:
         while not self._stop_event.is_set():
             start = time.monotonic()
             try:
+                self._check_and_generate_reports()
                 self._check_memory()
                 self._check_threads()
                 self._check_directories()
@@ -328,6 +506,10 @@ def initialize_global_monitor(**kwargs) -> StabilityMonitor:
         if _global_monitor is None:
             _global_monitor = StabilityMonitor(**kwargs)
             _global_monitor.start()
+        else:
+            log_path = kwargs.get("log_file_path")
+            if log_path:
+                _global_monitor.update_log_file_path(log_path)
         return _global_monitor
 
 

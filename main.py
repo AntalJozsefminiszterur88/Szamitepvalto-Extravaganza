@@ -46,6 +46,7 @@ stability_monitor = initialize_global_monitor(
     check_interval=60.0,
     memory_warning_mb=600,
     memory_critical_mb=900,
+    log_file_path=log_file_path,
 )
 stability_monitor.add_directory_quota(log_dir, max_mb=200, min_free_mb=512)
 
