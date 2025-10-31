@@ -94,7 +94,12 @@ class MessageHandler:
                                     counters[str(key)] = int(value)
                                 except (TypeError, ValueError):
                                     continue
-                        self._stability_monitor.record_remote_statistics(str(source), period, methods, counters)
+                        stats_payload = {
+                            'period': period,
+                            'methods': methods,
+                            'counters': counters,
+                        }
+                        self._stability_monitor.add_remote_statistics(str(source), stats_payload)
                     return
                 if cmd == 'switch_elitedesk':
                     self._toggle_client_control('elitedesk', switch_monitor=True)
