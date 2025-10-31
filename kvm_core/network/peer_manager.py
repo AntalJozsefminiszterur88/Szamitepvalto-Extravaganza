@@ -152,9 +152,13 @@ class PeerManager:
         if worker.settings.get("role") == "input_provider" and peer_role == "ado":
             worker.server_socket = sock
             logging.info("Controller connection established: %s", peer_name)
+            if hasattr(worker, "_on_server_connected"):
+                worker._on_server_connected()
         if worker.settings.get("role") == "vevo" and peer_role == "ado":
             worker.server_socket = sock
             logging.info("Laptop connected to controller: %s", peer_name)
+            if hasattr(worker, "_on_server_connected"):
+                worker._on_server_connected()
             peer_ip = self._safe_peername(sock) or (
                 connection.addr[0] if isinstance(connection.addr, tuple) else None
             )
@@ -219,8 +223,12 @@ class PeerManager:
         if worker.settings.get("role") == "input_provider" and sock == worker.server_socket:
             worker.server_socket = None
             worker._stop_input_provider_stream()
+            if hasattr(worker, "_on_server_disconnected"):
+                worker._on_server_disconnected()
         if worker.settings.get("role") == "vevo" and sock == worker.server_socket:
             worker.server_socket = None
+            if hasattr(worker, "_on_server_disconnected"):
+                worker._on_server_disconnected()
 
         if was_active and state.is_active():
             logging.info("Active client disconnected, deactivating KVM")

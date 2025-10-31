@@ -58,6 +58,8 @@ from hardware.button_input_manager import ButtonInputManager
 from utils.stability_monitor import StabilityMonitor
 from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
 from kvm_core.message_handler import MessageHandler
+from log_aggregator import LogAggregator
+from utils.remote_logging import get_remote_log_handler
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 class KVMOrchestrator(QObject):
@@ -109,6 +111,27 @@ class KVMOrchestrator(QObject):
         self._monitor_directory_keys: list[str] = []
         self._monitor_task_keys: list[str] = []
         self._monitor_memory_callback: Optional[Callable[[], None]] = None
+
+        self.log_aggregator: Optional[LogAggregator] = None
+        self._remote_log_handler = None
+        role = self.settings.get('role')
+        if self.stability_monitor:
+            if role == 'ado':
+                self.stability_monitor.configure_role(
+                    role='ado',
+                    request_statistics_callback=self._request_client_statistics,
+                    get_client_names_callback=self._get_connected_client_names,
+                )
+            else:
+                self.stability_monitor.configure_role(role=role)
+
+        if role == 'ado':
+            self.log_aggregator = LogAggregator()
+            self.log_aggregator.start()
+        else:
+            self._remote_log_handler = get_remote_log_handler()
+            self._remote_log_handler.set_source(self.device_name)
+            self._remote_log_handler.set_sender(self._send_to_server)
 
         self.input_receiver = InputReceiver()
         self.input_provider = InputProvider(
@@ -170,6 +193,10 @@ class KVMOrchestrator(QObject):
             simulate_provider_key_tap=self._simulate_provider_key_tap,
             get_input_provider_socket=lambda: self.input_provider_socket,
             state=self.state,
+            send_to_server=self._send_to_server,
+            get_device_name=lambda: self.device_name,
+            log_aggregator=self.log_aggregator,
+            stability_monitor=self.stability_monitor,
         )
 
         self.diagnostics_manager = DiagnosticsManager(
@@ -330,6 +357,14 @@ class KVMOrchestrator(QObject):
         sock = self.input_provider_socket
         if not sock:
             logging.warning("No input provider socket available for payload %s", payload)
+            return False
+        return self.peer_manager.send_to_peer(sock, payload)
+
+    def _send_to_server(self, payload: dict) -> bool:
+        if self.settings.get('role') == 'ado':
+            return False
+        sock = self.server_socket
+        if not sock:
             return False
         return self.peer_manager.send_to_peer(sock, payload)
 
@@ -529,6 +564,24 @@ class KVMOrchestrator(QObject):
         logging.warning(f"No client matching '{name}' found")
         return False
 
+    def _request_client_statistics(self, period: str) -> None:
+        if self.settings.get('role') != 'ado':
+            return
+        payload = {"command": "get_statistics", "period": period}
+        self.peer_manager.broadcast(payload)
+
+    def _get_connected_client_names(self) -> Iterable[str]:
+        infos = self.state.get_client_infos()
+        return list(infos.values())
+
+    def _on_server_connected(self) -> None:
+        if self._remote_log_handler:
+            self._remote_log_handler.set_sender(self._send_to_server)
+
+    def _on_server_disconnected(self) -> None:
+        if self._remote_log_handler:
+            self._remote_log_handler.set_sender(None)
+
     def toggle_client_control(self, name: str, *, switch_monitor: bool = True, release_keys: bool = True) -> None:
         """Activate or deactivate control for a specific client."""
         if self.settings.get('role') == 'ado':
@@ -630,6 +683,11 @@ class KVMOrchestrator(QObject):
             except Exception:
                 logging.exception("Failed to stop button manager cleanly")
             self.button_manager = None
+        if self.log_aggregator:
+            self.log_aggregator.stop()
+            self.log_aggregator = None
+        if self._remote_log_handler:
+            self._remote_log_handler.set_sender(None)
         for sock in self.state.get_client_sockets():
             try:
                 sock.close()
