@@ -59,7 +59,7 @@ from utils.stability_monitor import StabilityMonitor
 from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
 from kvm_core.message_handler import MessageHandler
 from log_aggregator import LogAggregator
-from utils.remote_logging import get_remote_log_handler
+from utils.remote_logging import RemoteLogHandler, get_remote_log_handler
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 class KVMOrchestrator(QObject):
@@ -67,7 +67,13 @@ class KVMOrchestrator(QObject):
     finished = Signal()
     status_update = Signal(str)
 
-    def __init__(self, settings, stability_monitor: Optional[StabilityMonitor] = None):
+    def __init__(
+        self,
+        settings,
+        stability_monitor: Optional[StabilityMonitor] = None,
+        *,
+        remote_log_handler: Optional[RemoteLogHandler] = None,
+    ):
         super().__init__()
         self.settings = settings
         self._running = True
@@ -113,7 +119,7 @@ class KVMOrchestrator(QObject):
         self._monitor_memory_callback: Optional[Callable[[], None]] = None
 
         self.log_aggregator: Optional[LogAggregator] = None
-        self._remote_log_handler = None
+        self._remote_log_handler: Optional[RemoteLogHandler] = remote_log_handler
         role = self.settings.get('role')
         if self.stability_monitor:
             if role == 'ado':
@@ -129,9 +135,9 @@ class KVMOrchestrator(QObject):
             self.log_aggregator = LogAggregator()
             self.log_aggregator.start()
         else:
-            self._remote_log_handler = get_remote_log_handler()
+            if self._remote_log_handler is None:
+                self._remote_log_handler = get_remote_log_handler()
             self._remote_log_handler.set_source(self.device_name)
-            self._remote_log_handler.set_sender(self._send_to_server)
 
         self.input_receiver = InputReceiver()
         self.input_provider = InputProvider(
@@ -576,11 +582,12 @@ class KVMOrchestrator(QObject):
 
     def _on_server_connected(self) -> None:
         if self._remote_log_handler:
-            self._remote_log_handler.set_sender(self._send_to_server)
+            # Ensure the handler metadata reflects the active device name.
+            self._remote_log_handler.set_source(self.device_name)
 
     def _on_server_disconnected(self) -> None:
         if self._remote_log_handler:
-            self._remote_log_handler.set_sender(None)
+            self._remote_log_handler.set_send_callback(None)
 
     def toggle_client_control(self, name: str, *, switch_monitor: bool = True, release_keys: bool = True) -> None:
         """Activate or deactivate control for a specific client."""
@@ -687,7 +694,7 @@ class KVMOrchestrator(QObject):
             self.log_aggregator.stop()
             self.log_aggregator = None
         if self._remote_log_handler:
-            self._remote_log_handler.set_sender(None)
+            self._remote_log_handler.set_send_callback(None)
         for sock in self.state.get_client_sockets():
             try:
                 sock.close()

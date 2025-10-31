@@ -152,11 +152,21 @@ class PeerManager:
         if worker.settings.get("role") == "input_provider" and peer_role == "ado":
             worker.server_socket = sock
             logging.info("Controller connection established: %s", peer_name)
+            remote_handler = getattr(worker, "_remote_log_handler", None)
+            if remote_handler is not None:
+                remote_handler.set_send_callback(
+                    lambda payload, _sock=sock, _manager=self: _manager.send_to_peer(_sock, payload)
+                )
             if hasattr(worker, "_on_server_connected"):
                 worker._on_server_connected()
         if worker.settings.get("role") == "vevo" and peer_role == "ado":
             worker.server_socket = sock
             logging.info("Laptop connected to controller: %s", peer_name)
+            remote_handler = getattr(worker, "_remote_log_handler", None)
+            if remote_handler is not None:
+                remote_handler.set_send_callback(
+                    lambda payload, _sock=sock, _manager=self: _manager.send_to_peer(_sock, payload)
+                )
             if hasattr(worker, "_on_server_connected"):
                 worker._on_server_connected()
             peer_ip = self._safe_peername(sock) or (
