@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Optional
 from kvm_core.clipboard import ClipboardManager
 from kvm_core.input.receiver import InputReceiver
 from kvm_core.state import KVMState
-from log_aggregator import LogAggregator
+from config.log_aggregator import LogAggregator
 from utils.stability_monitor import StabilityMonitor
 
 
