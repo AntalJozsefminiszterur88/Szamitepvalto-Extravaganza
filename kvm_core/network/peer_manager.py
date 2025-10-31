@@ -152,21 +152,11 @@ class PeerManager:
         if worker.settings.get("role") == "input_provider" and peer_role == "ado":
             worker.server_socket = sock
             logging.info("Controller connection established: %s", peer_name)
-            remote_handler = getattr(worker, "_remote_log_handler", None)
-            if remote_handler is not None:
-                remote_handler.set_send_callback(
-                    lambda payload, _sock=sock, _manager=self: _manager.send_to_peer(_sock, payload)
-                )
             if hasattr(worker, "_on_server_connected"):
                 worker._on_server_connected()
         if worker.settings.get("role") == "vevo" and peer_role == "ado":
             worker.server_socket = sock
             logging.info("Laptop connected to controller: %s", peer_name)
-            remote_handler = getattr(worker, "_remote_log_handler", None)
-            if remote_handler is not None:
-                remote_handler.set_send_callback(
-                    lambda payload, _sock=sock, _manager=self: _manager.send_to_peer(_sock, payload)
-                )
             if hasattr(worker, "_on_server_connected"):
                 worker._on_server_connected()
             peer_ip = self._safe_peername(sock) or (
@@ -192,6 +182,20 @@ class PeerManager:
             state.set_active_client(sock)
             state.set_pending_activation_target(None)
             worker.activate_kvm(switch_monitor=worker.switch_monitor)
+
+        # Activate remote logging once the client is connected to the controller.
+        if (
+            getattr(worker, "remote_log_handler", None)
+            and peer_role == "ado"
+            and not worker.remote_log_handler.has_callback()
+        ):
+
+            def send_log_to_server(log_payload):
+                # Forward log payloads through the freshly established connection.
+                return connection.send(log_payload)
+
+            worker.remote_log_handler.set_send_callback(send_log_to_server)
+            logging.info("Remote logging to central controller has been activated.")
 
         logging.info("Client connected: %s (%s)", peer_name, connection.addr)
         return True
