@@ -148,7 +148,7 @@ if __name__ == "__main__":
         remote_handler.set_source(str(device_name))
         handlers.append(remote_handler)
 
-    logging.basicConfig(level=logging.INFO, handlers=handlers)
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
 
     stability_monitor = initialize_global_monitor(
         check_interval=60.0,
