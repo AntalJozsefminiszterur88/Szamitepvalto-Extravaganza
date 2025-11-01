@@ -265,18 +265,34 @@ class StabilityMonitor:
         today = date.today()
         try:
             if last_daily != today:
-                self._generate_report("daily", log_file_path)
-                with self._lock:
-                    self._last_daily_report_date = today
+                success, report_path = self._generate_report("daily", log_file_path)
+                if not success:
+                    logging.error(
+                        "A napi riport generálása meghiúsult (írási hiba): %s",
+                        report_path,
+                    )
+                else:
+                    if self._verify_report_file(report_path, "napi"):
+                        logging.info("Stability report generated: %s", report_path)
+                        with self._lock:
+                            self._last_daily_report_date = today
 
             if last_weekly is None or (today - last_weekly).days >= 7:
-                self._generate_report("weekly", log_file_path)
-                with self._lock:
-                    self._last_weekly_report_date = today
+                success, report_path = self._generate_report("weekly", log_file_path)
+                if not success:
+                    logging.error(
+                        "A heti riport generálása meghiúsult (írási hiba): %s",
+                        report_path,
+                    )
+                else:
+                    if self._verify_report_file(report_path, "heti"):
+                        logging.info("Stability report generated: %s", report_path)
+                        with self._lock:
+                            self._last_weekly_report_date = today
         except Exception:
             logging.exception("Failed to generate stability monitor report")
 
-    def _generate_report(self, period: str, log_file_path: str) -> None:
+    def _generate_report(self, period: str, log_file_path: str) -> tuple[bool, str]:
         period_config = {
             "daily": {
                 "title": "Napi Működési Jelentés",
@@ -426,9 +442,42 @@ class StabilityMonitor:
         try:
             with open(report_path, "w", encoding="utf-8") as report_file:
                 report_file.write("\n".join(report_lines))
-            logging.info("Stability report generated: %s", report_path)
+            return True, report_path
         except Exception:
             logging.exception("Failed to write %s report", period)
+            return False, report_path
+
+    def _verify_report_file(self, report_path: str, period_label: str) -> bool:
+        """Ensure the report file exists and was recently updated."""
+
+        if not os.path.exists(report_path):
+            logging.error(
+                "A %s riport generálása látszólag sikeres volt, de a riportfájl nem található vagy nem friss: %s",
+                period_label,
+                report_path,
+            )
+            return False
+
+        try:
+            file_mod_time = os.path.getmtime(report_path)
+        except OSError as exc:
+            logging.error(
+                "Hiba a %s riportfájl ellenőrzésekor: %s. Hiba: %s",
+                period_label,
+                report_path,
+                exc,
+            )
+            return False
+
+        if time.time() - file_mod_time > 60:
+            logging.error(
+                "A %s riport generálása látszólag sikeres volt, de a riportfájl nem található vagy nem friss: %s",
+                period_label,
+                report_path,
+            )
+            return False
+
+        return True
 
     def _analyse_log_file(
         self, log_file_path: str, start_time: datetime
