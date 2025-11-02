@@ -49,6 +49,15 @@ def build():
         str(project_root / "keyboard_mouse_switch_icon.ico"),
     ]
 
+    # The application now relies on a number of third-party packages that use
+    # dynamic imports or ship additional helper modules. ``--collect-all``
+    # guarantees that their full package contents end up in the frozen bundle,
+    # avoiding ``ModuleNotFoundError`` crashes in the generated executable even
+    # when those imports only occur at runtime (for example through optional
+    # Windows-specific backends).
+    for package in ["pynput", "serial", "zeroconf", "monitorcontrol"]:
+        cmd.extend(["--collect-all", package])
+
     for source, target in data_mappings:
         if not source.exists():
             continue
@@ -60,7 +69,7 @@ def build():
             ]
         )
 
-    cmd.append("main.py")
+    cmd.append(str(project_root / "main.py"))
 
     for module in hidden_imports:
         cmd.extend(["--hidden-import", module])
@@ -73,7 +82,7 @@ def build():
     ])
 
     cmd.extend(_collect_pywin32_system32_data())
-    subprocess.check_call(cmd)
+    subprocess.check_call(cmd, cwd=project_root)
 
 
 def _collect_pywin32_system32_data() -> list[str]:
