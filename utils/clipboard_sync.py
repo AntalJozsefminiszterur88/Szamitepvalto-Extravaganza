@@ -38,6 +38,7 @@ PyperclipException = getattr(pyperclip, "PyperclipException", Exception)
 
 CF_PNG = None
 CFSTR_PREFERREDDROPEFFECT = None
+DROPEFFECT_COPY = 0x0001
 DROPEFFECT_MOVE = 0x0002
 MAX_FILE_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MiB hard limit for shared files
 MAX_IMAGE_PAYLOAD_BYTES = MAX_FILE_PAYLOAD_BYTES
@@ -539,6 +540,17 @@ def _win32_set_file_clipboard(data: bytes, entries: Sequence[Dict[str, Any]]) ->
 
             try:
                 _win32_set_clipboard_bytes(win32con.CF_HDROP, payload)
+                if CFSTR_PREFERREDDROPEFFECT is not None:
+                    try:
+                        effect_data = struct.pack("<I", DROPEFFECT_COPY)
+                        _win32_set_clipboard_bytes(
+                            CFSTR_PREFERREDDROPEFFECT, effect_data
+                        )
+                    except Exception as exc:
+                        logging.debug(
+                            "Failed to set preferred drop effect on clipboard: %s",
+                            exc,
+                        )
                 logging.info(
                     "Set clipboard file list (%d item%s) from shared data.",
                     len(targets),
