@@ -62,6 +62,7 @@ class ClipboardManager:
         self._clipboard_last_cleanup: float = 0.0
         self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
         self._persisted_payloads: dict[tuple[str, str], list[str]] = {}
+        self._last_processed_clipboard_sequence: Optional[int] = None
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -83,6 +84,7 @@ class ClipboardManager:
 
         self._running.set()
         self._last_clipboard_sequence = None
+        self._last_processed_clipboard_sequence = None
         role = self.settings.get('role')
         if role == 'ado':
             target = self._clipboard_loop_server
@@ -99,6 +101,7 @@ class ClipboardManager:
             self._thread.join(timeout=1)
         self._thread = None
         self._last_clipboard_sequence = None
+        self._last_processed_clipboard_sequence = None
 
     # ------------------------------------------------------------------
     # External interface
@@ -662,10 +665,15 @@ class ClipboardManager:
             timestamp = time.time()
         role = self.settings.get('role')
         if role == 'ado':
-            stored = self._store_shared_clipboard(item, timestamp=timestamp)
+            if timestamp is not None:
+                try:
+                    item['timestamp'] = float(timestamp)
+                except (TypeError, ValueError):
+                    item['timestamp'] = float(time.time())
+            stored = self._store_shared_clipboard(item, timestamp=item.get('timestamp'))
             if not from_local and not clipboard_items_equal(item, self.last_clipboard_item):
                 self._apply_system_clipboard(item)
-            self._remember_last_clipboard(item)
+            self._remember_last_clipboard(stored)
             payload = self._build_clipboard_payload(stored)
             provider = self._get_input_provider_socket()
             exclude: set[Any] = set()
@@ -682,6 +690,11 @@ class ClipboardManager:
             if clients:
                 self._broadcast_callback(payload, exclude)
         else:
+            if timestamp is not None:
+                try:
+                    item['timestamp'] = float(timestamp)
+                except (TypeError, ValueError):
+                    item['timestamp'] = float(time.time())
             if not clipboard_items_equal(item, self.last_clipboard_item):
                 self._apply_system_clipboard(item)
             self._remember_last_clipboard(item)
@@ -719,19 +732,31 @@ class ClipboardManager:
                 self._last_clipboard_sequence = sequence
 
             item = read_clipboard_content()
-            if item and not clipboard_items_equal(item, self.last_clipboard_item):
-                self._remember_last_clipboard(item)
-                stored = self._store_shared_clipboard(item)
-                payload = self._build_clipboard_payload(stored)
-                provider = self._get_input_provider_socket()
-                exclude: set[Any] = set()
-                if provider:
-                    if not self._send_to_provider_callback(payload):
-                        logging.warning("Failed to forward clipboard update to input provider.")
-                    exclude.add(provider)
-                clients = list(self._get_client_sockets())
-                if clients:
-                    self._broadcast_callback(payload, exclude)
+            if item:
+                now = time.time()
+                item['timestamp'] = now
+                is_duplicate = clipboard_items_equal(item, self.last_clipboard_item)
+                if (
+                    is_duplicate
+                    and sequence is not None
+                    and sequence != self._last_processed_clipboard_sequence
+                ):
+                    is_duplicate = False
+                if not is_duplicate:
+                    stored = self._store_shared_clipboard(item, timestamp=now)
+                    self._remember_last_clipboard(stored)
+                    if sequence is not None:
+                        self._last_processed_clipboard_sequence = sequence
+                    payload = self._build_clipboard_payload(stored)
+                    provider = self._get_input_provider_socket()
+                    exclude: set[Any] = set()
+                    if provider:
+                        if not self._send_to_provider_callback(payload):
+                            logging.warning("Failed to forward clipboard update to input provider.")
+                        exclude.add(provider)
+                    clients = list(self._get_client_sockets())
+                    if clients:
+                        self._broadcast_callback(payload, exclude)
             self._check_clipboard_expiration()
             time.sleep(0.3)
         logging.info("Clipboard server loop stopped.")
@@ -753,13 +778,25 @@ class ClipboardManager:
                 self._last_clipboard_sequence = sequence
 
             item = read_clipboard_content()
-            if item and not clipboard_items_equal(item, self.last_clipboard_item):
-                self._remember_last_clipboard(item)
-                sock = self._get_server_socket()
-                if sock:
-                    payload = self._build_clipboard_payload(item)
-                    if not self._send_to_peer_callback(sock, payload):
-                        logging.warning("Failed to send clipboard update to server.")
+            if item:
+                now = time.time()
+                item['timestamp'] = now
+                is_duplicate = clipboard_items_equal(item, self.last_clipboard_item)
+                if (
+                    is_duplicate
+                    and sequence is not None
+                    and sequence != self._last_processed_clipboard_sequence
+                ):
+                    is_duplicate = False
+                if not is_duplicate:
+                    self._remember_last_clipboard(item)
+                    if sequence is not None:
+                        self._last_processed_clipboard_sequence = sequence
+                    sock = self._get_server_socket()
+                    if sock:
+                        payload = self._build_clipboard_payload(item)
+                        if not self._send_to_peer_callback(sock, payload):
+                            logging.warning("Failed to send clipboard update to server.")
             time.sleep(0.3)
         logging.info("Clipboard client loop stopped.")
 
