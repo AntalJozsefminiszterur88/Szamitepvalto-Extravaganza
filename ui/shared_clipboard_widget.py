@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable, Optional
 
-from PySide6.QtCore import QHideEvent, QShowEvent, Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QHideEvent, QShowEvent
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
