@@ -41,24 +41,6 @@ CFSTR_PREFERREDDROPEFFECT = None
 DROPEFFECT_MOVE = 0x0002
 MAX_FILE_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MiB hard limit for shared files
 MAX_IMAGE_PAYLOAD_BYTES = MAX_FILE_PAYLOAD_BYTES
-VIDEO_FILE_EXTENSIONS = {
-    ".3gp",
-    ".avi",
-    ".flv",
-    ".m2ts",
-    ".m4v",
-    ".mkv",
-    ".mov",
-    ".mp4",
-    ".mpeg",
-    ".mpg",
-    ".mts",
-    ".ogv",
-    ".ts",
-    ".vob",
-    ".webm",
-    ".wmv",
-}
 _LAST_EXTRACTED_DIR: Optional[str] = None
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
     try:
@@ -149,13 +131,6 @@ def _describe_clipboard_item(item: ClipboardItem) -> str:
         )
 
     return f"format={fmt} keys={sorted(item.keys())}"
-
-
-def _is_video_file(path: str) -> bool:
-    _, ext = os.path.splitext(path)
-    return ext.lower() in VIDEO_FILE_EXTENSIONS
-
-
 def _win32_clipboard_object_to_bytes(data: Any, fmt_hint: Optional[int] = None) -> Optional[bytes]:
     if win32clipboard is None:  # pragma: no cover - non-Windows
         return None
@@ -449,12 +424,6 @@ def _pack_clipboard_files(
                     archive_root = root_name if rel_dir in (".", os.curdir) else os.path.join(root_name, rel_dir).replace("\\", "/")
                     for filename in files:
                         full_path = os.path.join(root, filename)
-                        if _is_video_file(full_path):
-                            logging.info(
-                                "Clipboard sync skipped due to video file: %s",
-                                full_path,
-                            )
-                            return None
                         arcname = os.path.join(archive_root, filename).replace("\\", "/")
                         try:
                             archive.write(full_path, arcname=arcname)
@@ -464,12 +433,6 @@ def _pack_clipboard_files(
                         except Exception as exc:
                             logging.debug("Failed to add %s to clipboard archive: %s", full_path, exc)
             else:
-                if _is_video_file(normalized_path):
-                    logging.info(
-                        "Clipboard sync skipped due to video file: %s",
-                        normalized_path,
-                    )
-                    return None
                 entries.append({"name": root_name, "is_dir": False})
                 try:
                     archive.write(normalized_path, arcname=root_name)
