@@ -36,6 +36,8 @@ from config.constants import APP_NAME, ORG_NAME, ICON_PATH
 from config.settings import DEFAULT_PORT
 from utils.remote_logging import get_remote_log_handler
 from utils.stability_monitor import get_global_monitor
+from utils.path_helpers import resolve_documents_directory
+from utils.logging_setup import ensure_controller_file_handler, resolve_log_paths
 from ui.file_transfer_widget import FileTransferWidget
 
 
@@ -260,6 +262,10 @@ class MainWindow(QMainWindow):
         if settings.get('role') != 'ado':
             remote_handler = get_remote_log_handler()
             remote_handler.set_source(settings.get('device_name', ''))
+        else:
+            documents_dir = resolve_documents_directory()
+            _, log_file_path = resolve_log_paths(documents_dir)
+            ensure_controller_file_handler(log_file_path)
         self.kvm_worker = KVMOrchestrator(
             settings,
             stability_monitor=get_global_monitor(),
