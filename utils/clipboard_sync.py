@@ -401,6 +401,32 @@ def _pack_clipboard_files(
         used_root_names.add(candidate)
         return candidate
 
+    def _stat_file_size(path: str) -> Optional[int]:
+        try:
+            return int(os.path.getsize(path))
+        except Exception as exc:
+            logging.debug("Failed to determine size of %s: %s", path, exc)
+            return None
+
+    def _would_exceed_limit(path: str, next_size: int) -> bool:
+        if next_size > MAX_FILE_PAYLOAD_BYTES:
+            logging.warning(
+                "Clipboard file %s exceeds maximum payload size (%.2f MiB > %.2f MiB).",
+                path,
+                next_size / (1024 * 1024),
+                MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
+            )
+            return True
+        if total_size + next_size > MAX_FILE_PAYLOAD_BYTES:
+            logging.warning(
+                "Clipboard file selection exceeds maximum payload size when adding %s (%.2f MiB > %.2f MiB).",
+                path,
+                (total_size + next_size) / (1024 * 1024),
+                MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
+            )
+            return True
+        return False
+
     with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for original in paths:
             if not original:
@@ -426,22 +452,32 @@ def _pack_clipboard_files(
                     for filename in files:
                         full_path = os.path.join(root, filename)
                         arcname = os.path.join(archive_root, filename).replace("\\", "/")
+                        size = _stat_file_size(full_path)
+                        if size is None:
+                            continue
+                        if _would_exceed_limit(full_path, size):
+                            return None
                         try:
                             archive.write(full_path, arcname=arcname)
-                            file_size = os.path.getsize(full_path)
-                            total_size += int(file_size)
-                            file_count += 1
                         except Exception as exc:
                             logging.debug("Failed to add %s to clipboard archive: %s", full_path, exc)
+                            continue
+                        total_size += size
+                        file_count += 1
             else:
                 entries.append({"name": root_name, "is_dir": False})
+                size = _stat_file_size(normalized_path)
+                if size is None:
+                    continue
+                if _would_exceed_limit(normalized_path, size):
+                    return None
                 try:
                     archive.write(normalized_path, arcname=root_name)
-                    file_size = os.path.getsize(normalized_path)
-                    total_size += int(file_size)
-                    file_count += 1
                 except Exception as exc:
                     logging.debug("Failed to add %s to clipboard archive: %s", normalized_path, exc)
+                    continue
+                total_size += size
+                file_count += 1
 
     if file_count == 0:
         logging.debug("Clipboard file packaging yielded no files – skipping.")
