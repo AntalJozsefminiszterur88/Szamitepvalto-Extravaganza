@@ -14,6 +14,7 @@ from utils.path_helpers import resolve_documents_directory
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
+    get_clipboard_sequence_number,
     normalize_clipboard_item,
     read_clipboard_content,
     write_clipboard_content,
@@ -54,6 +55,7 @@ class ClipboardManager:
         self.shared_clipboard_item: Optional[dict] = None
         self.clipboard_expiry_seconds = 12 * 60 * 60
         self._ignore_next_clipboard_change = threading.Event()
+        self._last_clipboard_sequence: Optional[int] = None
 
         self.clipboard_storage_dir: Optional[str] = None
         self._clipboard_cleanup_marker: Optional[str] = None
@@ -80,6 +82,7 @@ class ClipboardManager:
             return
 
         self._running.set()
+        self._last_clipboard_sequence = None
         role = self.settings.get('role')
         if role == 'ado':
             target = self._clipboard_loop_server
@@ -95,6 +98,7 @@ class ClipboardManager:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1)
         self._thread = None
+        self._last_clipboard_sequence = None
 
     # ------------------------------------------------------------------
     # External interface
@@ -702,8 +706,17 @@ class ClipboardManager:
         while self._running.is_set():
             if self._ignore_next_clipboard_change.is_set():
                 self._ignore_next_clipboard_change.clear()
+                self._refresh_clipboard_sequence_marker()
                 time.sleep(0.5)
                 continue
+
+            sequence = get_clipboard_sequence_number()
+            if sequence is not None:
+                if self._last_clipboard_sequence == sequence:
+                    self._check_clipboard_expiration()
+                    time.sleep(0.3)
+                    continue
+                self._last_clipboard_sequence = sequence
 
             item = read_clipboard_content()
             if item and not clipboard_items_equal(item, self.last_clipboard_item):
@@ -728,8 +741,16 @@ class ClipboardManager:
         while self._running.is_set():
             if self._ignore_next_clipboard_change.is_set():
                 self._ignore_next_clipboard_change.clear()
+                self._refresh_clipboard_sequence_marker()
                 time.sleep(0.5)
                 continue
+
+            sequence = get_clipboard_sequence_number()
+            if sequence is not None:
+                if self._last_clipboard_sequence == sequence:
+                    time.sleep(0.3)
+                    continue
+                self._last_clipboard_sequence = sequence
 
             item = read_clipboard_content()
             if item and not clipboard_items_equal(item, self.last_clipboard_item):
@@ -741,3 +762,10 @@ class ClipboardManager:
                         logging.warning("Failed to send clipboard update to server.")
             time.sleep(0.3)
         logging.info("Clipboard client loop stopped.")
+
+    def _refresh_clipboard_sequence_marker(self) -> None:
+        """Update the cached clipboard sequence number if available."""
+
+        sequence = get_clipboard_sequence_number()
+        if sequence is not None:
+            self._last_clipboard_sequence = sequence

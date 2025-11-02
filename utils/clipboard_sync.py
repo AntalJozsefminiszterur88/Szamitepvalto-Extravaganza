@@ -93,6 +93,29 @@ def _format_bytes(num: Optional[int]) -> str:
     return f"{size:.2f} PB"
 
 
+def get_clipboard_sequence_number() -> Optional[int]:
+    """Return the system clipboard change counter if available.
+
+    Windows maintains a monotonically increasing sequence number that
+    increments every time the clipboard contents change. Querying this
+    number is significantly cheaper than reading the entire clipboard,
+    especially when large file payloads are involved. If the platform
+    does not expose such a counter we fall back to ``None`` so callers
+    can revert to their previous polling behaviour.
+    """
+
+    if win32clipboard is None:  # pragma: no cover - non-Windows
+        return None
+
+    try:  # pragma: no branch - tiny helper
+        return int(win32clipboard.GetClipboardSequenceNumber())  # type: ignore[attr-defined]
+    except AttributeError:  # pragma: no cover - older pywin32 builds
+        return None
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logging.debug("Failed to query clipboard sequence number: %s", exc, exc_info=True)
+        return None
+
+
 def _describe_clipboard_item(item: ClipboardItem) -> str:
     """Build a human readable description for logging purposes."""
 
