@@ -9,9 +9,53 @@ import ctypes
 import signal  # ÚJ IMPORT
 import time    # ÚJ IMPORT
 import threading
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
+
+
+def _ensure_project_on_path() -> None:
+    """Guarantee that the source tree is importable when launched via IDLE or a shortcut."""
+
+    if getattr(sys, "frozen", False):  # PyInstaller already configures sys.path
+        return
+
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:  # pragma: no cover - defensive fallback
+        return
+
+    if current_dir and current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+
+
+_ensure_project_on_path()
+
+
+def _handle_missing_dependency(module_name: str) -> None:
+    """Exit with a helpful message when a required dependency is unavailable."""
+
+    message = (
+        f"A(z) '{module_name}' modul nem található, ezért az alkalmazás nem tud elindulni.\n\n"
+        "Telepítsd a szükséges csomagokat a következő parancs futtatásával:\n"
+        "    python -m pip install -r requirements.txt"
+    )
+
+    # Megjelenítjük Windows alatt felugró ablakként is, ha lehetséges.
+    if os.name == "nt":
+        try:  # pragma: no cover - csak Windows specifikus viselkedés
+            ctypes.windll.user32.MessageBoxW(0, message, "KVM Switch", 0x10)
+        except Exception:
+            pass
+
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+try:
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QIcon
+    from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
+except ModuleNotFoundError as exc:  # pragma: no cover - függőség hiánya
+    _handle_missing_dependency(exc.name or "PySide6")
+
 from ui.main_window import MainWindow
 from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
