@@ -1,9 +1,9 @@
 """Remote logging utilities for forwarding client logs to the controller.
 
 This module exposes a thread-backed :class:`RemoteLogHandler` that collects
-warning and error level log records from client roles and forwards them to the
-controller once a network connection becomes available. Messages are enqueued
-locally to avoid blocking the main application threads.
+all log records from client roles and forwards them to the controller once a
+network connection becomes available. Messages are enqueued locally to avoid
+blocking the main application threads.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class RemoteLogHandler(logging.Handler):
         source: str | None = None,
         send_callback: Optional[Callable[[dict], bool]] = None,
     ) -> None:
-        super().__init__(level=logging.WARNING)
+        super().__init__(level=logging.NOTSET)
         self._queue: "queue.Queue[Optional[dict]]" = queue.Queue()
         self._stop_event = threading.Event()
         self._sender_lock = threading.Lock()
