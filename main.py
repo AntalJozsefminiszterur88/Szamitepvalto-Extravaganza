@@ -16,6 +16,7 @@ from PySide6.QtCore import QLockFile, QStandardPaths, QSettings
 from ui.main_window import MainWindow
 from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
+from utils.path_helpers import resolve_documents_directory
 from utils.remote_logging import get_remote_log_handler
 
 
@@ -115,15 +116,14 @@ def set_high_priority():
 
 
 if __name__ == "__main__":
-    documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
-    if not documents_dir:
-        documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
+    documents_dir = resolve_documents_directory()
+    os.makedirs(documents_dir, exist_ok=True)
 
     settings = QSettings(ORG_NAME, APP_NAME)
     startup_role = settings.value("role/mode", "input_provider")
     device_name = settings.value("device/name", socket.gethostname())
 
-    log_dir = os.path.join(documents_dir, "UMKGL Solutions", "Szamitepvalto-Extravaganza")
+    log_dir = os.path.join(str(documents_dir), "UMKGL Solutions", "Szamitepvalto-Extravaganza")
     log_file_path = os.path.join(log_dir, "kvm_app.log")
 
     stream_handler = logging.StreamHandler(sys.stdout)
