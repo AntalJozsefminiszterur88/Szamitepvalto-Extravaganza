@@ -803,7 +803,22 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
 def clipboard_items_equal(a: Optional[ClipboardItem], b: Optional[ClipboardItem]) -> bool:
     if not a or not b:
         return False
-    return a.get("format") == b.get("format") and a.get("digest") == b.get("digest")
+    if a.get("format") != b.get("format"):
+        return False
+    digest_a = a.get("digest")
+    digest_b = b.get("digest")
+    if digest_a is None or digest_b is None:
+        return False
+    if digest_a != digest_b:
+        return False
+    timestamp_a = a.get("timestamp")
+    timestamp_b = b.get("timestamp")
+    if timestamp_a is None or timestamp_b is None:
+        return True
+    try:
+        return float(timestamp_a) == float(timestamp_b)
+    except (TypeError, ValueError):
+        return True
 
 
 def _win32_open_clipboard(
