@@ -9,9 +9,8 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Optional
 
-from PySide6.QtCore import QStandardPaths
-
 from config.constants import BRAND_NAME
+from utils.path_helpers import resolve_documents_directory
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
@@ -116,16 +115,21 @@ class ClipboardManager:
     # Clipboard utilities
     # ------------------------------------------------------------------
     def _initialize_clipboard_storage(self) -> None:
-        documents_dir = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
-        if not documents_dir:
-            documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
-            logging.debug(
-                "Qt did not return a Documents path; using fallback %s for clipboard storage.",
-                documents_dir,
-            )
+        documents_dir = resolve_documents_directory()
+        if not documents_dir.exists():
+            try:
+                documents_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                logging.error(
+                    "Unable to create base documents directory %s: %s",
+                    documents_dir,
+                    exc,
+                    exc_info=True,
+                )
+                return
 
         base_dir = os.path.join(
-            documents_dir,
+            str(documents_dir),
             BRAND_NAME,
             "Szamitepvalto-Extravaganza",
             CLIPBOARD_STORAGE_DIRNAME,
