@@ -12,7 +12,20 @@ class LogAggregator:
     """Collect remote log messages and forward them to the central log file."""
 
     def __init__(self, logger: Optional[logging.Logger] = None) -> None:
-        self._logger = logger or logging.getLogger("remote_logs")
+        """Create a new aggregator that forwards remote logs to the controller.
+
+        When *logger* is ``None`` we fall back to the root logger.  This makes
+        sure that aggregated records end up in the exact same handler pipeline
+        (and therefore the same rotating log file) that the controller already
+        uses for its own events.  Relying on the root logger also means that the
+        :class:`~utils.logging_setup.RemoteSourceFilter` installed on the root
+        handlers will decorate the log line with the ``remote_source`` prefix so
+        operators can clearly see which client produced a given message.
+        """
+
+        if logger is None:
+            logger = logging.getLogger()
+        self._logger = logger
         self._queue: "queue.Queue[Optional[Tuple[str, str, str]]]" = queue.Queue()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
