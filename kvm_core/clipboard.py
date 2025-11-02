@@ -59,6 +59,7 @@ class ClipboardManager:
         self._clipboard_cleanup_marker: Optional[str] = None
         self._clipboard_last_cleanup: float = 0.0
         self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
+        self._persisted_payloads: dict[tuple[str, str], list[str]] = {}
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -201,6 +202,7 @@ class ClipboardManager:
             )
             entries = []
 
+        performed_cleanup = False
         for entry in entries:
             path = os.path.join(directory, entry)
             try:
@@ -222,6 +224,8 @@ class ClipboardManager:
                     path,
                     exc,
                 )
+            else:
+                performed_cleanup = True
 
         try:
             with open(marker, "w", encoding="utf-8") as handle:
@@ -235,6 +239,8 @@ class ClipboardManager:
             )
         else:
             self._clipboard_last_cleanup = now
+            if performed_cleanup:
+                self._persisted_payloads.clear()
 
     def _build_unique_storage_name(
         self, base_name: str, *, extension: Optional[str] = None
@@ -284,6 +290,18 @@ class ClipboardManager:
                     digest,
                 )
                 return
+            stored_paths = self._persisted_payloads.get(key)
+            if stored_paths and all(os.path.exists(path) for path in stored_paths):
+                logging.debug(
+                    "Reusing existing persisted %s payload for digest %s (paths=%s).",
+                    fmt,
+                    digest,
+                    stored_paths,
+                )
+                self._clipboard_last_persisted_digest = key
+                return
+            if stored_paths:
+                self._persisted_payloads.pop(key, None)
 
         raw_data = item.get('data')
         if isinstance(raw_data, bytes):
@@ -330,6 +348,7 @@ class ClipboardManager:
             )
             if key:
                 self._clipboard_last_persisted_digest = key
+                self._persisted_payloads[key] = [target_path]
             return
 
         if fmt != 'files':
@@ -435,6 +454,7 @@ class ClipboardManager:
         )
         if key:
             self._clipboard_last_persisted_digest = key
+            self._persisted_payloads[key] = extracted_files
 
     def _remember_last_clipboard(self, item: Optional[dict]) -> None:
         self.last_clipboard_item = item.copy() if item else None
