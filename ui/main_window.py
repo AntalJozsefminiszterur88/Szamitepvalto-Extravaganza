@@ -6,6 +6,7 @@ import time
 import logging
 import os
 import subprocess
+from typing import Optional
 
 # Windows specific module only available on that platform
 import winreg  # type: ignore
@@ -32,6 +33,7 @@ from PySide6.QtCore import QSize, QSettings, QThread, Qt, QTimer
 
 
 from kvm_core.orchestrator import KVMOrchestrator
+from kvm_core.clipboard import ClipboardManager
 from config.constants import APP_NAME, ORG_NAME, ICON_PATH
 from config.settings import DEFAULT_PORT
 from utils.remote_logging import get_remote_log_handler
@@ -39,6 +41,7 @@ from utils.stability_monitor import get_global_monitor
 from utils.path_helpers import resolve_documents_directory
 from utils.logging_setup import ensure_controller_file_handler, resolve_log_paths
 from ui.file_transfer_widget import FileTransferWidget
+from ui.shared_clipboard_widget import SharedClipboardWidget
 
 
 # gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
@@ -99,6 +102,7 @@ class MainWindow(QMainWindow):
         'start_button', 'status_label', 'kvm_thread', 'kvm_worker',
         'tray_icon', 'tray_hover_timer', '_tray_hover_visible',
         'stack', 'main_view', 'file_transfer_widget', 'file_transfer_button',
+        'shared_clipboard_button', 'shared_clipboard_widget',
         '_main_view_size', '_initial_show_done'
     )
 
@@ -115,8 +119,16 @@ class MainWindow(QMainWindow):
 
         self.main_view = self._create_main_view()
         self.file_transfer_widget = FileTransferWidget(self, on_back=self.show_main_view)
+        self.shared_clipboard_widget = SharedClipboardWidget(
+            self,
+            on_back=self.show_main_view,
+            status_provider=self._get_shared_clipboard_snapshot,
+            stop_callback=self._stop_shared_clipboard_transfer,
+            delete_callback=self._delete_shared_clipboard_artifacts,
+        )
         self.stack.addWidget(self.main_view)
         self.stack.addWidget(self.file_transfer_widget)
+        self.stack.addWidget(self.shared_clipboard_widget)
         self.show_main_view()
 
         self.kvm_thread = None
@@ -184,6 +196,9 @@ class MainWindow(QMainWindow):
         self.file_transfer_button = QPushButton("LAN fájlátvitel megnyitása")
         self.file_transfer_button.clicked.connect(self.show_file_transfer)
         file_transfer_layout.addWidget(self.file_transfer_button)
+        self.shared_clipboard_button = QPushButton("Közös vágólap")
+        self.shared_clipboard_button.clicked.connect(self.show_shared_clipboard)
+        file_transfer_layout.addWidget(self.shared_clipboard_button)
         main_layout.addWidget(file_transfer_container)
 
         self.start_button = QPushButton("KVM Szolgáltatás Indítása")
@@ -205,12 +220,56 @@ class MainWindow(QMainWindow):
         self.resize(980, 680)
         self._center_on_screen()
 
+    def show_shared_clipboard(self):
+        self.stack.setCurrentWidget(self.shared_clipboard_widget)
+        self.setMinimumSize(self._main_view_size)
+        self.setMaximumSize(self._main_view_size)
+        self.resize(self._main_view_size)
+        self._center_on_screen()
+
     def show_main_view(self):
         self.stack.setCurrentWidget(self.main_view)
         self.setMinimumSize(self._main_view_size)
         self.setMaximumSize(self._main_view_size)
         self.resize(self._main_view_size)
         self._center_on_screen()
+
+    def _get_clipboard_manager(self) -> Optional[ClipboardManager]:
+        if self.kvm_worker and getattr(self.kvm_worker, 'clipboard_manager', None):
+            return self.kvm_worker.clipboard_manager
+        return None
+
+    def _get_shared_clipboard_snapshot(self):
+        manager = self._get_clipboard_manager()
+        if not manager:
+            return None
+        try:
+            return manager.get_shared_clipboard_snapshot()
+        except Exception as exc:
+            logging.error("Nem sikerült lekérdezni a közös vágólap állapotát: %s", exc, exc_info=True)
+            return None
+
+    def _stop_shared_clipboard_transfer(self) -> bool:
+        manager = self._get_clipboard_manager()
+        if not manager:
+            return False
+        try:
+            return manager.clear_shared_clipboard(broadcast=True)
+        except Exception as exc:
+            logging.error("Nem sikerült megszakítani a közös vágólap megosztását: %s", exc, exc_info=True)
+            return False
+
+    def _delete_shared_clipboard_artifacts(self) -> int:
+        manager = self._get_clipboard_manager()
+        if not manager:
+            return 0
+        removed = 0
+        try:
+            removed = manager.purge_shared_clipboard_artifacts()
+            manager.clear_shared_clipboard(broadcast=True)
+        except Exception as exc:
+            logging.error("Nem sikerült törölni a közös vágólap fájljait: %s", exc, exc_info=True)
+        return removed
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
