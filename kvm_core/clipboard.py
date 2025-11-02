@@ -112,6 +112,90 @@ class ClipboardManager:
     def ensure_storage_cleanup(self, *, force: bool = False) -> None:
         self._ensure_clipboard_storage_cleanup(force=force)
 
+    def get_shared_clipboard_snapshot(self) -> Optional[dict]:
+        """Return a serialisable snapshot of the shared clipboard state."""
+
+        with self.clipboard_lock:
+            if not self.shared_clipboard_item:
+                return None
+            item = self.shared_clipboard_item.copy()
+
+        snapshot: dict[str, Any] = {
+            'format': item.get('format'),
+            'timestamp': float(item.get('timestamp')) if item.get('timestamp') else None,
+        }
+
+        if snapshot['format'] == 'files':
+            entries: list[dict[str, Any]] = []
+            raw_entries = item.get('entries')
+            if isinstance(raw_entries, Iterable):
+                for entry in raw_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    entries.append(
+                        {
+                            'name': str(entry.get('name', '')),
+                            'is_dir': bool(entry.get('is_dir', False)),
+                            'size': entry.get('size'),
+                        }
+                    )
+            snapshot['entries'] = entries
+            snapshot['file_count'] = item.get('file_count') or len(entries)
+            snapshot['total_size'] = item.get('total_size')
+            snapshot['size'] = item.get('size')
+
+        return snapshot
+
+    def clear_shared_clipboard(self, *, broadcast: bool = False) -> bool:
+        """Clear the shared clipboard contents if present."""
+
+        with self.clipboard_lock:
+            has_item = self.shared_clipboard_item is not None
+        if not has_item:
+            return False
+
+        self._clear_shared_clipboard(broadcast=broadcast)
+        return True
+
+    def purge_shared_clipboard_artifacts(self) -> int:
+        """Remove persisted files related to the active shared clipboard entry."""
+
+        directory = self.clipboard_storage_dir
+        if not directory:
+            return 0
+
+        with self.clipboard_lock:
+            item = self.shared_clipboard_item
+
+        if not item:
+            return 0
+
+        fmt = item.get('format')
+        digest = item.get('digest')
+        if not digest or not fmt:
+            return 0
+
+        key = (fmt, str(digest))
+        stored_paths = self._persisted_payloads.pop(key, [])
+        removed = 0
+        for path in stored_paths:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    removed += 1
+            except Exception as exc:  # pragma: no cover - best-effort cleanup
+                logging.debug(
+                    "Failed to remove persisted clipboard artifact %s: %s",
+                    path,
+                    exc,
+                    exc_info=True,
+                )
+
+        if key == self._clipboard_last_persisted_digest:
+            self._clipboard_last_persisted_digest = None
+
+        return removed
+
     # ------------------------------------------------------------------
     # Clipboard utilities
     # ------------------------------------------------------------------
