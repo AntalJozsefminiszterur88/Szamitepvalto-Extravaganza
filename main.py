@@ -5,7 +5,6 @@ import sys
 import os
 import socket
 import logging
-from logging.handlers import RotatingFileHandler
 import ctypes
 import signal  # ÚJ IMPORT
 import time    # ÚJ IMPORT
@@ -18,15 +17,12 @@ from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
 from utils.path_helpers import resolve_documents_directory
 from utils.remote_logging import get_remote_log_handler
+from utils.logging_setup import (
+    create_stream_handler,
+    create_controller_file_handler,
+    resolve_log_paths,
+)
 
-
-class _RemoteSourceFilter(logging.Filter):
-    """Ensure the log record always exposes a `remote_source` attribute."""
-
-    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - logging integration
-        if not hasattr(record, "remote_source"):
-            record.remote_source = ""
-        return True
 
 # Windows-specifikus importok
 try:
@@ -123,25 +119,13 @@ if __name__ == "__main__":
     startup_role = settings.value("role/mode", "input_provider")
     device_name = settings.value("device/name", socket.gethostname())
 
-    log_dir = os.path.join(str(documents_dir), "UMKGL Solutions", "Szamitepvalto-Extravaganza")
-    log_file_path = os.path.join(log_dir, "kvm_app.log")
+    log_dir, log_file_path = resolve_log_paths(documents_dir)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(remote_source)s%(levelname)s - %(threadName)s - %(message)s')
-    stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(_RemoteSourceFilter())
+    stream_handler = create_stream_handler(sys.stdout)
 
     handlers = [stream_handler]
     if startup_role == "ado":
-        os.makedirs(log_dir, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_file_path,
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-            encoding="utf-8",
-        )
-        file_handler.setFormatter(formatter)
-        file_handler.addFilter(_RemoteSourceFilter())
+        file_handler = create_controller_file_handler(log_file_path)
         handlers.append(file_handler)
     else:
         remote_handler = get_remote_log_handler()
