@@ -225,6 +225,11 @@ class KVMOrchestrator(QObject):
         keys = [
             keyboard.Key.shift_l,
             keyboard.Key.shift_r,
+            keyboard.Key.alt_l,
+            keyboard.Key.alt_r,
+            keyboard.Key.ctrl_l,
+            keyboard.Key.ctrl_r,
+            keyboard.Key.tab,
             keyboard.KeyCode.from_vk(VK_NUMPAD0),
             keyboard.KeyCode.from_vk(VK_NUMPAD1),
             keyboard.KeyCode.from_vk(VK_NUMPAD2),
