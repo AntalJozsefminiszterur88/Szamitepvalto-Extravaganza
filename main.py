@@ -161,19 +161,25 @@ if __name__ == "__main__":
 
     settings = QSettings(ORG_NAME, APP_NAME)
     startup_role = settings.value("role/mode", "input_provider")
-    device_name = settings.value("device/name", socket.gethostname())
+    raw_device_name = settings.value("device/name", socket.gethostname())
+    device_name = str(raw_device_name).strip() or socket.gethostname()
 
     log_dir, log_file_path = resolve_log_paths(documents_dir)
 
-    stream_handler = create_stream_handler(sys.stdout)
+    default_remote_prefix = f"[{device_name}] - "
+    stream_handler = create_stream_handler(
+        sys.stdout, default_remote_source=default_remote_prefix
+    )
 
     handlers = [stream_handler]
     if startup_role == "ado":
-        file_handler = create_controller_file_handler(log_file_path)
+        file_handler = create_controller_file_handler(
+            log_file_path, default_remote_source=default_remote_prefix
+        )
         handlers.append(file_handler)
     else:
         remote_handler = get_remote_log_handler()
-        remote_handler.set_source(str(device_name))
+        remote_handler.set_source(device_name)
         handlers.append(remote_handler)
 
     logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)

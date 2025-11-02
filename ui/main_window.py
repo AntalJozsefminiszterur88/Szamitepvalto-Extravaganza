@@ -5,6 +5,7 @@ import sys
 import time
 import logging
 import os
+import socket
 import subprocess
 from typing import Optional
 
@@ -318,13 +319,16 @@ class MainWindow(QMainWindow):
         self.kvm_thread = QThread()
         settings = self.get_settings()
         remote_handler = None
+        device_label = (settings.get('device_name', '') or '').strip() or socket.gethostname()
         if settings.get('role') != 'ado':
             remote_handler = get_remote_log_handler()
-            remote_handler.set_source(settings.get('device_name', ''))
+            remote_handler.set_source(device_label)
         else:
             documents_dir = resolve_documents_directory()
             _, log_file_path = resolve_log_paths(documents_dir)
-            ensure_controller_file_handler(log_file_path)
+            ensure_controller_file_handler(
+                log_file_path, default_remote_source=f"[{device_label}] - "
+            )
         self.kvm_worker = KVMOrchestrator(
             settings,
             stability_monitor=get_global_monitor(),
