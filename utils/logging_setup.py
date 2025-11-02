@@ -11,7 +11,7 @@ from typing import IO, Tuple
 from config.constants import BRAND_NAME
 
 
-LOG_FORMAT = "%(asctime)s - %(remote_source)s%(levelname)s - %(threadName)s - %(message)s"
+LOG_FORMAT = "%(remote_source)s%(asctime)s - %(levelname)s - %(threadName)s - %(message)s"
 LOG_FILENAME = "kvm_app.log"
 LOG_SUBDIRECTORY = "Szamitepvalto-Extravaganza"
 LOG_MAX_BYTES = 5 * 1024 * 1024
