@@ -60,10 +60,8 @@ from ui.main_window import MainWindow
 from config.constants import ICON_PATH, APP_NAME, ORG_NAME
 from utils.stability_monitor import initialize_global_monitor
 from utils.path_helpers import resolve_documents_directory
-from utils.remote_logging import get_remote_log_handler
 from utils.logging_setup import (
     create_stream_handler,
-    create_controller_file_handler,
     resolve_log_paths,
 )
 
@@ -171,18 +169,7 @@ if __name__ == "__main__":
         sys.stdout, default_remote_source=default_remote_prefix
     )
 
-    handlers = [stream_handler]
-    if startup_role == "ado":
-        file_handler = create_controller_file_handler(
-            log_file_path, default_remote_source=default_remote_prefix
-        )
-        handlers.append(file_handler)
-    else:
-        remote_handler = get_remote_log_handler()
-        remote_handler.set_source(device_name)
-        handlers.append(remote_handler)
-
-    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
+    logging.basicConfig(level=logging.INFO, handlers=[stream_handler], force=True)
 
     stability_monitor = initialize_global_monitor(
         check_interval=60.0,
