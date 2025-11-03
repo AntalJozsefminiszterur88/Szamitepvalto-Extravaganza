@@ -5,6 +5,7 @@ import socket
 import time
 import threading
 import logging
+from logging.handlers import RotatingFileHandler
 import queue
 import struct
 from typing import Any, Callable, Iterable, Optional
@@ -216,8 +217,6 @@ class KVMOrchestrator(QObject):
             zeroconf=self.zeroconf,
         )
 
-        self._configure_logging()
-
         if self.stability_monitor:
             self._register_core_monitoring()
             if self.settings.get('role') == 'ado':
@@ -230,9 +229,9 @@ class KVMOrchestrator(QObject):
         role = self.settings.get("role")
         root_logger = logging.getLogger()
 
-        # Remove all handlers except for the default stream handler
+        # Remove any previously added file or remote handlers.
         for handler in list(root_logger.handlers):
-            if not isinstance(handler, logging.StreamHandler):
+            if isinstance(handler, (RotatingFileHandler, RemoteLogHandler)):
                 root_logger.removeHandler(handler)
 
         if role == "ado":
@@ -773,8 +772,13 @@ class KVMOrchestrator(QObject):
         # Extra safety to avoid stuck modifier keys on exit
         self.release_hotkey_keys()
 
-    def run(self):
+    def start(self) -> None:
+        """Prepare the orchestrator and configure role-specific features."""
+        self._configure_logging()
+
+    def run(self) -> None:
         """Unified entry point starting peer threads and services."""
+        self.start()
         logging.info("Worker starting in peer-to-peer mode")
         try:
             register_ok = False
