@@ -59,6 +59,8 @@ from utils.stability_monitor import StabilityMonitor
 from kvm_core.clipboard import ClipboardManager, CLIPBOARD_CLEANUP_INTERVAL_SECONDS
 from kvm_core.message_handler import MessageHandler
 from config.log_aggregator import LogAggregator
+from utils.logging_setup import create_controller_file_handler, resolve_log_paths
+from utils.path_helpers import resolve_documents_directory
 from utils.remote_logging import RemoteLogHandler, get_remote_log_handler
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
@@ -214,10 +216,38 @@ class KVMOrchestrator(QObject):
             zeroconf=self.zeroconf,
         )
 
+        self._configure_logging()
+
         if self.stability_monitor:
             self._register_core_monitoring()
             if self.settings.get('role') == 'ado':
                 self._register_clipboard_monitoring()
+
+    def _configure_logging(self) -> None:
+        """Remove existing log handlers and attach the correct one for the
+        current role.
+        """
+        role = self.settings.get("role")
+        root_logger = logging.getLogger()
+
+        # Remove all handlers except for the default stream handler
+        for handler in list(root_logger.handlers):
+            if not isinstance(handler, logging.StreamHandler):
+                root_logger.removeHandler(handler)
+
+        if role == "ado":
+            documents_dir = resolve_documents_directory()
+            _, log_file_path = resolve_log_paths(documents_dir)
+            prefix = f"[{self.device_name}] - "
+            file_handler = create_controller_file_handler(
+                log_file_path, default_remote_source=prefix
+            )
+            root_logger.addHandler(file_handler)
+            logging.info("File logging configured for controller role.")
+        else:
+            if self.remote_log_handler:
+                root_logger.addHandler(self.remote_log_handler)
+                logging.info("Remote logging handler attached for client role.")
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
@@ -599,6 +629,9 @@ class KVMOrchestrator(QObject):
         if self.remote_log_handler:
             # Ensure the handler metadata reflects the active device name.
             self.remote_log_handler.set_source(self.device_name)
+            # Use a stable sender method that is not bound to a specific connection.
+            self.remote_log_handler.set_send_callback(self._send_to_server)
+            logging.info("Remote logging callback is now active.")
 
     def _on_server_disconnected(self) -> None:
         if self.remote_log_handler:

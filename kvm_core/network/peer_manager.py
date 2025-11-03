@@ -183,23 +183,6 @@ class PeerManager:
             state.set_pending_activation_target(None)
             worker.activate_kvm(switch_monitor=worker.switch_monitor)
 
-        # Activate remote logging once the client is connected to the controller.
-        if getattr(worker, "remote_log_handler", None) and peer_role == "ado":
-
-            def send_log_to_server(log_payload, *, _connection=connection):
-                """Forward remote log payloads through the active controller link."""
-
-                return _connection.send(log_payload)
-
-            had_callback = worker.remote_log_handler.has_callback()
-            worker.remote_log_handler.set_send_callback(send_log_to_server)
-            if had_callback:
-                logging.info(
-                    "Remote logging callback rebound to controller connection: %s",
-                    peer_name,
-                )
-            else:
-                logging.info("Remote logging to central controller has been activated.")
 
         logging.info("Client connected: %s (%s)", peer_name, connection.addr)
         return True
