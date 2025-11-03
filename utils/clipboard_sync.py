@@ -652,12 +652,16 @@ def _extract_image_metadata(item: ClipboardItem, raw: bytes) -> None:
 def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[ClipboardItem]:
     """Közös reprezentációra hozza a vágólap elemeit."""
 
+    logging.info(f"Normalizing clipboard item: {item}")
+
     if not item:
         return None
 
     fmt = item.get("format")
     if fmt not in {"text", "image", "files"}:
         return None
+
+    logging.info(f"Processing format: {fmt}")
 
     normalized: ClipboardItem = {"format": fmt}
 
