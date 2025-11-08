@@ -234,19 +234,18 @@ class KVMOrchestrator(QObject):
             if isinstance(handler, (RotatingFileHandler, RemoteLogHandler)):
                 root_logger.removeHandler(handler)
 
-        if role == "ado":
-            documents_dir = resolve_documents_directory()
-            _, log_file_path = resolve_log_paths(documents_dir)
-            prefix = f"[{self.device_name}] - "
-            file_handler = create_controller_file_handler(
-                log_file_path, default_remote_source=prefix
-            )
-            root_logger.addHandler(file_handler)
-            logging.info("File logging configured for controller role.")
-        else:
-            if self.remote_log_handler:
-                root_logger.addHandler(self.remote_log_handler)
-                logging.info("Remote logging handler attached for client role.")
+        documents_dir = resolve_documents_directory()
+        _, log_file_path = resolve_log_paths(documents_dir)
+        prefix = f"[{self.device_name}] - "
+        file_handler = create_controller_file_handler(
+            log_file_path, default_remote_source=prefix
+        )
+        root_logger.addHandler(file_handler)
+        logging.info("File logging configured for role: %s", role)
+
+        if role != "ado" and self.remote_log_handler:
+            root_logger.addHandler(self.remote_log_handler)
+            logging.info("Remote logging handler attached for client role.")
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
