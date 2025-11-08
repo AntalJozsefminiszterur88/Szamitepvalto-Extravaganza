@@ -252,9 +252,10 @@ class StabilityMonitor:
         return method_names, snapshot
 
     def _check_and_generate_reports(self) -> None:
+        if self._role != "ado":
+            return
+
         with self._lock:
-            if self._role != "ado":
-                return
             log_file_path = self._log_file_path
             last_daily = self._last_daily_report_date
             last_weekly = self._last_weekly_report_date
