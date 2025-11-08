@@ -68,7 +68,7 @@ def set_autostart(enabled: bool) -> None:
             command = [
                 'schtasks', '/Create', '/TN', app_name,
                 '/TR', task_run_command,  # Itt már a tiszta stringet adjuk át
-                '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F'
+                '/SC', 'ONLOGON', '/F'
             ]
 
             logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
