@@ -361,6 +361,8 @@ class ClipboardManager:
         if self.settings.get('role') != 'ado':
             return
 
+        self._ensure_clipboard_storage_cleanup()
+
         directory = self.clipboard_storage_dir
         if not directory:
             logging.debug("Clipboard storage directory is not initialised; skipping persistence.")
@@ -407,8 +409,6 @@ class ClipboardManager:
                 fmt,
             )
             return
-
-        self._ensure_clipboard_storage_cleanup()
 
         digest_fragment = str(item.get('digest') or 'nohash')[:12]
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
