@@ -68,6 +68,7 @@ class DiagnosticsManager:
 
     def stop(self) -> None:
         """Stop diagnostic threads and wait for them to finish."""
+        logging.info(f"Stopping {self.__class__.__name__}...")
         self._stop_event.set()
         threads = [self._heartbeat_thread, self._ip_watchdog_thread]
         for thread in threads:
@@ -75,6 +76,7 @@ class DiagnosticsManager:
                 thread.join(timeout=1)
         self._heartbeat_thread = None
         self._ip_watchdog_thread = None
+        logging.info(f"{self.__class__.__name__} stopped.")
 
     # ------------------------------------------------------------------
     # Diagnostic loops

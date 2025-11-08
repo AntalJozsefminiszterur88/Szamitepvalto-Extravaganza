@@ -96,12 +96,14 @@ class ClipboardManager:
         self._thread.start()
 
     def stop(self) -> None:
+        logging.info(f"Stopping {self.__class__.__name__}...")
         self._running.clear()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1)
         self._thread = None
         self._last_clipboard_sequence = None
         self._last_processed_clipboard_sequence = None
+        logging.info(f"{self.__class__.__name__} stopped.")
 
     # ------------------------------------------------------------------
     # External interface

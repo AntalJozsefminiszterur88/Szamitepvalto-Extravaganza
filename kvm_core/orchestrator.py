@@ -702,74 +702,134 @@ class KVMOrchestrator(QObject):
         logging.info("toggle_client_control end")
 
     def stop(self):
-        logging.info("stop() metódus meghívva.")
+        logging.info("Orchestrator shutdown initiated.")
         self._running = False
+
+        logging.info("Stopping host capture...")
         self.host_capture.stop()
         self.streaming_thread = self.host_capture.thread
+        logging.info("Host capture stopped.")
+
         if self.clipboard_manager:
+            logging.info("Stopping ClipboardManager...")
             self.clipboard_manager.stop()
+            logging.info("ClipboardManager stopped.")
+
+        logging.info("Unregistering monitoring...")
         self._unregister_monitoring()
+        logging.info("Monitoring unregistered.")
+
         self.state.set_pending_activation_target(None)
+
+        logging.info("Stopping PeerManager...")
         self.peer_manager.stop()
+        logging.info("PeerManager stopped.")
+
         if self.settings.get('role') == 'input_provider':
+            logging.info("Stopping input provider stream...")
             self._stop_input_provider_stream()
+            logging.info("Input provider stream stopped.")
         elif self.state.is_active():
+            logging.info("Deactivating active KVM session...")
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
+            logging.info("KVM session deactivated.")
+
+        logging.info("Stopping DiagnosticsManager...")
         self.diagnostics_manager.stop()
+        logging.info("DiagnosticsManager stopped.")
+
         if self.service_info:
+            logging.info("Unregistering Zeroconf service...")
             try:
                 self.zeroconf.unregister_service(self.service_info)
+                logging.info("Zeroconf service unregistered.")
             except Exception:
-                pass
+                logging.exception("Failed to unregister Zeroconf service cleanly")
+        logging.info("Closing Zeroconf instance...")
         try:
             self.zeroconf.close()
+            logging.info("Zeroconf instance closed.")
         except Exception:
-            pass
+            logging.exception("Failed to close Zeroconf instance cleanly")
+
+        logging.info("Stopping pynput listeners...")
         for listener in self.pynput_listeners:
             try:
                 listener.stop()
-            except:
-                pass
+            except Exception:
+                logging.exception("Failed to stop pynput listener cleanly")
+        logging.info("Pynput listeners stopped.")
+
         if self.button_manager:
+            logging.info("Stopping ButtonInputManager...")
             try:
                 self.button_manager.stop()
+                logging.info("ButtonInputManager stopped.")
             except Exception:
                 logging.exception("Failed to stop button manager cleanly")
             self.button_manager = None
+
         if self.log_aggregator:
+            logging.info("Stopping LogAggregator...")
             self.log_aggregator.stop()
             self.log_aggregator = None
+            logging.info("LogAggregator stopped.")
+
         if self.remote_log_handler:
+            logging.info("Resetting remote log handler callback...")
             self.remote_log_handler.set_send_callback(None)
+
+        logging.info("Closing client sockets...")
         for sock in self.state.get_client_sockets():
             try:
                 sock.close()
             except Exception:
-                pass
+                logging.exception("Failed to close client socket cleanly")
+        logging.info("Client sockets closed.")
+
         self.state.clear_clients()
         self.server_socket = None if self.settings.get('role') != 'ado' else self.server_socket
         if self.settings.get('role') == 'ado':
+            logging.info("Resetting ADO role state...")
             self.input_provider_socket = None
             self.state.set_current_target('desktop')
             self.state.set_active(False)
+
         if self.connection_thread and self.connection_thread.is_alive():
+            logging.info("Joining connection thread...")
             self.connection_thread.join(timeout=1)
+            logging.info("Connection thread joined.")
         if self.pico_thread and self.pico_thread.is_alive():
+            logging.info("Joining Pico thread...")
             self.pico_thread.join(timeout=1)
+            logging.info("Pico thread joined.")
         if self.peer_manager.connection_manager_thread and self.peer_manager.connection_manager_thread.is_alive():
+            logging.info("Joining peer connection manager thread...")
             self.peer_manager.connection_manager_thread.join(timeout=1)
+            logging.info("Peer connection manager thread joined.")
         if self.peer_manager.accept_thread and self.peer_manager.accept_thread.is_alive():
+            logging.info("Joining peer accept thread...")
             self.peer_manager.accept_thread.join(timeout=1)
+            logging.info("Peer accept thread joined.")
         if self.peer_manager.resolver_thread and self.peer_manager.resolver_thread.is_alive():
+            logging.info("Joining peer resolver thread...")
             self.peer_manager.resolver_thread.join(timeout=1)
+            logging.info("Peer resolver thread joined.")
         if self.message_processor_thread and self.message_processor_thread.is_alive():
+            logging.info("Stopping message processor thread...")
             try:
                 self.message_queue.put_nowait((None, None))
             except Exception:
-                pass
+                logging.exception("Failed to signal message processor thread for shutdown")
             self.message_processor_thread.join(timeout=1)
+            logging.info("Message processor thread joined.")
+
         # Extra safety to avoid stuck modifier keys on exit
+        logging.info("Releasing hotkey keys...")
         self.release_hotkey_keys()
+        logging.info("Hotkey keys released.")
+
+        logging.info("Orchestrator shutdown complete.")
 
     def start(self) -> None:
         """Prepare the orchestrator and configure role-specific features."""
