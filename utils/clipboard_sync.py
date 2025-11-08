@@ -36,6 +36,69 @@ ClipboardItem = Dict[str, Any]
 
 PyperclipException = getattr(pyperclip, "PyperclipException", Exception)
 
+
+def _describe_clipboard_item(item: ClipboardItem) -> str:
+    """Build a human readable description for logging purposes."""
+
+    fmt = item.get("format", "unknown")
+
+    if fmt == "text":
+        text = item.get("data", "")
+        if isinstance(text, str):
+            preview = text.replace("\n", "\\n")
+            if len(preview) > 40:
+                preview = f"{preview[:37]}..."
+            return f"text(len={len(text)} preview='{preview}')"
+        return f"text(type={type(text)!r})"
+
+    if fmt == "image":
+        encoding = item.get("encoding", "unknown")
+        data = item.get("data", b"")
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            raw = bytes(data)
+            size = len(raw)
+            digest = hashlib.sha256(raw).hexdigest()[:12]
+            return f"image(encoding={encoding}, size={size}, sha256={digest})"
+        return f"image(encoding={encoding}, type={type(data)!r})"
+
+    if fmt == "files":
+        count: Any = item.get("file_count")
+        if count is None:
+            entries = item.get("entries")
+            if hasattr(entries, "__len__"):
+                try:
+                    count = len(entries)  # type: ignore[arg-type]
+                except Exception:
+                    count = "?"
+        total_size = _format_bytes(item.get("total_size"))
+        payload_size = item.get("size")
+        data = item.get("data")
+        digest_preview: str
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            raw = bytes(data)
+            digest_preview = hashlib.sha256(raw).hexdigest()[:12]
+            if payload_size is None:
+                payload_size = len(raw)
+        else:
+            digest = item.get("digest")
+            digest_preview = digest[:12] if isinstance(digest, str) else ""
+        payload_display = (
+            _format_bytes(int(payload_size))
+            if isinstance(payload_size, (int, float))
+            else "?"
+        )
+        return (
+            "files(count={count}, total={total}, payload={payload}, sha256={digest})".format(
+                count=count if count is not None else "?",
+                total=total_size,
+                payload=payload_display,
+                digest=digest_preview,
+            )
+        )
+
+    return f"format={fmt} keys={sorted(item.keys())}"
+
+
 CF_PNG = None
 CFSTR_PREFERREDDROPEFFECT = None
 DROPEFFECT_COPY = 0x0001
@@ -652,7 +715,10 @@ def _extract_image_metadata(item: ClipboardItem, raw: bytes) -> None:
 def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[ClipboardItem]:
     """Közös reprezentációra hozza a vágólap elemeit."""
 
-    logging.info(f"Normalizing clipboard item: {item}")
+    if item is not None:
+        logging.debug(
+            "Normalizing clipboard item: %s", _describe_clipboard_item(item)
+        )
 
     if not item:
         return None
@@ -959,7 +1025,12 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
 
     normalized = normalize_clipboard_item(item)
     if not normalized:
-        logging.debug("Ignoring clipboard write request with invalid payload: %s", item)
+        logging.debug(
+            "Ignoring clipboard write request with invalid payload: %s",
+            _describe_clipboard_item(
+                item if isinstance(item, dict) else {"format": "unknown", "data": item}
+            ),
+        )
         return
 
     fmt = normalized["format"]
