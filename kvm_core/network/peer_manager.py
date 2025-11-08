@@ -85,7 +85,9 @@ class PeerManager:
         self.connection_manager_thread.start()
 
     def stop(self) -> None:
+        logging.info(f"Stopping {self.__class__.__name__}...")
         if not self._running.is_set():
+            logging.info(f"{self.__class__.__name__} stopped.")
             return
         self._running.clear()
         self._discovery.stop()
@@ -108,6 +110,8 @@ class PeerManager:
             self.accept_thread.join(timeout=1.0)
         if self.connection_manager_thread and self.connection_manager_thread.is_alive():
             self.connection_manager_thread.join(timeout=1.0)
+
+        logging.info(f"{self.__class__.__name__} stopped.")
 
     # ------------------------------------------------------------------
     # Properties used by other components
