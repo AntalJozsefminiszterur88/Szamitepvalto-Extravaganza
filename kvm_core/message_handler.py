@@ -93,9 +93,13 @@ class MessageHandler:
                         return
                     source = data.get('source') or self._state.get_client_name(peer_socket, 'ismeretlen')
                     safe_source = str(source).replace(os.sep, "_").replace(" ", "_")
-                    target_dir = os.path.join(
-                        str(resolve_documents_directory()), BRAND_NAME, LOG_SUBDIRECTORY
-                    )
+                    target_dir = None
+                    if self._stability_monitor:
+                        target_dir = self._stability_monitor.get_report_directory()
+                    if not target_dir:
+                        target_dir = os.path.join(
+                            str(resolve_documents_directory()), BRAND_NAME, LOG_SUBDIRECTORY
+                        )
                     try:
                         os.makedirs(target_dir, exist_ok=True)
                         filename = f"CRASH_{safe_source}_{date.today().isoformat()}.log"

@@ -20,10 +20,6 @@ from datetime import date, datetime, timedelta
 from functools import wraps
 from typing import Callable, Dict, Iterable, Optional
 
-from config.constants import BRAND_NAME
-from utils.logging_setup import LOG_SUBDIRECTORY
-from utils.path_helpers import resolve_documents_directory
-
 import psutil
 
 ThreadSupplier = Callable[[], Optional[threading.Thread]]
@@ -97,8 +93,6 @@ class StabilityMonitor:
         self._last_cleanup_run: float = 0.0
 
         self._log_file_path = log_file_path
-        self._last_daily_report_date: Optional[date] = None
-        self._last_weekly_report_date: Optional[date] = None
         self._startup_time: float = time.monotonic()
         self._initial_report_ready: bool = False
         self._call_counters: Dict[str, Counter[str]] = {
@@ -211,6 +205,12 @@ class StabilityMonitor:
         with self._lock:
             self._log_file_path = path
 
+    def get_report_directory(self) -> Optional[str]:
+        with self._lock:
+            if not self._log_file_path:
+                return None
+            return os.path.dirname(os.path.abspath(self._log_file_path))
+
     def configure_role(
         self,
         *,
@@ -268,15 +268,15 @@ class StabilityMonitor:
         return method_names, snapshot
 
     def _check_and_generate_reports(self) -> None:
-        if self._role != "ado":
+        if not isinstance(self._role, str) or self._role.lower() != "ado":
+            print("StabilityMonitor: skipping report generation because role is not 'ado'.")
             return
 
         with self._lock:
             log_file_path = self._log_file_path
-            last_daily = self._last_daily_report_date
-            last_weekly = self._last_weekly_report_date
 
         if not log_file_path:
+            print("StabilityMonitor: skipping report generation because log file path is missing.")
             return
 
         elapsed_since_start = time.monotonic() - self._startup_time
@@ -292,36 +292,34 @@ class StabilityMonitor:
                 return
             self._initial_report_ready = True
 
-        report_dir = os.path.join(
-            str(resolve_documents_directory()), BRAND_NAME, LOG_SUBDIRECTORY
-        )
+        report_dir = os.path.dirname(os.path.abspath(log_file_path))
         os.makedirs(report_dir, exist_ok=True)
 
         daily_path = os.path.join(report_dir, "daily_report.md")
         weekly_path = os.path.join(report_dir, "weekly_report.md")
 
-        daily_disk_date = None
-        if os.path.exists(daily_path):
-            try:
-                daily_disk_date = datetime.fromtimestamp(os.path.getmtime(daily_path)).date()
-            except OSError:
-                daily_disk_date = None
-
-        weekly_disk_date = None
-        if os.path.exists(weekly_path):
-            try:
-                weekly_disk_date = datetime.fromtimestamp(os.path.getmtime(weekly_path)).date()
-            except OSError:
-                weekly_disk_date = None
-
-        if daily_disk_date and (last_daily is None or daily_disk_date > last_daily):
-            last_daily = daily_disk_date
-        if weekly_disk_date and (last_weekly is None or weekly_disk_date > last_weekly):
-            last_weekly = weekly_disk_date
-
         today = date.today()
+        weekly_threshold = datetime.now() - timedelta(days=7)
         try:
-            if daily_disk_date is None or daily_disk_date < today:
+            daily_mod_time = (
+                datetime.fromtimestamp(os.path.getmtime(daily_path))
+                if os.path.exists(daily_path)
+                else None
+            )
+        except OSError:
+            daily_mod_time = None
+
+        try:
+            weekly_mod_time = (
+                datetime.fromtimestamp(os.path.getmtime(weekly_path))
+                if os.path.exists(weekly_path)
+                else None
+            )
+        except OSError:
+            weekly_mod_time = None
+
+        try:
+            if daily_mod_time is None or daily_mod_time.date() < today:
                 success, report_path = self._generate_report(
                     "daily", log_file_path, report_dir
                 )
@@ -330,14 +328,10 @@ class StabilityMonitor:
                         "A napi riport generálása meghiúsult (írási hiba): %s",
                         report_path,
                     )
-                else:
-                    if self._verify_report_file(report_path, "napi"):
-                        logging.info("Stability report generated: %s", report_path)
-                        with self._lock:
-                            self._last_daily_report_date = today
+                elif self._verify_report_file(report_path, "napi"):
+                    logging.info("Stability report generated: %s", report_path)
 
-            weekly_reference = last_weekly or weekly_disk_date
-            if weekly_reference is None or (today - weekly_reference).days >= 7:
+            if weekly_mod_time is None or weekly_mod_time < weekly_threshold:
                 success, report_path = self._generate_report(
                     "weekly", log_file_path, report_dir
                 )
@@ -346,11 +340,8 @@ class StabilityMonitor:
                         "A heti riport generálása meghiúsult (írási hiba): %s",
                         report_path,
                     )
-                else:
-                    if self._verify_report_file(report_path, "heti"):
-                        logging.info("Stability report generated: %s", report_path)
-                        with self._lock:
-                            self._last_weekly_report_date = today
+                elif self._verify_report_file(report_path, "heti"):
+                    logging.info("Stability report generated: %s", report_path)
         except Exception:
             logging.exception("Failed to generate stability monitor report")
 
@@ -389,14 +380,33 @@ class StabilityMonitor:
                 expected_clients = []
         self.expect_stats_from(expected_clients)
 
-        remote_statistics = self._request_remote_statistics(period)
-        if expected_clients:
-            self._stats_received_event.wait(timeout=5.0)
-        with self._remote_stats_lock:
-            remote_statistics = dict(self._remote_statistics_latest.get(period, remote_statistics))
+        remote_statistics_unavailable = False
+        try:
+            remote_statistics = self._request_remote_statistics(period)
+            if expected_clients:
+                if not self._stats_received_event.wait(timeout=5.0):
+                    remote_statistics_unavailable = True
+            with self._remote_stats_lock:
+                remote_statistics = dict(
+                    self._remote_statistics_latest.get(period, remote_statistics)
+                )
+        except Exception:
+            logging.exception("Failed to gather remote statistics for %s report", period)
+            remote_statistics = {}
+            remote_statistics_unavailable = True
+
         method_names, call_counts = self._consume_call_counts(period)
 
-        per_source_stats, overall_messages = self._analyse_log_file(log_file_path, start_time)
+        try:
+            per_source_stats, overall_messages = self._analyse_log_file(
+                log_file_path, start_time
+            )
+        except Exception:
+            logging.exception("Failed to analyse log file for %s report", period)
+            per_source_stats = defaultdict(
+                lambda: {"warnings": 0, "errors": 0, "messages": Counter()}
+            )
+            overall_messages = Counter()
 
         controller_label = "Központi vezérlő"
         per_source_stats.setdefault(controller_label, {"warnings": 0, "errors": 0, "messages": Counter()})
@@ -495,6 +505,9 @@ class StabilityMonitor:
                 client_counters,
             )
 
+        if remote_statistics_unavailable:
+            report_lines.append("_Remote statistics unavailable_")
+
         report_lines.extend([
             "",
             "---",
@@ -502,6 +515,7 @@ class StabilityMonitor:
             "",
         ])
 
+        os.makedirs(report_dir, exist_ok=True)
         report_path = os.path.join(report_dir, config["filename"])
         try:
             with open(report_path, "w", encoding="utf-8") as report_file:
