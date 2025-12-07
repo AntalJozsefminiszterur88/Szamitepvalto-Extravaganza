@@ -67,7 +67,12 @@ from utils.path_helpers import resolve_documents_directory
 from utils.remote_logging import RemoteLogHandler, get_remote_log_handler
 from utils.network_utils import get_current_ssid
 
+POLL_INTERVAL_FAST = 5
+POLL_INTERVAL_SLOW = 60
+
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
+
+
 class KVMOrchestrator(QObject):
 
     finished = Signal()
@@ -619,6 +624,7 @@ class KVMOrchestrator(QObject):
 
     def _network_watchdog_loop(self) -> None:
         logging.info("Network watchdog thread started.")
+        sleep_time = POLL_INTERVAL_FAST
         while self._running and not self._network_watchdog_stop.is_set():
             ssid = get_current_ssid()
             allowed = bool(ssid) and any(
@@ -629,6 +635,7 @@ class KVMOrchestrator(QObject):
                 if not self._network_services_active:
                     logging.info("Allowed network detected (%s), resuming KVM services.", ssid)
                     self._resume_network_services()
+                sleep_time = POLL_INTERVAL_SLOW
             else:
                 if self._network_services_active:
                     logging.info(
@@ -636,8 +643,10 @@ class KVMOrchestrator(QObject):
                         ssid or "<offline>",
                     )
                     self._pause_network_services()
+                sleep_time = POLL_INTERVAL_FAST
 
-            self._network_watchdog_stop.wait(5)
+            if self._network_watchdog_stop.wait(sleep_time):
+                break
 
         logging.info("Network watchdog thread stopped.")
 
