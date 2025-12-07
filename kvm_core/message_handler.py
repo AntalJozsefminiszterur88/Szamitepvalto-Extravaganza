@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+from datetime import date
 from typing import Any, Callable, Dict, Optional
 
 from kvm_core.clipboard import ClipboardManager
@@ -10,6 +12,9 @@ from kvm_core.input.receiver import InputReceiver
 from kvm_core.state import KVMState
 from config.log_aggregator import LogAggregator
 from utils.stability_monitor import StabilityMonitor
+from utils.path_helpers import resolve_documents_directory
+from config.constants import BRAND_NAME
+from utils.logging_setup import LOG_SUBDIRECTORY
 
 
 class MessageHandler:
@@ -80,6 +85,26 @@ class MessageHandler:
                         level = str(data.get('level', 'WARNING'))
                         message = str(data.get('message', ''))
                         self._log_aggregator.add_remote_log(str(source), level, message)
+                    return
+                if cmd == 'upload_crash_report':
+                    content = data.get('content')
+                    if content is None:
+                        logging.warning("Received empty crash report payload")
+                        return
+                    source = data.get('source') or self._state.get_client_name(peer_socket, 'ismeretlen')
+                    safe_source = str(source).replace(os.sep, "_").replace(" ", "_")
+                    target_dir = os.path.join(
+                        str(resolve_documents_directory()), BRAND_NAME, LOG_SUBDIRECTORY
+                    )
+                    try:
+                        os.makedirs(target_dir, exist_ok=True)
+                        filename = f"CRASH_{safe_source}_{date.today().isoformat()}.log"
+                        target_path = os.path.join(target_dir, filename)
+                        with open(target_path, "w", encoding="utf-8") as crash_file:
+                            crash_file.write(str(content))
+                        logging.info("Stored crash report from %s at %s", source, target_path)
+                    except Exception:
+                        logging.exception("Failed to persist crash report from %s", source)
                     return
                 if msg_type == 'statistics_report':
                     if self._stability_monitor:

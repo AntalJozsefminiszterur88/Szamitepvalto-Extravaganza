@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -19,12 +20,25 @@ from datetime import date, datetime, timedelta
 from functools import wraps
 from typing import Callable, Dict, Iterable, Optional
 
+from config.constants import BRAND_NAME
+from utils.logging_setup import LOG_SUBDIRECTORY
+from utils.path_helpers import resolve_documents_directory
+
 import psutil
 
 ThreadSupplier = Callable[[], Optional[threading.Thread]]
 RestartCallback = Callable[[], None]
 PeriodicCallable = Callable[[], None]
 CleanupCallback = Callable[[], None]
+
+
+_LOG_LINE_PATTERN = re.compile(
+    r"^(?:\[(?P<source>[^\]]+)\]\s+-\s+)?"
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+"
+    r"(?P<level>[A-Za-z]+)\s+-\s+"
+    r"(?P<thread>[^-]*)\s+-\s+"
+    r"(?P<message>.*)$"
+)
 
 
 @dataclass
@@ -85,6 +99,8 @@ class StabilityMonitor:
         self._log_file_path = log_file_path
         self._last_daily_report_date: Optional[date] = None
         self._last_weekly_report_date: Optional[date] = None
+        self._startup_time: float = time.monotonic()
+        self._initial_report_ready: bool = False
         self._call_counters: Dict[str, Counter[str]] = {
             "daily": Counter(),
             "weekly": Counter(),
@@ -263,10 +279,52 @@ class StabilityMonitor:
         if not log_file_path:
             return
 
+        elapsed_since_start = time.monotonic() - self._startup_time
+        clients_connected = False
+        if self._get_client_names_callback:
+            try:
+                clients_connected = bool(list(self._get_client_names_callback()))
+            except Exception:
+                logging.exception("Failed to enumerate clients while waiting for reports")
+
+        if not self._initial_report_ready:
+            if elapsed_since_start < 60.0 and not clients_connected:
+                return
+            self._initial_report_ready = True
+
+        report_dir = os.path.join(
+            str(resolve_documents_directory()), BRAND_NAME, LOG_SUBDIRECTORY
+        )
+        os.makedirs(report_dir, exist_ok=True)
+
+        daily_path = os.path.join(report_dir, "daily_report.md")
+        weekly_path = os.path.join(report_dir, "weekly_report.md")
+
+        daily_disk_date = None
+        if os.path.exists(daily_path):
+            try:
+                daily_disk_date = datetime.fromtimestamp(os.path.getmtime(daily_path)).date()
+            except OSError:
+                daily_disk_date = None
+
+        weekly_disk_date = None
+        if os.path.exists(weekly_path):
+            try:
+                weekly_disk_date = datetime.fromtimestamp(os.path.getmtime(weekly_path)).date()
+            except OSError:
+                weekly_disk_date = None
+
+        if daily_disk_date and (last_daily is None or daily_disk_date > last_daily):
+            last_daily = daily_disk_date
+        if weekly_disk_date and (last_weekly is None or weekly_disk_date > last_weekly):
+            last_weekly = weekly_disk_date
+
         today = date.today()
         try:
-            if last_daily != today:
-                success, report_path = self._generate_report("daily", log_file_path)
+            if daily_disk_date is None or daily_disk_date < today:
+                success, report_path = self._generate_report(
+                    "daily", log_file_path, report_dir
+                )
                 if not success:
                     logging.error(
                         "A napi riport generálása meghiúsult (írási hiba): %s",
@@ -278,8 +336,11 @@ class StabilityMonitor:
                         with self._lock:
                             self._last_daily_report_date = today
 
-            if last_weekly is None or (today - last_weekly).days >= 7:
-                success, report_path = self._generate_report("weekly", log_file_path)
+            weekly_reference = last_weekly or weekly_disk_date
+            if weekly_reference is None or (today - weekly_reference).days >= 7:
+                success, report_path = self._generate_report(
+                    "weekly", log_file_path, report_dir
+                )
                 if not success:
                     logging.error(
                         "A heti riport generálása meghiúsult (írási hiba): %s",
@@ -293,7 +354,9 @@ class StabilityMonitor:
         except Exception:
             logging.exception("Failed to generate stability monitor report")
 
-    def _generate_report(self, period: str, log_file_path: str) -> tuple[bool, str]:
+    def _generate_report(
+        self, period: str, log_file_path: str, report_dir: str
+    ) -> tuple[bool, str]:
         period_config = {
             "daily": {
                 "title": "Napi Működési Jelentés",
@@ -439,7 +502,7 @@ class StabilityMonitor:
             "",
         ])
 
-        report_path = os.path.join(os.path.dirname(log_file_path), config["filename"])
+        report_path = os.path.join(report_dir, config["filename"])
         try:
             with open(report_path, "w", encoding="utf-8") as report_file:
                 report_file.write("\n".join(report_lines))
@@ -497,27 +560,23 @@ class StabilityMonitor:
                     line = raw_line.strip()
                     if not line:
                         continue
-                    parts = line.split(" - ", 4)
-                    if len(parts) < 4:
+                    match = _LOG_LINE_PATTERN.match(line)
+                    if not match:
                         continue
-                    timestamp_str = parts[0]
+
                     try:
-                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S,%f")
-                    except ValueError:
+                        timestamp = datetime.strptime(
+                            match.group("timestamp"), "%Y-%m-%d %H:%M:%S,%f"
+                        )
+                    except (TypeError, ValueError):
                         continue
                     if timestamp < start_time:
                         continue
 
-                    if len(parts) == 5 and parts[1].startswith("[") and parts[1].endswith("]"):
-                        source_name = parts[1][1:-1]
-                        level = parts[2]
-                        message = parts[4]
-                    else:
-                        source_name = "Központi vezérlő"
-                        level = parts[1]
-                        message = parts[3] if len(parts) > 3 else ""
+                    source_name = match.group("source") or "Központi vezérlő"
+                    level = (match.group("level") or "").upper()
+                    message = match.group("message") or ""
 
-                    level = level.upper()
                     if level == "WARNING":
                         per_source[source_name]["warnings"] += 1
                         per_source[source_name]["messages"][message] += 1

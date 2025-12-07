@@ -12,6 +12,7 @@ from typing import Any, Callable, Iterable, Optional
 import msgpack
 import random
 import os      # ÚJ IMPORT
+from pathlib import Path
 
 if os.name == 'nt':
     import ctypes
@@ -717,10 +718,45 @@ class KVMOrchestrator(QObject):
             # Use a stable sender method that is not bound to a specific connection.
             self.remote_log_handler.set_send_callback(self._send_to_server)
             logging.info("Remote logging callback is now active.")
+        self._upload_pending_crashes()
 
     def _on_server_disconnected(self) -> None:
         if self.remote_log_handler:
             self.remote_log_handler.set_send_callback(None)
+
+    def _upload_pending_crashes(self) -> None:
+        """Upload locally persisted crash dumps to the controller server."""
+
+        crash_path = Path(resolve_documents_directory()) / APP_NAME / "crash_dump.log"
+        if not crash_path.exists() or not crash_path.is_file():
+            return
+
+        try:
+            content = crash_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            logging.exception("Failed to read crash dump from %s", crash_path)
+            return
+
+        payload = {
+            "command": "upload_crash_report",
+            "source": self.device_name,
+            "content": content,
+        }
+
+        if not self._send_to_server(payload):
+            logging.warning("Unable to upload crash report; will retry on next connection")
+            return
+
+        try:
+            crash_path.unlink(missing_ok=True)
+        except TypeError:
+            # Python < 3.8 compatibility: remove without missing_ok
+            try:
+                crash_path.unlink()
+            except FileNotFoundError:
+                pass
+        except Exception:
+            logging.exception("Failed to remove crash dump after upload: %s", crash_path)
 
     def toggle_client_control(self, name: str, *, switch_monitor: bool = True, release_keys: bool = True) -> None:
         """Activate or deactivate control for a specific client."""
