@@ -39,6 +39,7 @@ from config.constants import (
     SERVICE_NAME_PREFIX,
     APP_NAME,
     ORG_NAME,
+    ALLOWED_SSIDS,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -63,6 +64,7 @@ from config.log_aggregator import LogAggregator
 from utils.logging_setup import create_controller_file_handler, resolve_log_paths
 from utils.path_helpers import resolve_documents_directory
 from utils.remote_logging import RemoteLogHandler, get_remote_log_handler
+from utils.network_utils import get_current_ssid
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 class KVMOrchestrator(QObject):
@@ -216,6 +218,11 @@ class KVMOrchestrator(QObject):
             state=self.state,
             zeroconf=self.zeroconf,
         )
+
+        # Network watchdog / whitelisting
+        self._network_watchdog_thread: Optional[threading.Thread] = None
+        self._network_watchdog_stop = threading.Event()
+        self._network_services_active = False
 
         if self.stability_monitor:
             self._register_core_monitoring()
@@ -553,6 +560,86 @@ class KVMOrchestrator(QObject):
             self.reconnect_threads[(ip, port)] = t
             t.start()
 
+    def _register_service(self) -> bool:
+        try:
+            addr = socket.inet_aton(self.local_ip)
+            self.service_info = ServiceInfo(
+                SERVICE_TYPE,
+                f"{self.device_name}.{SERVICE_TYPE}",
+                addresses=[addr],
+                port=self.settings['port'],
+            )
+            self.zeroconf.register_service(self.service_info)
+            self.diagnostics_manager.set_ip_watchdog_enabled(True)
+            return True
+        except Exception as exc:
+            logging.error("Failed to register Zeroconf service: %s", exc)
+            self.service_info = None
+            self.diagnostics_manager.set_ip_watchdog_enabled(False)
+            return False
+
+    def _unregister_service(self) -> None:
+        service_info = self.service_info
+        if not service_info:
+            return
+        try:
+            self.zeroconf.unregister_service(service_info)
+        except Exception as exc:  # pragma: no cover - logging only
+            logging.debug("Failed to unregister Zeroconf service: %s", exc)
+        finally:
+            self.service_info = None
+            self.diagnostics_manager.set_ip_watchdog_enabled(False)
+
+    def _resume_network_services(self) -> None:
+        if self._network_services_active:
+            return
+        register_ok = self._register_service()
+        self.peer_manager.start()
+        if self.clipboard_manager:
+            self.clipboard_manager.start()
+            if self.settings.get('role') == 'ado':
+                self.start_main_hotkey_listener()
+        self._network_services_active = True
+        if not register_ok:
+            logging.warning("Zeroconf registration failed; running without service advertisement")
+
+    def _pause_network_services(self) -> None:
+        if not self._network_services_active and not self.peer_manager.is_running:
+            self._unregister_service()
+            self._network_services_active = False
+            self.state.set_active(False)
+            return
+        self.peer_manager.stop()
+        if self.clipboard_manager:
+            self.clipboard_manager.stop()
+        self._unregister_service()
+        self._network_services_active = False
+        self.state.set_active(False)
+
+    def _network_watchdog_loop(self) -> None:
+        logging.info("Network watchdog thread started.")
+        while self._running and not self._network_watchdog_stop.is_set():
+            ssid = get_current_ssid()
+            allowed = bool(ssid) and any(
+                ssid.startswith(prefix) for prefix in ALLOWED_SSIDS
+            )
+
+            if allowed:
+                if not self._network_services_active:
+                    logging.info("Allowed network detected (%s), resuming KVM services.", ssid)
+                    self._resume_network_services()
+            else:
+                if self._network_services_active:
+                    logging.info(
+                        "Unknown network [%s], pausing KVM services.",
+                        ssid or "<offline>",
+                    )
+                    self._pause_network_services()
+
+            self._network_watchdog_stop.wait(5)
+
+        logging.info("Network watchdog thread stopped.")
+
     def _process_messages(self):
         """Unified message handler for all peers."""
         logging.debug("Message processor thread started")
@@ -705,25 +792,24 @@ class KVMOrchestrator(QObject):
         logging.info("Orchestrator shutdown initiated.")
         self._running = False
 
+        self._network_watchdog_stop.set()
+        if self._network_watchdog_thread and self._network_watchdog_thread.is_alive():
+            self._network_watchdog_thread.join(timeout=1.0)
+
         logging.info("Stopping host capture...")
         self.host_capture.stop()
         self.streaming_thread = self.host_capture.thread
         logging.info("Host capture stopped.")
 
-        if self.clipboard_manager:
-            logging.info("Stopping ClipboardManager...")
-            self.clipboard_manager.stop()
-            logging.info("ClipboardManager stopped.")
+        logging.info("Stopping network services...")
+        self._pause_network_services()
+        logging.info("Network services stopped.")
 
         logging.info("Unregistering monitoring...")
         self._unregister_monitoring()
         logging.info("Monitoring unregistered.")
 
         self.state.set_pending_activation_target(None)
-
-        logging.info("Stopping PeerManager...")
-        self.peer_manager.stop()
-        logging.info("PeerManager stopped.")
 
         if self.settings.get('role') == 'input_provider':
             logging.info("Stopping input provider stream...")
@@ -738,13 +824,6 @@ class KVMOrchestrator(QObject):
         self.diagnostics_manager.stop()
         logging.info("DiagnosticsManager stopped.")
 
-        if self.service_info:
-            logging.info("Unregistering Zeroconf service...")
-            try:
-                self.zeroconf.unregister_service(self.service_info)
-                logging.info("Zeroconf service unregistered.")
-            except Exception:
-                logging.exception("Failed to unregister Zeroconf service cleanly")
         logging.info("Closing Zeroconf instance...")
         try:
             self.zeroconf.close()
@@ -840,21 +919,7 @@ class KVMOrchestrator(QObject):
         self.start()
         logging.info("Worker starting in peer-to-peer mode")
         try:
-            register_ok = False
-            try:
-                addr = socket.inet_aton(self.local_ip)
-                self.service_info = ServiceInfo(
-                    SERVICE_TYPE,
-                    f"{self.device_name}.{SERVICE_TYPE}",
-                    addresses=[addr],
-                    port=self.settings['port'],
-                )
-                self.zeroconf.register_service(self.service_info)
-                register_ok = True
-            except Exception as e:
-                logging.error("Failed to register Zeroconf service: %s", e)
-
-            self.diagnostics_manager.set_ip_watchdog_enabled(register_ok)
+            self.diagnostics_manager.set_ip_watchdog_enabled(False)
 
             self.message_processor_thread = threading.Thread(
                 target=self._process_messages,
@@ -863,14 +928,15 @@ class KVMOrchestrator(QObject):
             )
             self.message_processor_thread.start()
 
-            self.peer_manager.start()
-
-            if self.clipboard_manager:
-                self.clipboard_manager.start()
-                if self.settings.get('role') == 'ado':
-                    self.start_main_hotkey_listener()
-
             self.diagnostics_manager.start()
+
+            self._network_watchdog_stop.clear()
+            self._network_watchdog_thread = threading.Thread(
+                target=self._network_watchdog_loop,
+                daemon=True,
+                name="NetworkWatchdog",
+            )
+            self._network_watchdog_thread.start()
 
             while self._running:
                 time.sleep(0.5)
@@ -880,6 +946,10 @@ class KVMOrchestrator(QObject):
                 "Állapot: Hiba - a KVM szolgáltatás leállt"
             )
         finally:
+            self._network_watchdog_stop.set()
+            if self._network_watchdog_thread and self._network_watchdog_thread.is_alive():
+                self._network_watchdog_thread.join(timeout=1)
+            self._pause_network_services()
             self._unregister_monitoring()
             self.finished.emit()
 

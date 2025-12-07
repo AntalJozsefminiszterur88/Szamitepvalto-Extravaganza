@@ -13,6 +13,10 @@ BRAND_NAME = "UMKGL Solutions"
 # Hálózati beállítások
 SERVICE_TYPE = "_kvmswitch._tcp.local."
 SERVICE_NAME_PREFIX = "KVM Switch Adó"
+ALLOWED_SSIDS = [
+    "Telekom-bbbe42",
+    "Telekom-bbbe42-2",
+]
 
 # Gyorsbillentyű virtuális kódjai
 VK_CTRL = 162  # bal Ctrl
