@@ -5,6 +5,7 @@ from __future__ import annotations
 import locale
 import os
 import subprocess
+import sys
 from typing import Optional
 
 
@@ -20,10 +21,20 @@ def get_current_ssid() -> Optional[str]:
         return None
 
     try:
+        startupinfo = None
+        creationflags = 0
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            creationflags = 0x08000000  # CREATE_NO_WINDOW
+
         result = subprocess.run(
             ["netsh", "wlan", "show", "interfaces"],
             check=False,
             capture_output=True,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
         )
     except Exception:
         return None
