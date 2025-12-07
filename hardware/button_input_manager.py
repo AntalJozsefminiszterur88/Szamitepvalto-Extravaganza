@@ -217,12 +217,19 @@ class ButtonInputManager:
     # Pico serial handling
     # ------------------------------------------------------------------
     def _find_pico_port(self) -> Optional[str]:
+        ports = list(list_ports.comports())
         forced_port = (PICO_SERIAL_PORT or "").strip()
         if forced_port:
-            return forced_port
+            if any(port.device == forced_port for port in ports):
+                return forced_port
+            logging.warning(
+                "Configured PICO_SERIAL_PORT %s not found, falling back to auto-detection",
+                forced_port,
+            )
+
         keywords = ("pico", "circuitpython")
         data_candidate = None
-        for port in list_ports.comports():
+        for port in ports:
             try:
                 desc_raw = port.description or ""
                 manuf_raw = getattr(port, "manufacturer", "") or ""
@@ -270,9 +277,10 @@ class ButtonInputManager:
                     while self._running.is_set():
                         try:
                             line = ser.readline()
-                        except serial.SerialException:
-                            logging.info("Serial read failed, attempting reconnect")
-                            break
+                        except Exception:
+                            logging.warning("Serial read failed, retrying...")
+                            time.sleep(2)
+                            continue
                         if not line:
                             continue
                         try:
