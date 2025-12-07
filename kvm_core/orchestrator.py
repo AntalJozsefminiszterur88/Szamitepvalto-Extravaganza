@@ -961,6 +961,10 @@ class KVMOrchestrator(QObject):
 
     def run(self) -> None:
         """Unified entry point starting peer threads and services."""
+        if self.settings.get('role') == 'ado':
+            logging.info("Starting ButtonInputManager for EliteDesk...")
+            self.start_main_hotkey_listener()
+
         self.start()
         logging.info("Worker starting in peer-to-peer mode")
         try:
@@ -975,13 +979,25 @@ class KVMOrchestrator(QObject):
 
             self.diagnostics_manager.start()
 
+            role = self.settings.get('role')
             self._network_watchdog_stop.clear()
-            self._network_watchdog_thread = threading.Thread(
-                target=self._network_watchdog_loop,
-                daemon=True,
-                name="NetworkWatchdog",
-            )
-            self._network_watchdog_thread.start()
+            if role == 'vevo':
+                self._network_watchdog_thread = threading.Thread(
+                    target=self._network_watchdog_loop,
+                    daemon=True,
+                    name="NetworkWatchdog",
+                )
+                self._network_watchdog_thread.start()
+            else:
+                register_ok = self._register_service()
+                self.peer_manager.start()
+                if self.clipboard_manager:
+                    self.clipboard_manager.start()
+                self._network_services_active = True
+                if not register_ok:
+                    logging.warning(
+                        "Zeroconf registration failed; running without service advertisement"
+                    )
 
             while self._running:
                 time.sleep(0.5)
