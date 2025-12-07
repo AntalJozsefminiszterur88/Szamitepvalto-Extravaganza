@@ -6,6 +6,7 @@ import os
 import socket
 import logging
 import ctypes
+import faulthandler
 import signal  # ÚJ IMPORT
 import time    # ÚJ IMPORT
 import threading
@@ -154,6 +155,15 @@ def set_high_priority():
 
 
 if __name__ == "__main__":
+    f_crash = None
+    try:
+        crash_log = os.path.join(resolve_documents_directory(), APP_NAME, "crash_dump.log")
+        os.makedirs(os.path.dirname(crash_log), exist_ok=True)
+        f_crash = open(crash_log, "w", encoding="utf-8")
+        faulthandler.enable(file=f_crash, all_threads=True)
+    except Exception:
+        pass
+
     documents_dir = resolve_documents_directory()
     os.makedirs(documents_dir, exist_ok=True)
 
