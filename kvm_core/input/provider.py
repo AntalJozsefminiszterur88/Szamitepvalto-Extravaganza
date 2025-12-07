@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import os
 import threading
 import time
-import tkinter
 from typing import Callable, Iterable, Optional, Set
 
 from pynput import keyboard, mouse
@@ -108,11 +109,14 @@ class InputProvider:
         self._orig_mouse_pos = controller.position
 
         try:
-            root = tkinter.Tk()
-            root.withdraw()
-            center_x = root.winfo_screenwidth() // 2
-            center_y = root.winfo_screenheight() // 2
-            root.destroy()
+            if os.name == 'nt':
+                user32 = ctypes.windll.user32
+                width = user32.GetSystemMetrics(0)
+                height = user32.GetSystemMetrics(1)
+                center_x = width // 2
+                center_y = height // 2
+            else:
+                center_x, center_y = 960, 540  # Fallback
         except Exception:
             center_x, center_y = 800, 600
 
