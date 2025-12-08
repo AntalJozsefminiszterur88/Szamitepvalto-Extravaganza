@@ -545,6 +545,9 @@ class KVMOrchestrator(QObject):
     def _schedule_reconnect(self, ip: str, port: int) -> None:
         """Spawn a background thread that keeps trying to reconnect."""
 
+        if self.settings.get('role') == 'vevo':
+            return
+
         def _attempt():
             while self._running:
                 sockets = self.state.get_client_sockets()
