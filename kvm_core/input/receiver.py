@@ -3,27 +3,9 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 
 from pynput import keyboard, mouse
-
-if os.name == 'nt':
-    import ctypes
-    from ctypes import wintypes
-
-    _USER32 = ctypes.windll.user32
-    _MOUSEEVENTF_MOVE = 0x0001
-    _SM_XVIRTUALSCREEN = 76
-    _SM_YVIRTUALSCREEN = 77
-    _SM_CXVIRTUALSCREEN = 78
-    _SM_CYVIRTUALSCREEN = 79
-else:  # pragma: no cover - platform specific branch
-    _USER32 = None
-    _SM_XVIRTUALSCREEN = 0
-    _SM_YVIRTUALSCREEN = 0
-    _SM_CXVIRTUALSCREEN = 0
-    _SM_CYVIRTUALSCREEN = 0
 
 
 class InputReceiver:
@@ -33,7 +15,6 @@ class InputReceiver:
         self.mouse_controller = mouse.Controller()
         self.keyboard_controller = keyboard.Controller()
         self._pressed_keys: set = set()
-        self._win_mouse_fraction = [0.0, 0.0]
 
     # ------------------------------------------------------------------
     # Public API
@@ -94,54 +75,6 @@ class InputReceiver:
 
         if dx_val == 0.0 and dy_val == 0.0:
             return
-
-        if _USER32 is not None:
-            try:
-                point = wintypes.POINT()
-                if not _USER32.GetCursorPos(ctypes.byref(point)):
-                    raise ctypes.WinError(ctypes.get_last_error())
-
-                total_dx = dx_val + self._win_mouse_fraction[0]
-                total_dy = dy_val + self._win_mouse_fraction[1]
-                frac_x, int_x = math.modf(total_dx)
-                frac_y, int_y = math.modf(total_dy)
-
-                move_x = int(int_x)
-                move_y = int(int_y)
-
-                self._win_mouse_fraction[0] = frac_x
-                self._win_mouse_fraction[1] = frac_y
-
-                target_x = point.x + move_x
-                target_y = point.y + move_y
-
-                width = _USER32.GetSystemMetrics(_SM_CXVIRTUALSCREEN)
-                height = _USER32.GetSystemMetrics(_SM_CYVIRTUALSCREEN)
-                if width and height:
-                    left = _USER32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
-                    top = _USER32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
-                    max_x = left + width - 1
-                    max_y = top + height - 1
-                    if target_x < left:
-                        target_x = left
-                        self._win_mouse_fraction[0] = 0.0
-                    elif target_x > max_x:
-                        target_x = max_x
-                        self._win_mouse_fraction[0] = 0.0
-                    if target_y < top:
-                        target_y = top
-                        self._win_mouse_fraction[1] = 0.0
-                    elif target_y > max_y:
-                        target_y = max_y
-                        self._win_mouse_fraction[1] = 0.0
-
-                if _USER32.SetCursorPos(int(target_x), int(target_y)):
-                    _USER32.mouse_event(_MOUSEEVENTF_MOVE, 0, 0, 0, 0)
-                return
-            except Exception as exc:
-                logging.debug("Native cursor move failed (%s), falling back to pynput", exc)
-                self._win_mouse_fraction[0] = 0.0
-                self._win_mouse_fraction[1] = 0.0
 
         self.mouse_controller.move(dx_val, dy_val)
 
