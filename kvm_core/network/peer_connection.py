@@ -35,10 +35,23 @@ class PeerConnection(threading.Thread):
             if not self._perform_handshake():
                 return
             self._receive_loop()
-        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as exc:
-            self._log.debug(
-                "Network error with peer %s: %s", self.peer_name, exc
-            )
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, OSError) as exc:
+            is_closed_socket = False
+            try:
+                is_closed_socket = exc.errno == 10038
+            except AttributeError:
+                pass
+            if not is_closed_socket and "10038" in str(exc):
+                is_closed_socket = True
+
+            if is_closed_socket:
+                self._log.debug(
+                    "Socket already closed for peer %s: %s", self.peer_name, exc
+                )
+            else:
+                self._log.debug(
+                    "Network error with peer %s: %s", self.peer_name, exc
+                )
         except Exception as exc:
             self._log.error(
                 "Unexpected error in PeerConnection (%s): %s",
