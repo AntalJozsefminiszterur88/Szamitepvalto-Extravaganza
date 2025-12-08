@@ -426,7 +426,7 @@ class PeerManager:
 
                 self.connect_to_peer(ip, port)
 
-            sleep_time = 1 if vevo_disconnected else 2
+            sleep_time = 3 if vevo_disconnected else 2
             time.sleep(sleep_time)
 
     def connect_to_peer(self, ip: str, port: int) -> None:

@@ -36,7 +36,7 @@ class PeerConnection(threading.Thread):
                 return
             self._receive_loop()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as exc:
-            self._log.warning(
+            self._log.debug(
                 "Network error with peer %s: %s", self.peer_name, exc
             )
         except Exception as exc:
