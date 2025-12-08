@@ -13,12 +13,6 @@ from kvm_core.network.peer_connection import PeerConnection
 from kvm_core.state import KVMState
 
 
-STATE_SCANNING = "scanning"
-STATE_CONNECTING = "connecting"
-STATE_CONNECTED = "connected"
-STATE_DISCONNECTED = "disconnected"
-
-
 class PeerManager:
     """Beacon-based peer manager for LAN discovery and connectivity."""
 
@@ -49,6 +43,18 @@ class PeerManager:
         self.connection_manager_thread: Optional[threading.Thread] = None
         self.resolver_thread: Optional[threading.Thread] = None
         self._broadcast_thread: Optional[threading.Thread] = None
+
+    def _get_lan_ip(self) -> Optional[str]:
+        """Finds the local IP on the 192.168.x.x subnet."""
+        try:
+            hostname = socket.gethostname()
+            _, _, ips = socket.gethostbyname_ex(hostname)
+            for ip in ips:
+                if ip.startswith("192.168."):
+                    return ip
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # Public API
@@ -282,15 +288,43 @@ class PeerManager:
         self.accept_thread.start()
 
     def _beacon_broadcast_loop(self) -> None:
-        self._broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        payload = json.dumps({"type": "beacon", "port": self._port, "name": self._device_name}).encode()
+        """Sends UDP beacons, but binds to the correct LAN interface first."""
+        logging.info("Starting intelligent beacon broadcast loop...")
+
         while self._running.is_set():
+            source_ip = self._get_lan_ip()
+            if not source_ip:
+                logging.warning("Could not find a 192.168.x.x interface for broadcasting.")
+                time.sleep(5)
+                continue
+
             try:
-                self._broadcast_socket.sendto(payload, ("255.255.255.255", 50000))
-            except OSError as exc:
-                logging.debug("Beacon broadcast failed: %s", exc)
-            time.sleep(1)
+                # Use subnet-specific broadcast for reliability
+                broadcast_ip = ".".join(source_ip.split(".")[:3]) + ".255"
+
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+                # CRITICAL: Bind to the specific LAN IP to force correct interface usage
+                sock.bind((source_ip, 0))
+
+                payload = json.dumps(
+                    {
+                        "type": "beacon",
+                        "port": self._port,
+                        "name": self._device_name,
+                        "from_ip": source_ip,
+                    }
+                ).encode("utf-8")
+
+                sock.sendto(payload, (broadcast_ip, 50000))
+                # logging.debug(f"Beacon sent from {source_ip} to {broadcast_ip}")
+                sock.close()
+
+            except Exception as e:
+                logging.error(f"Beacon broadcast failed: {e}")
+
+            time.sleep(1.0)
 
     def _accept_loop(self) -> None:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -340,73 +374,46 @@ class PeerManager:
     # ------------------------------------------------------------------
     def _start_client_components(self) -> None:
         self.connection_manager_thread = threading.Thread(
-            target=self._discovery_and_connect_loop,
+            target=self._client_logic_loop,
             daemon=True,
-            name="DiscoveryAndConnectThread",
+            name="ClientLogicThread",
         )
         self.connection_manager_thread.start()
 
-    def _discovery_and_connect_loop(self) -> None:
-        state = STATE_SCANNING
-        server_ip: Optional[str] = None
-        server_port: int = self._port
+    def _client_logic_loop(self) -> None:
+        """Listens for beacons and connects upon receiving one."""
+        logging.info("Starting client beacon listener...")
 
-        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp_sock.settimeout(1.0)
         try:
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             udp_sock.bind(("", 50000))
-        except OSError as exc:
-            logging.error("Failed to bind UDP listener: %s", exc)
-        self._udp_listener_socket = udp_sock
+            self._udp_listener_socket = udp_sock
+        except Exception as e:
+            logging.critical(f"FATAL: Could not bind UDP listener on port 50000: {e}")
+            return
 
         while self._running.is_set():
-            if state == STATE_SCANNING:
-                try:
-                    data, addr = udp_sock.recvfrom(1024)
-                except socket.timeout:
-                    continue
-                except OSError:
-                    break
-                try:
-                    beacon = json.loads(data.decode(errors="ignore"))
-                except json.JSONDecodeError:
-                    continue
-                if beacon.get("type") != "beacon":
-                    continue
-                server_ip = addr[0]
-                server_port = int(beacon.get("port", self._port))
-                logging.debug("Beacon received from %s:%s", server_ip, server_port)
-                state = STATE_CONNECTING
+            if self._has_active_connection():
+                time.sleep(1)
                 continue
 
-            if state == STATE_CONNECTING:
-                if server_ip is None:
-                    state = STATE_SCANNING
-                    continue
-                if self.connect_to_peer(server_ip, server_port):
-                    state = STATE_CONNECTED
-                else:
-                    state = STATE_SCANNING
-                continue
+            try:
+                # Wait for a beacon
+                data, addr = self._udp_listener_socket.recvfrom(1024)
+                beacon = json.loads(data.decode("utf-8"))
 
-            if state == STATE_CONNECTED:
-                if not self._has_active_connection():
-                    state = STATE_DISCONNECTED
-                else:
-                    time.sleep(1)
-                continue
+                if beacon.get("type") == "beacon":
+                    server_ip = addr[0]
+                    server_port = beacon.get("port", self._port)
+                    logging.info(f"Beacon received from {server_ip}, attempting connection...")
 
-            if state == STATE_DISCONNECTED:
-                for conn in list(self._connections.values()):
-                    self.disconnect_peer(conn, "disconnected")
-                state = STATE_SCANNING
+                    # Attempt connection upon receiving a valid beacon
+                    self.connect_to_peer(server_ip, server_port)
 
-        try:
-            udp_sock.close()
-        except Exception:
-            pass
-        self._udp_listener_socket = None
+            except Exception as e:
+                # This can happen on shutdown, it's fine
+                logging.debug(f"UDP listener error: {e}")
 
     # ------------------------------------------------------------------
     # Internal helpers
