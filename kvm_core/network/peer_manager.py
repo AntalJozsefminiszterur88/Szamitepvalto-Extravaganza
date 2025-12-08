@@ -377,11 +377,29 @@ class PeerManager:
             peers = list(self._discovery.peers)
 
             worker = self._worker
-            if worker.settings.get("role") == "vevo" and worker.last_server_ip:
-                if worker.last_server_ip != worker.local_ip and not any(
-                    peer.get("ip") == worker.last_server_ip for peer in peers
-                ):
-                    peers.append({"ip": worker.last_server_ip, "port": self._port})
+            role = worker.settings.get("role")
+
+            sockets = self._state.get_client_sockets()
+            connected_ips = {
+                peer_ip
+                for peer_ip in (
+                    self._safe_peername(s) for s in sockets if s.fileno() != -1
+                )
+                if peer_ip is not None
+            }
+
+            vevo_disconnected = role == "vevo" and worker.server_socket is None
+            connected_to_last = False
+
+            if role == "vevo" and worker.last_server_ip:
+                connected_to_last = worker.last_server_ip in connected_ips
+                if not connected_to_last and worker.last_server_ip != worker.local_ip:
+                    peers = [
+                        peer
+                        for peer in peers
+                        if peer.get("ip") != worker.last_server_ip
+                    ]
+                    peers.insert(0, {"ip": worker.last_server_ip, "port": self._port})
 
             for peer in peers:
                 ip = peer["ip"]
@@ -390,28 +408,26 @@ class PeerManager:
                 if ip == self._worker.local_ip and port == self._port:
                     continue
 
-                sockets = self._state.get_client_sockets()
-                already = any(
-                    self._safe_peername(s) == ip
-                    for s in sockets
-                    if s.fileno() != -1
-                )
+                already = ip in connected_ips
                 if already:
                     continue
 
-                try:
-                    local_addr = ipaddress.ip_address(self._worker.local_ip)
-                    remote_addr = ipaddress.ip_address(ip)
-                    if local_addr > remote_addr:
+                if role != "vevo":
+                    try:
+                        local_addr = ipaddress.ip_address(self._worker.local_ip)
+                        remote_addr = ipaddress.ip_address(ip)
+                        if local_addr > remote_addr:
+                            continue
+                    except ValueError:
+                        logging.warning(
+                            f"Érvénytelen IP-cím a kapcsolatkezelőben: {ip}"
+                        )
                         continue
-                except ValueError:
-                    logging.warning(
-                        f"Érvénytelen IP-cím a kapcsolatkezelőben: {ip}"
-                    )
-                    continue
 
                 self.connect_to_peer(ip, port)
-            time.sleep(2)
+
+            sleep_time = 1 if vevo_disconnected else 2
+            time.sleep(sleep_time)
 
     def connect_to_peer(self, ip: str, port: int) -> None:
         secure_sock: Optional[socket.socket] = None

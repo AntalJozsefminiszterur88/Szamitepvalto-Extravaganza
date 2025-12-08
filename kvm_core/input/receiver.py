@@ -13,6 +13,7 @@ if os.name == 'nt':
     from ctypes import wintypes
 
     _USER32 = ctypes.windll.user32
+    _MOUSEEVENTF_MOVE = 0x0001
     _SM_XVIRTUALSCREEN = 76
     _SM_YVIRTUALSCREEN = 77
     _SM_CXVIRTUALSCREEN = 78
@@ -134,8 +135,17 @@ class InputReceiver:
                         target_y = max_y
                         self._win_mouse_fraction[1] = 0.0
 
-                if move_x != 0 or move_y != 0 or target_x != point.x or target_y != point.y:
-                    _USER32.SetCursorPos(int(target_x), int(target_y))
+                move_x = int(target_x - point.x)
+                move_y = int(target_y - point.y)
+
+                if move_x != 0 or move_y != 0:
+                    _USER32.mouse_event(
+                        _MOUSEEVENTF_MOVE,
+                        int(move_x),
+                        int(move_y),
+                        0,
+                        0,
+                    )
                 return
             except Exception as exc:
                 logging.debug("Native cursor move failed (%s), falling back to pynput", exc)
