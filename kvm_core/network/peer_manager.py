@@ -287,7 +287,7 @@ class PeerManager:
         payload = json.dumps({"type": "beacon", "port": self._port, "name": self._device_name}).encode()
         while self._running.is_set():
             try:
-                self._broadcast_socket.sendto(payload, ("255.255.255.255", self._port))
+                self._broadcast_socket.sendto(payload, ("255.255.255.255", 50000))
             except OSError as exc:
                 logging.debug("Beacon broadcast failed: %s", exc)
             time.sleep(1)
@@ -355,7 +355,7 @@ class PeerManager:
         udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         udp_sock.settimeout(1.0)
         try:
-            udp_sock.bind(("", self._port))
+            udp_sock.bind(("", 50000))
         except OSError as exc:
             logging.error("Failed to bind UDP listener: %s", exc)
         self._udp_listener_socket = udp_sock
