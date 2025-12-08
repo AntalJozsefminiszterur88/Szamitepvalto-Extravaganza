@@ -26,7 +26,7 @@ class RemoteLogHandler(logging.Handler):
         send_callback: Optional[Callable[[dict], bool]] = None,
     ) -> None:
         super().__init__(level=logging.NOTSET)
-        self._queue: "queue.Queue[Optional[dict]]" = queue.Queue()
+        self._queue: "queue.Queue[Optional[dict]]" = queue.Queue(maxsize=1000)
         self._stop_event = threading.Event()
         self._sender_lock = threading.Lock()
         self._send_callback: Optional[Callable[[dict], bool]] = None
@@ -48,7 +48,10 @@ class RemoteLogHandler(logging.Handler):
                 {"type": "remote_log", "level": record.levelname, "message": record.getMessage(), "source": payload["source"]},
                 ensure_ascii=False,
             )
-            self._queue.put_nowait(payload)
+            try:
+                self._queue.put_nowait(payload)
+            except queue.Full:
+                pass  # Drop the log if the queue is full to preserve stability
         except Exception:
             # Never raise from logging; drop the record if we cannot enqueue.
             self.handleError(record)
