@@ -760,13 +760,16 @@ class KVMOrchestrator(QObject):
             return
 
         try:
-            crash_path.unlink(missing_ok=True)
-        except TypeError:
-            # Python < 3.8 compatibility: remove without missing_ok
             try:
-                crash_path.unlink()
-            except FileNotFoundError:
-                pass
+                crash_path.unlink(missing_ok=True)
+            except TypeError:
+                # Python < 3.8 compatibility: remove without missing_ok
+                try:
+                    crash_path.unlink()
+                except FileNotFoundError:
+                    pass
+        except (PermissionError, OSError) as exc:
+            logging.warning("Cannot delete active crash dump: %s", exc)
         except Exception:
             logging.exception("Failed to remove crash dump after upload: %s", crash_path)
 
