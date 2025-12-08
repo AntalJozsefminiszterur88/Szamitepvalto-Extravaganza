@@ -225,6 +225,11 @@ class KVMOrchestrator(QObject):
             zeroconf=self.zeroconf,
         )
 
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_stop = threading.Event()
+        self._session_start_time = time.monotonic()
+        self._crash_report_uploaded = False
+
         # Network watchdog / whitelisting
         self._network_watchdog_thread: Optional[threading.Thread] = None
         self._network_watchdog_stop = threading.Event()
@@ -399,6 +404,25 @@ class KVMOrchestrator(QObject):
                     self.clipboard_manager.ensure_storage_cleanup(force=True)
             except Exception:
                 logging.exception("Clipboard cleanup failed during memory pressure mitigation")
+
+    def _heartbeat_loop(self) -> None:
+        """Periodic session tasks, including deferred crash upload."""
+        logging.debug("KVM heartbeat loop started.")
+        while self._running and not self._heartbeat_stop.is_set():
+            if self._heartbeat_stop.wait(30):
+                break
+            try:
+                runtime = time.monotonic() - self._session_start_time
+                if (
+                    self.state.is_active()
+                    and runtime >= 60
+                    and not self._crash_report_uploaded
+                ):
+                    self._upload_pending_crashes()
+                    self._crash_report_uploaded = True
+            except Exception:
+                logging.exception("Heartbeat loop failed", exc_info=True)
+        logging.debug("KVM heartbeat loop stopped.")
 
     def toggle_monitor_power(self) -> None:
         """Toggle the primary monitor power state between on and soft off."""
@@ -730,7 +754,6 @@ class KVMOrchestrator(QObject):
             # Use a stable sender method that is not bound to a specific connection.
             self.remote_log_handler.set_send_callback(self._send_to_server)
             logging.info("Remote logging callback is now active.")
-        self._upload_pending_crashes()
 
     def _on_server_disconnected(self) -> None:
         if self.remote_log_handler:
@@ -739,7 +762,7 @@ class KVMOrchestrator(QObject):
     def _upload_pending_crashes(self) -> None:
         """Upload locally persisted crash dumps to the controller server."""
 
-        crash_path = Path(resolve_documents_directory()) / APP_NAME / "crash_dump.log"
+        crash_path = Path(resolve_documents_directory()) / APP_NAME / "crash_dump.pending"
         if not crash_path.exists() or not crash_path.is_file():
             return
 
@@ -846,6 +869,11 @@ class KVMOrchestrator(QObject):
         self._network_watchdog_stop.set()
         if self._network_watchdog_thread and self._network_watchdog_thread.is_alive():
             self._network_watchdog_thread.join(timeout=1.0)
+
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=1.0)
+        self._heartbeat_thread = None
 
         logging.info("Stopping host capture...")
         self.host_capture.stop()
@@ -963,6 +991,9 @@ class KVMOrchestrator(QObject):
 
     def start(self) -> None:
         """Prepare the orchestrator and configure role-specific features."""
+        self._session_start_time = time.monotonic()
+        self._crash_report_uploaded = False
+        self._heartbeat_stop.clear()
         self._configure_logging()
 
     def run(self) -> None:
@@ -984,6 +1015,14 @@ class KVMOrchestrator(QObject):
             self.message_processor_thread.start()
 
             self.diagnostics_manager.start()
+
+            if self._heartbeat_thread is None or not self._heartbeat_thread.is_alive():
+                self._heartbeat_thread = threading.Thread(
+                    target=self._heartbeat_loop,
+                    daemon=True,
+                    name="KVMSessionHeartbeat",
+                )
+                self._heartbeat_thread.start()
 
             role = self.settings.get('role')
             self._network_watchdog_stop.clear()
