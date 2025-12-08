@@ -76,7 +76,16 @@ class InputReceiver:
         if dx_val == 0.0 and dy_val == 0.0:
             return
 
-        self.mouse_controller.move(dx_val, dy_val)
+        try:
+            self.mouse_controller.move(dx_val, dy_val)
+        except TypeError:
+            # This can happen if pynput fails to get the current cursor position
+            # (e.g., after system sleep). We can safely ignore it, as the next
+            # valid mouse event will correct the position.
+            logging.debug(
+                "Ignoring a TypeError in mouse_controller.move, likely due to sleep/wake."
+            )
+            pass
 
     def release_pressed_keys(self) -> None:
         """Release any tracked pressed keys."""
