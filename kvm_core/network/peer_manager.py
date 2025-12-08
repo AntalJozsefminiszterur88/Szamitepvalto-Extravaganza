@@ -1,7 +1,6 @@
-import ipaddress
+import json
 import logging
 import socket
-import ssl
 import threading
 import time
 from typing import Callable, Dict, Iterable, Optional, Sequence
@@ -9,22 +8,25 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 import msgpack
 from PySide6.QtCore import QSettings
 
-from config.constants import APP_NAME, ORG_NAME, SERVICE_TYPE
-from kvm_core.network.discovery import ServiceDiscovery
+from config.constants import APP_NAME, ORG_NAME
 from kvm_core.network.peer_connection import PeerConnection
-from .secure_socket import *
-
-
 from kvm_core.state import KVMState
 
+
+STATE_SCANNING = "scanning"
+STATE_CONNECTING = "connecting"
+STATE_CONNECTED = "connected"
+STATE_DISCONNECTED = "disconnected"
+
+
 class PeerManager:
-    """Central controller coordinating peer discovery and connections."""
+    """Beacon-based peer manager for LAN discovery and connectivity."""
 
     def __init__(
         self,
         worker,
         state: KVMState,
-        zeroconf,
+        zeroconf,  # kept for signature compatibility
         *,
         port: int,
         device_name: str,
@@ -32,34 +34,21 @@ class PeerManager:
     ) -> None:
         self._worker = worker
         self._state = state
-        self._zeroconf = zeroconf
         self._port = port
         self._device_name = device_name
         self._message_callback = message_callback
         self._running = threading.Event()
-        self._listening_socket: Optional[socket.socket] = None
-        self.accept_thread: Optional[threading.Thread] = None
-        self.connection_manager_thread: Optional[threading.Thread] = None
         self._connections: Dict[socket.socket, PeerConnection] = {}
         self._connections_lock = threading.Lock()
 
-        role = worker.settings.get("role")
-        self._server_context = None
-        if role == "ado":
-            try:
-                self._server_context = create_server_context()
-            except FileNotFoundError:
-                logging.critical("Server TLS key missing for 'ado' role")
-                raise
+        self._listening_socket: Optional[socket.socket] = None
+        self._broadcast_socket: Optional[socket.socket] = None
+        self._udp_listener_socket: Optional[socket.socket] = None
 
-        self._client_context = create_client_context()
-        self._client_context_no_hostname = create_client_context(enforce_hostname=False)
-        self._discovery = ServiceDiscovery(
-            zeroconf,
-            SERVICE_TYPE,
-            lambda: self._worker.local_ip,
-            port,
-        )
+        self.accept_thread: Optional[threading.Thread] = None
+        self.connection_manager_thread: Optional[threading.Thread] = None
+        self.resolver_thread: Optional[threading.Thread] = None
+        self._broadcast_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -68,29 +57,32 @@ class PeerManager:
         if self._running.is_set():
             return
         self._running.set()
-        self._discovery.start()
 
-        self.accept_thread = threading.Thread(
-            target=self._accept_loop,
-            daemon=True,
-            name="AcceptThread",
-        )
-        self.accept_thread.start()
-
-        self.connection_manager_thread = threading.Thread(
-            target=self._connection_manager_loop,
-            daemon=True,
-            name="ConnMgr",
-        )
-        self.connection_manager_thread.start()
+        if self._is_server_role():
+            self._start_server_components()
+        else:
+            self._start_client_components()
 
     def stop(self) -> None:
-        logging.info(f"Stopping {self.__class__.__name__}...")
+        logging.info("Stopping PeerManager...")
         if not self._running.is_set():
-            logging.info(f"{self.__class__.__name__} stopped.")
+            logging.info("PeerManager stopped.")
             return
         self._running.clear()
-        self._discovery.stop()
+
+        if self._broadcast_socket:
+            try:
+                self._broadcast_socket.close()
+            except Exception:
+                pass
+            self._broadcast_socket = None
+
+        if self._udp_listener_socket:
+            try:
+                self._udp_listener_socket.close()
+            except Exception:
+                pass
+            self._udp_listener_socket = None
 
         if self._listening_socket:
             try:
@@ -106,12 +98,11 @@ class PeerManager:
         for conn in list(self._connections.values()):
             self.disconnect_peer(conn, "manager stop")
 
-        if self.accept_thread and self.accept_thread.is_alive():
-            self.accept_thread.join(timeout=1.0)
-        if self.connection_manager_thread and self.connection_manager_thread.is_alive():
-            self.connection_manager_thread.join(timeout=1.0)
+        self._join_thread(self.accept_thread)
+        self._join_thread(self.connection_manager_thread)
+        self._join_thread(self._broadcast_thread)
 
-        logging.info(f"{self.__class__.__name__} stopped.")
+        logging.info("PeerManager stopped.")
 
     # ------------------------------------------------------------------
     # Properties used by other components
@@ -129,12 +120,8 @@ class PeerManager:
         return self._running.is_set() and self._worker._running
 
     @property
-    def resolver_thread(self) -> Optional[threading.Thread]:
-        return self._discovery.resolver_thread
-
-    @property
     def discovered_peers(self) -> Sequence[Dict[str, object]]:
-        return self._discovery.peers
+        return []
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -177,16 +164,11 @@ class PeerManager:
                 logging.info("Laptop client stored last server IP: %s", peer_ip)
 
         pending_target = state.get_pending_activation_target()
-        if (
-            pending_target
-            and pending_target == peer_name
-            and not state.is_active()
-        ):
+        if pending_target and pending_target == peer_name and not state.is_active():
             logging.info("Reconnected to %s, resuming KVM", peer_name)
             state.set_active_client(sock)
             state.set_pending_activation_target(None)
             worker.activate_kvm(switch_monitor=worker.switch_monitor)
-
 
         logging.info("Client connected: %s (%s)", peer_name, connection.addr)
         return True
@@ -244,7 +226,7 @@ class PeerManager:
             state.set_active_client(None)
             state.set_pending_activation_target(None)
 
-        if addr and worker._running:
+        if addr and worker._running and not self._is_server_role():
             worker._schedule_reconnect(addr[0], self._port)
 
     # ------------------------------------------------------------------
@@ -282,12 +264,39 @@ class PeerManager:
         return connection.send(message)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Server components
     # ------------------------------------------------------------------
+    def _start_server_components(self) -> None:
+        self._broadcast_thread = threading.Thread(
+            target=self._beacon_broadcast_loop,
+            daemon=True,
+            name="BroadcastThread",
+        )
+        self._broadcast_thread.start()
+
+        self.accept_thread = threading.Thread(
+            target=self._accept_loop,
+            daemon=True,
+            name="AcceptThread",
+        )
+        self.accept_thread.start()
+
+    def _beacon_broadcast_loop(self) -> None:
+        self._broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._broadcast_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        payload = json.dumps({"type": "beacon", "port": self._port, "name": self._device_name}).encode()
+        while self._running.is_set():
+            try:
+                self._broadcast_socket.sendto(payload, ("255.255.255.255", self._port))
+            except OSError as exc:
+                logging.debug("Beacon broadcast failed: %s", exc)
+            time.sleep(1)
+
     def _accept_loop(self) -> None:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        server_socket.settimeout(1.0)
 
         while self._running.is_set():
             try:
@@ -298,62 +307,25 @@ class PeerManager:
                 time.sleep(5)
 
         server_socket.listen(5)
-        server_socket.settimeout(1.0)
         self._listening_socket = server_socket
         logging.info("TCP server listening on %s", self._port)
 
         while self._running.is_set():
             try:
                 client_sock, addr = server_socket.accept()
-                logging.debug(f"[Szerver] Bejövő kapcsolati kísérlet innen: {addr}")
             except socket.timeout:
                 continue
             except OSError:
                 break
 
-            peer_ip = addr[0]
-            secure_sock: Optional[socket.socket] = None
             try:
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                self._spawn_connection(client_sock, addr)
+            except Exception as exc:
+                logging.error("Failed to handle incoming connection %s: %s", addr, exc)
                 try:
-                    local_addr = ipaddress.ip_address(self._worker.local_ip)
-                    remote_addr = ipaddress.ip_address(peer_ip)
-                except ValueError:
-                    logging.warning(
-                        f"Érvénytelen IP-cím a bejövő kapcsolatnál: {peer_ip}"
-                    )
                     client_sock.close()
-                    continue
-
-                if local_addr > remote_addr:
-                    logging.debug(
-                        f"[Szerver] Kapcsolat elfogadva {addr} felől, SSL kézfogás indítása..."
-                    )
-                    try:
-                        secure_sock = wrap_socket_server_side(
-                            client_sock, self._server_context
-                        )
-                    except ssl.SSLError as e:
-                        logging.error(
-                            f"[Szerver] SSL hiba a bejövő kapcsolatnál {addr} felől: {e}"
-                        )
-                        client_sock.close()
-                        continue
-
-                    secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    self._spawn_connection(secure_sock, addr)
-                else:
-                    logging.debug(
-                        f"[Szerver] Kapcsolat elutasítva {addr} felé (IP-cím szabály)."
-                    )
-                    client_sock.close()
-                    continue
-            except Exception:
-                try:
-                    if secure_sock is not None:
-                        secure_sock.close()
-                    else:
-                        client_sock.close()
                 except Exception:
                     pass
 
@@ -362,6 +334,101 @@ class PeerManager:
         except Exception:
             pass
         self._listening_socket = None
+
+    # ------------------------------------------------------------------
+    # Client components
+    # ------------------------------------------------------------------
+    def _start_client_components(self) -> None:
+        self.connection_manager_thread = threading.Thread(
+            target=self._discovery_and_connect_loop,
+            daemon=True,
+            name="DiscoveryAndConnectThread",
+        )
+        self.connection_manager_thread.start()
+
+    def _discovery_and_connect_loop(self) -> None:
+        state = STATE_SCANNING
+        server_ip: Optional[str] = None
+        server_port: int = self._port
+
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        udp_sock.settimeout(1.0)
+        try:
+            udp_sock.bind(("", self._port))
+        except OSError as exc:
+            logging.error("Failed to bind UDP listener: %s", exc)
+        self._udp_listener_socket = udp_sock
+
+        while self._running.is_set():
+            if state == STATE_SCANNING:
+                try:
+                    data, addr = udp_sock.recvfrom(1024)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                try:
+                    beacon = json.loads(data.decode(errors="ignore"))
+                except json.JSONDecodeError:
+                    continue
+                if beacon.get("type") != "beacon":
+                    continue
+                server_ip = addr[0]
+                server_port = int(beacon.get("port", self._port))
+                logging.debug("Beacon received from %s:%s", server_ip, server_port)
+                state = STATE_CONNECTING
+                continue
+
+            if state == STATE_CONNECTING:
+                if server_ip is None:
+                    state = STATE_SCANNING
+                    continue
+                if self.connect_to_peer(server_ip, server_port):
+                    state = STATE_CONNECTED
+                else:
+                    state = STATE_SCANNING
+                continue
+
+            if state == STATE_CONNECTED:
+                if not self._has_active_connection():
+                    state = STATE_DISCONNECTED
+                else:
+                    time.sleep(1)
+                continue
+
+            if state == STATE_DISCONNECTED:
+                for conn in list(self._connections.values()):
+                    self.disconnect_peer(conn, "disconnected")
+                state = STATE_SCANNING
+
+        try:
+            udp_sock.close()
+        except Exception:
+            pass
+        self._udp_listener_socket = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def connect_to_peer(self, ip: str, port: int) -> bool:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.settimeout(5.0)
+            logging.debug("Attempting TCP connection to %s:%s", ip, port)
+            sock.connect((ip, port))
+        except Exception as exc:
+            logging.error("Failed to connect to %s:%s (%s)", ip, port, exc)
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return False
+
+        self._spawn_connection(sock, (ip, port))
+        return True
 
     def _spawn_connection(self, sock: socket.socket, addr) -> None:
         connection = PeerConnection(sock, addr, self, self._handle_incoming)
@@ -372,116 +439,12 @@ class PeerManager:
             return
         self._message_callback(connection, data)
 
-    def _connection_manager_loop(self) -> None:
-        while self._running.is_set():
-            worker = self._worker
-            role = worker.settings.get("role")
-
-            if role == "vevo":
-                sleep_time = 5
-                if worker.server_socket is None and worker.last_server_ip:
-                    logging.debug(
-                        "Auto-reconnecting to last server: %s", worker.last_server_ip
-                    )
-                    self.connect_to_peer(worker.last_server_ip, self._port)
-                time.sleep(sleep_time)
-                continue
-
-            peers = list(self._discovery.peers)
-
-            sockets = self._state.get_client_sockets()
-            connected_ips = {
-                peer_ip
-                for peer_ip in (
-                    self._safe_peername(s) for s in sockets if s.fileno() != -1
-                )
-                if peer_ip is not None
-            }
-
-            for peer in peers:
-                ip = peer["ip"]
-                port = peer["port"]
-
-                if ip == self._worker.local_ip and port == self._port:
-                    continue
-
-                already = ip in connected_ips
-                if already:
-                    continue
-
-                try:
-                    local_addr = ipaddress.ip_address(self._worker.local_ip)
-                    remote_addr = ipaddress.ip_address(ip)
-                    if local_addr > remote_addr:
-                        continue
-                except ValueError:
-                    logging.warning(
-                        f"Érvénytelen IP-cím a kapcsolatkezelőben: {ip}"
-                    )
-                    continue
-
-                self.connect_to_peer(ip, port)
-
-            time.sleep(2)
-
-    def connect_to_peer(self, ip: str, port: int) -> None:
-        secure_sock: Optional[socket.socket] = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            try:
-                logging.debug(
-                    f"[Kliens] Kimenő kapcsolat indítása ide: {ip}:{port}"
-                )
-                context = self._client_context
-                server_hostname = ip
-                if self._is_literal_ip(ip):
-                    context = self._client_context_no_hostname
-                    server_hostname = None
-                    logging.debug(
-                        "[Kliens] TLS hosztnév-ellenőrzés kikapcsolva a %s címen",
-                        ip,
-                    )
-                secure_sock = wrap_socket_client_side(
-                    sock,
-                    context,
-                    server_hostname=server_hostname,
-                )
-            except ssl.SSLError as e:
-                logging.error(
-                    f"[Kliens] SSL hiba a kimenő kapcsolatnál {ip}:{port} felé: {e}"
-                )
-                sock.close()
-                return
-            secure_sock.connect((ip, port))
-            logging.debug(
-                f"[Kliens] Sikeres TCP & SSL kapcsolat felépítve ide: {ip}:{port}"
-            )
-        except Exception as exc:
-            logging.error(
-                f"[Kliens] Nem sikerült csatlakozni ide: {ip}:{port}. Hiba: {exc}"
-            )
-            try:
-                if secure_sock is not None:
-                    secure_sock.close()
-                else:
-                    sock.close()
-            except Exception:
-                pass
-            return
-
-        assert secure_sock is not None
-        self._spawn_connection(secure_sock, (ip, port))
+    def _has_active_connection(self) -> bool:
+        with self._connections_lock:
+            return bool(self._connections)
 
     @staticmethod
-    def _is_literal_ip(value: str) -> bool:
-        try:
-            ipaddress.ip_address(value)
-        except ValueError:
-            return False
-        return True
-
-    def _normalize_exclude(self, exclude_peer: Optional[Iterable]) -> set:
+    def _normalize_exclude(exclude_peer: Optional[Iterable]) -> set:
         if exclude_peer is None:
             return set()
         if isinstance(exclude_peer, Iterable) and not isinstance(exclude_peer, (bytes, str)):
@@ -500,4 +463,12 @@ class PeerManager:
             return sock.getpeername()[0]
         except Exception:
             return None
+
+    def _is_server_role(self) -> bool:
+        return self.role == "ado" or self.role == "server"
+
+    @staticmethod
+    def _join_thread(thread: Optional[threading.Thread]) -> None:
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
 

@@ -16,7 +16,7 @@ class PeerConnection(threading.Thread):
         addr,
         manager: "PeerManagerProtocol",
         message_callback: Callable[["PeerConnection", dict], None],
-    ) -> None:
+        ) -> None:
         super().__init__(daemon=True, name=f"Peer-{addr[0]}:{addr[1]}")
         self.socket = sock
         self.addr = addr
@@ -28,11 +28,20 @@ class PeerConnection(threading.Thread):
         self.peer_role: Optional[str] = None
         self._log = logging.getLogger(__name__)
         self._closed = False
+        self._registered = False
+
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            self._log.debug("Unable to set socket options for %s", self.peer_name)
 
     def run(self) -> None:
         try:
             self.socket.settimeout(30.0)
             if not self._perform_handshake():
+                self.stop()
+                self._closed = True
                 return
             self._receive_loop()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, OSError) as exc:
@@ -60,7 +69,7 @@ class PeerConnection(threading.Thread):
                 exc_info=True,
             )
         finally:
-            if not self._closed:
+            if not self._closed and self._registered:
                 self._manager.unregister_connection(self, "peer_connection_exit")
             self._log.debug("PeerConnection thread exit for %s", self.peer_name)
 
@@ -130,6 +139,8 @@ class PeerConnection(threading.Thread):
         )
         if not self._manager.register_connection(self, self.peer_name, self.peer_role):
             return False
+
+        self._registered = True
 
         return True
 
