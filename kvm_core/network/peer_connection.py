@@ -187,6 +187,113 @@ class PeerConnection(threading.Thread):
         return data if len(data) == size else None
 
 
+class DataConnection:
+    """Dedicated connection for streaming large payloads."""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        addr,
+        manager: "PeerManagerProtocol",
+    ) -> None:
+        self.socket = sock
+        self.addr = addr
+        self._manager = manager
+        self.peer_name: str = str(addr)
+        self.peer_role: Optional[str] = None
+        self._log = logging.getLogger(__name__)
+        self._closed = False
+
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            self._log.debug("Unable to set socket options for data peer %s", self.peer_name)
+
+    def perform_handshake(self) -> bool:
+        intro = {
+            "type": "data_intro",
+            "device_name": self._manager.device_name,
+            "role": self._manager.role,
+        }
+        if not self.send_message(intro):
+            return False
+
+        raw_len = self._recv_exact(4, timeout=10.0)
+        if not raw_len:
+            return False
+        msg_len = struct.unpack("!I", raw_len)[0]
+        payload = self._recv_exact(msg_len, timeout=10.0)
+        if not payload:
+            return False
+
+        try:
+            hello = msgpack.unpackb(payload, raw=False)
+        except Exception as exc:
+            self._log.error("Failed to unpack data handshake from %s: %s", self.addr, exc)
+            return False
+
+        self.peer_name = hello.get("device_name", self.peer_name)
+        self.peer_role = hello.get("role")
+        self.socket.settimeout(None)
+        return True
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            self.socket.close()
+        except Exception:
+            pass
+
+    def send_message(self, data: dict) -> bool:
+        try:
+            packed = msgpack.packb(data, use_bin_type=True)
+        except Exception as exc:
+            self._log.error("Failed to pack data message for %s: %s", self.peer_name, exc)
+            return False
+        return self.send_packed(packed)
+
+    def send_data(self, data) -> bool:
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            payload = bytes(data)
+        else:
+            try:
+                payload = msgpack.packb(data, use_bin_type=True)
+            except Exception as exc:
+                self._log.error("Failed to pack data payload for %s: %s", self.peer_name, exc)
+                return False
+        return self.send_packed(payload)
+
+    def send_packed(self, packed: bytes) -> bool:
+        try:
+            self.socket.sendall(struct.pack("!I", len(packed)) + packed)
+            return True
+        except Exception as exc:
+            self._log.error("Failed to send data to %s: %s", self.peer_name, exc)
+            return False
+
+    def _recv_exact(self, size: int, timeout: Optional[float] = None) -> Optional[bytes]:
+        previous_timeout = self.socket.gettimeout()
+        if timeout is not None:
+            self.socket.settimeout(timeout)
+        data = b""
+        try:
+            while len(data) < size:
+                chunk = self.socket.recv(size - len(data))
+                if not chunk:
+                    return None
+                data += chunk
+        finally:
+            self.socket.settimeout(previous_timeout)
+        return data if len(data) == size else None
+
+
 class PeerManagerProtocol:
     """Protocol-style helper to avoid circular imports at runtime."""
 
@@ -199,4 +306,3 @@ class PeerManagerProtocol:
 
     @property
     def is_running(self) -> bool: ...  # noqa: E701
-
