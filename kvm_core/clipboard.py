@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import shutil
+import tempfile
 import threading
 import time
 import zipfile
@@ -14,10 +15,12 @@ from utils.path_helpers import resolve_documents_directory
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
+    create_clipboard_stream,
     get_clipboard_sequence_number,
     get_clipboard_metadata,
     normalize_clipboard_item,
     read_clipboard_content,
+    set_clipboard_from_file,
     write_clipboard_content,
 )
 
@@ -68,6 +71,9 @@ class ClipboardManager:
         self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
         self._persisted_payloads: dict[tuple[str, str], list[str]] = {}
         self._last_processed_clipboard_sequence: Optional[int] = None
+        self._incoming_clipboard_handle: Optional[io.BufferedWriter] = None
+        self._incoming_clipboard_path: Optional[str] = None
+        self._incoming_clipboard_metadata: Optional[dict] = None
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -117,6 +123,9 @@ class ClipboardManager:
         msg_type = data.get('type')
         if msg_type == 'clipboard_data':
             self._handle_clipboard_data_message(peer, data)
+            return True
+        if msg_type == 'clipboard_data_chunk':
+            self._handle_clipboard_data_chunk(peer, data)
             return True
         if msg_type == 'clipboard_announce':
             self._handle_clipboard_announce_message(peer, data)
@@ -740,6 +749,149 @@ class ClipboardManager:
                 with self.clipboard_lock:
                     self.shared_clipboard_item = stored
 
+    def _reset_incoming_clipboard_transfer(self) -> None:
+        handle = self._incoming_clipboard_handle
+        if handle:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._incoming_clipboard_handle = None
+        self._incoming_clipboard_path = None
+        self._incoming_clipboard_metadata = None
+
+    def _handle_clipboard_data_chunk(self, sock, data: dict) -> None:
+        chunk = data.get('data')
+        if not isinstance(chunk, (bytes, bytearray, memoryview)):
+            logging.debug("Ignoring invalid clipboard chunk from %s", sock)
+            return
+
+        metadata = {
+            key: data.get(key)
+            for key in (
+                'format',
+                'encoding',
+                'size',
+                'digest',
+                'timestamp',
+                'length',
+                'width',
+                'height',
+                'bits_per_pixel',
+                'entries',
+                'file_count',
+                'total_size',
+            )
+            if key in data
+        }
+
+        fmt = metadata.get('format')
+        if not fmt:
+            logging.debug("Missing clipboard format in chunk from %s", sock)
+            return
+
+        if (
+            self._incoming_clipboard_metadata is None
+            or self._incoming_clipboard_metadata.get('digest') != metadata.get('digest')
+            or self._incoming_clipboard_metadata.get('format') != fmt
+        ):
+            self._reset_incoming_clipboard_transfer()
+            handle = None
+            path = None
+            try:
+                temp = tempfile.NamedTemporaryFile(
+                    suffix=".part", prefix="clipboard_", delete=False
+                )
+                handle = temp
+                path = temp.name
+            except Exception as exc:
+                logging.error("Failed to create clipboard temp file: %s", exc)
+                if handle:
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+                return
+
+            self._incoming_clipboard_handle = handle
+            self._incoming_clipboard_path = path
+            self._incoming_clipboard_metadata = metadata
+
+        if not self._incoming_clipboard_handle:
+            logging.debug("No clipboard temp file open for chunk from %s", sock)
+            return
+
+        try:
+            self._incoming_clipboard_handle.write(bytes(chunk))
+        except Exception as exc:
+            logging.error("Failed to write clipboard chunk: %s", exc, exc_info=True)
+            self._reset_incoming_clipboard_transfer()
+            return
+
+        if not data.get('last'):
+            return
+
+        handle = self._incoming_clipboard_handle
+        path = self._incoming_clipboard_path
+        metadata = self._incoming_clipboard_metadata or {}
+        self._reset_incoming_clipboard_transfer()
+
+        if not handle or not path:
+            return
+
+        try:
+            handle.flush()
+            handle.close()
+        except Exception:
+            pass
+
+        extension = ".bin"
+        encoding = metadata.get('encoding')
+        if fmt == 'text':
+            extension = ".txt"
+        elif fmt == 'image':
+            extension = ".png" if encoding == 'png' else ".dib"
+        elif fmt == 'files':
+            extension = ".zip"
+
+        base, _ = os.path.splitext(path)
+        final_path = f"{base}{extension}"
+        try:
+            os.replace(path, final_path)
+        except Exception as exc:
+            logging.error("Failed to finalize clipboard payload file: %s", exc)
+            return
+
+        try:
+            self._ignore_next_clipboard_change.set()
+            set_clipboard_from_file(final_path)
+        except Exception as exc:
+            logging.error("Failed to apply clipboard payload: %s", exc, exc_info=True)
+            return
+
+        stored: dict[str, Any] = {
+            'format': fmt,
+            'encoding': encoding,
+            'size': metadata.get('size'),
+            'digest': metadata.get('digest'),
+            'timestamp': metadata.get('timestamp', time.time()),
+        }
+        for key in (
+            'length',
+            'width',
+            'height',
+            'bits_per_pixel',
+            'entries',
+            'file_count',
+            'total_size',
+        ):
+            if key in metadata:
+                stored[key] = metadata[key]
+
+        self._remember_last_clipboard(stored)
+        with self.clipboard_lock:
+            self.shared_clipboard_item = stored
+
     def _handle_clipboard_clear_message(self, sock) -> None:
         role = self.settings.get('role')
         if role == 'ado':
@@ -754,13 +906,72 @@ class ClipboardManager:
         logging.debug("Stored remote clipboard metadata from %s: %s", sock, metadata)
 
     def _handle_clipboard_request_message(self, sock) -> None:
-        item = read_clipboard_content()
-        if not item:
+        metadata = get_clipboard_metadata()
+        if not metadata:
             logging.debug("No clipboard payload available to satisfy request from %s", sock)
             return
-        payload = self._build_clipboard_payload(item)
+
+        fmt = metadata.get('format')
+        if fmt in {'text', 'image'}:
+            item = read_clipboard_content()
+            if not item:
+                logging.debug("No clipboard payload available to satisfy request from %s", sock)
+                return
+            metadata = item
+        elif fmt == 'files' and not metadata.get('paths'):
+            item = read_clipboard_content()
+            if item:
+                metadata = item
+
+        if 'timestamp' not in metadata:
+            metadata['timestamp'] = time.time()
+
+        stream = create_clipboard_stream(metadata)
+        iterator = iter(stream)
+        try:
+            current = next(iterator)
+        except StopIteration:
+            logging.debug("Clipboard stream produced no data for %s", sock)
+            return
+
+        def _build_chunk_payload(chunk: bytes, *, last: bool) -> dict:
+            payload = {
+                'type': 'clipboard_data_chunk',
+                'format': metadata.get('format'),
+                'encoding': metadata.get('encoding'),
+                'size': metadata.get('size'),
+                'digest': metadata.get('digest'),
+                'timestamp': metadata.get('timestamp', time.time()),
+                'last': last,
+                'data': chunk,
+            }
+            for key in (
+                'length',
+                'width',
+                'height',
+                'bits_per_pixel',
+                'entries',
+                'file_count',
+                'total_size',
+            ):
+                if key in metadata:
+                    payload[key] = metadata[key]
+            return payload
+
+        for next_chunk in iterator:
+            payload = _build_chunk_payload(current, last=False)
+            if not self._send_data_callback(sock, payload):
+                logging.warning(
+                    "Failed to send clipboard chunk over data channel to %s", sock
+                )
+                return
+            current = next_chunk
+
+        payload = _build_chunk_payload(current, last=True)
         if not self._send_data_callback(sock, payload):
-            logging.warning("Failed to send clipboard payload over data channel to %s", sock)
+            logging.warning(
+                "Failed to send clipboard chunk over data channel to %s", sock
+            )
 
     # ------------------------------------------------------------------
     # Clipboard synchronisation loops
