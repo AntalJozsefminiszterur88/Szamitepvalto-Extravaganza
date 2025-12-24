@@ -10,6 +10,7 @@ import hashlib
 import io
 import logging
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -51,6 +52,19 @@ def _describe_clipboard_item(item: ClipboardItem) -> str:
                 preview = f"{preview[:37]}..."
             return f"text(len={len(text)} preview='{preview}')"
         return f"text(type={type(text)!r})"
+
+    if fmt == "html":
+        html = item.get("data", "")
+        if isinstance(html, str):
+            preview = html.replace("\n", "\\n")
+            if len(preview) > 40:
+                preview = f"{preview[:37]}..."
+            return f"html(len={len(html)} preview='{preview}')"
+        if isinstance(html, (bytes, bytearray, memoryview)):
+            raw = bytes(html)
+            digest = hashlib.sha256(raw).hexdigest()[:12]
+            return f"html(size={len(raw)}, sha256={digest})"
+        return f"html(type={type(html)!r})"
 
     if fmt == "image":
         encoding = item.get("encoding", "unknown")
@@ -101,6 +115,8 @@ def _describe_clipboard_item(item: ClipboardItem) -> str:
 
 
 CF_PNG = None
+CF_HTML = None
+CF_TEXTHTML = None
 CFSTR_PREFERREDDROPEFFECT = None
 DROPEFFECT_COPY = 0x0001
 DROPEFFECT_MOVE = 0x0002
@@ -112,6 +128,14 @@ if win32clipboard is not None:  # pragma: no cover - Windows specifikus
         CF_PNG = win32clipboard.RegisterClipboardFormat("PNG")
     except Exception:  # pragma: no cover - régebbi Windows verziók
         CF_PNG = None
+    try:
+        CF_HTML = win32clipboard.RegisterClipboardFormat("HTML Format")
+    except Exception:  # pragma: no cover - régebbi Windows verziók
+        CF_HTML = None
+    try:
+        CF_TEXTHTML = win32clipboard.RegisterClipboardFormat("text/html")
+    except Exception:  # pragma: no cover - régebbi Windows verziók
+        CF_TEXTHTML = None
     try:
         CFSTR_PREFERREDDROPEFFECT = win32clipboard.RegisterClipboardFormat(
             "Preferred DropEffect"
@@ -193,6 +217,19 @@ def _describe_clipboard_item(item: ClipboardItem) -> str:
                 preview = f"{preview[:37]}..."
             return f"text(len={len(text)} preview='{preview}')"
         return f"text(type={type(text)!r})"
+
+    if fmt == "html":
+        html = item.get("data", "")
+        if isinstance(html, str):
+            preview = html.replace("\n", "\\n")
+            if len(preview) > 40:
+                preview = f"{preview[:37]}..."
+            return f"html(len={len(html)} preview='{preview}')"
+        if isinstance(html, (bytes, bytearray, memoryview)):
+            raw = bytes(html)
+            digest = hashlib.sha256(raw).hexdigest()[:12]
+            return f"html(size={len(raw)}, sha256={digest})"
+        return f"html(type={type(html)!r})"
 
     if fmt == "image":
         encoding = item.get("encoding", "unknown")
@@ -336,6 +373,27 @@ def _win32_clipboard_has_move_effect() -> bool:
     except struct.error:
         return False
     return bool(effect & DROPEFFECT_MOVE)
+
+
+def _win32_get_html_clipboard_bytes() -> Optional[bytes]:
+    if win32clipboard is None:
+        return None
+    if CF_HTML is None and CF_TEXTHTML is None:
+        return None
+    try:
+        if _win32_open_clipboard(retries=8, delay=0.03, backoff=1.6):
+            try:
+                for fmt in (CF_HTML, CF_TEXTHTML):
+                    if fmt and win32clipboard.IsClipboardFormatAvailable(fmt):
+                        raw = win32clipboard.GetClipboardData(fmt)
+                        raw_bytes = _win32_clipboard_object_to_bytes(raw, fmt)
+                        if raw_bytes:
+                            return raw_bytes
+            finally:
+                _win32_close_clipboard()
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.debug("Failed to read HTML clipboard payload: %s", exc, exc_info=True)
+    return None
 
 
 def _win32_bytes_to_handle(data: bytes) -> int:
@@ -650,9 +708,14 @@ def _iter_file_chunks(handle: Any, chunk_size: int) -> Iterable[bytes]:
 
 
 def create_clipboard_stream(
-    metadata: ClipboardItem, *, chunk_size: int = 256 * 1024
+    metadata: ClipboardItem,
+    requested_format: Optional[str] = None,
+    *,
+    chunk_size: int = 256 * 1024,
 ) -> Iterable[bytes]:
-    fmt = metadata.get("format")
+    fmt = requested_format or metadata.get("format")
+    if fmt:
+        metadata["format"] = fmt
     if fmt == "text":
         text = metadata.get("data")
         if text is None:
@@ -669,6 +732,28 @@ def create_clipboard_stream(
                 "size": len(raw),
                 "length": len(str(text)),
                 "digest": _compute_digest("text", "utf-8", raw),
+            }
+        )
+        return _iter_bytes(raw, chunk_size)
+
+    if fmt == "html":
+        data = metadata.get("data")
+        raw: Optional[bytes] = None
+        if data is None:
+            raw = _win32_get_html_clipboard_bytes()
+        else:
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                raw = _ensure_bytes(data)
+            else:
+                raw = str(data).encode("utf-8")
+        if raw is None:
+            return []
+        raw = _strip_html_clipboard_header(raw)
+        metadata.update(
+            {
+                "encoding": "utf-8",
+                "size": len(raw),
+                "digest": _compute_digest("html", "utf-8", raw),
             }
         )
         return _iter_bytes(raw, chunk_size)
@@ -930,6 +1015,74 @@ def _extract_image_metadata(item: ClipboardItem, raw: bytes) -> None:
         item["height"] = int(height)
 
 
+def _strip_html_clipboard_header(raw: bytes) -> bytes:
+    if not raw:
+        return raw
+    try:
+        header_text = raw.decode("ascii", errors="ignore")
+    except Exception:
+        return raw
+    start_match = re.search(r"StartHTML:(\d+)", header_text)
+    end_match = re.search(r"EndHTML:(\d+)", header_text)
+    if not start_match or not end_match:
+        return raw
+    try:
+        start = int(start_match.group(1))
+        end = int(end_match.group(1))
+    except ValueError:
+        return raw
+    if start < 0 or end <= start or end > len(raw):
+        return raw
+    return raw[start:end]
+
+
+def _wrap_html_fragment(html: bytes) -> bytes:
+    if b"<!--StartFragment-->" in html and b"<!--EndFragment-->" in html:
+        return html
+    return (
+        b"<html><body><!--StartFragment-->"
+        + html
+        + b"<!--EndFragment--></body></html>"
+    )
+
+
+def _build_html_clipboard_payload(html: bytes) -> bytes:
+    html_payload = _wrap_html_fragment(html)
+    header_template = (
+        "Version:0.9\r\n"
+        "StartHTML:{start_html:010d}\r\n"
+        "EndHTML:{end_html:010d}\r\n"
+        "StartFragment:{start_fragment:010d}\r\n"
+        "EndFragment:{end_fragment:010d}\r\n"
+    )
+    placeholder_header = header_template.format(
+        start_html=0,
+        end_html=0,
+        start_fragment=0,
+        end_fragment=0,
+    ).encode("ascii")
+    start_html = len(placeholder_header)
+    start_fragment_marker = b"<!--StartFragment-->"
+    end_fragment_marker = b"<!--EndFragment-->"
+    fragment_start = html_payload.find(start_fragment_marker)
+    fragment_end = html_payload.find(end_fragment_marker)
+    if fragment_start == -1 or fragment_end == -1:
+        fragment_start = 0
+        fragment_end = len(html_payload)
+    else:
+        fragment_start += len(start_fragment_marker)
+    start_fragment = start_html + fragment_start
+    end_fragment = start_html + fragment_end
+    end_html = start_html + len(html_payload)
+    header = header_template.format(
+        start_html=start_html,
+        end_html=end_html,
+        start_fragment=start_fragment,
+        end_fragment=end_fragment,
+    ).encode("ascii")
+    return header + html_payload
+
+
 def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[ClipboardItem]:
     """Közös reprezentációra hozza a vágólap elemeit."""
 
@@ -942,7 +1095,7 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
         return None
 
     fmt = item.get("format")
-    if fmt not in {"text", "image", "files"}:
+    if fmt not in {"text", "html", "image", "files"}:
         return None
 
     logging.info(f"Processing format: {fmt}")
@@ -976,6 +1129,32 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
                 "digest": _compute_digest("text", "utf-8", raw),
             }
         )
+        return normalized
+
+    if fmt == "html":
+        html = item.get("data")
+        if html is None:
+            return None
+        raw_bytes: bytes
+        if isinstance(html, (bytes, bytearray, memoryview)):
+            raw_bytes = _ensure_bytes(html)
+        else:
+            if not isinstance(html, str):
+                try:
+                    html = str(html)
+                except Exception:
+                    return None
+            raw_bytes = html.encode("utf-8")
+        normalized.update(
+            {
+                "data": html,
+                "encoding": "utf-8",
+                "size": len(raw_bytes),
+                "digest": _compute_digest("html", "utf-8", raw_bytes),
+            }
+        )
+        if isinstance(html, str):
+            normalized["length"] = len(html)
         return normalized
 
     if fmt == "image":
@@ -1186,20 +1365,12 @@ def get_clipboard_metadata() -> Optional[ClipboardItem]:
         try:
             if _win32_open_clipboard(retries=8, delay=0.03, backoff=1.6):
                 try:
-                    if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
-                        data = win32clipboard.GetClipboardData(CF_PNG)
-                        return {
-                            "format": "image",
-                            "encoding": "png",
-                            "size": _win32_clipboard_object_size(data),
-                        }
-                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
-                        data = win32clipboard.GetClipboardData(win32con.CF_DIB)
-                        return {
-                            "format": "image",
-                            "encoding": "dib",
-                            "size": _win32_clipboard_object_size(data),
-                        }
+                    available_formats: list[str] = []
+                    file_list: list[str] = []
+                    image_info: Optional[dict[str, Any]] = None
+                    text_data: Optional[str] = None
+                    html_available = False
+
                     if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
                         try:
                             paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
@@ -1213,15 +1384,63 @@ def get_clipboard_metadata() -> Optional[ClipboardItem]:
                             else:
                                 file_list = list(paths) if paths else []
                                 if file_list:
-                                    return _build_files_metadata(file_list)
+                                    available_formats.append("files")
+
+                    if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
+                        data = win32clipboard.GetClipboardData(CF_PNG)
+                        image_info = {
+                            "format": "image",
+                            "encoding": "png",
+                            "size": _win32_clipboard_object_size(data),
+                        }
+                        available_formats.append("image")
+                    elif win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                        data = win32clipboard.GetClipboardData(win32con.CF_DIB)
+                        image_info = {
+                            "format": "image",
+                            "encoding": "dib",
+                            "size": _win32_clipboard_object_size(data),
+                        }
+                        available_formats.append("image")
+
+                    for fmt in (CF_HTML, CF_TEXTHTML):
+                        if fmt and win32clipboard.IsClipboardFormatAvailable(fmt):
+                            html_available = True
+                            break
+                    if html_available:
+                        available_formats.append("html")
+
                     if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
                         text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
                         if text:
-                            return {"format": "text", "data": str(text)}
+                            text_data = str(text)
+                            available_formats.append("text")
+
+                    if available_formats:
+                        priority = ("files", "image", "html", "text")
+                        selected = next(
+                            (fmt for fmt in priority if fmt in available_formats),
+                            available_formats[0],
+                        )
+                        metadata: ClipboardItem = {
+                            "format": selected,
+                            "available_formats": available_formats,
+                        }
+                        if selected == "files" and file_list:
+                            metadata.update(_build_files_metadata(file_list))
+                        elif selected == "image" and image_info:
+                            metadata.update(image_info)
+                        elif selected == "text" and text_data:
+                            metadata["data"] = text_data
+                        return metadata
                 finally:
                     _win32_close_clipboard()
         except Exception as exc:
-            logging.error("Failed to read clipboard metadata through win32 API: %s", exc, exc_info=True)
+            logging.error(
+                "Failed to read clipboard metadata through win32 API: %s",
+                exc,
+                exc_info=True,
+            )
 
     try:
         content = pyperclip.paste()
@@ -1235,7 +1454,7 @@ def get_clipboard_metadata() -> Optional[ClipboardItem]:
         logging.error("Failed to access clipboard via pyperclip: %s", e)
         return None
     if content:
-        return {"format": "text", "data": str(content)}
+        return {"format": "text", "data": str(content), "available_formats": ["text"]}
     return None
 
 
@@ -1323,13 +1542,23 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
     return None
 
 
-def set_clipboard_from_file(path: str) -> None:
+def set_clipboard_from_file(path: str, fmt: Optional[str] = None) -> None:
     if not path or not os.path.exists(path):
         logging.debug("Clipboard payload file does not exist: %s", path)
         return
 
     _, ext = os.path.splitext(path)
     extension = ext.lower()
+
+    if fmt == "html" or extension == ".html":
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except Exception as exc:
+            logging.error("Failed to read clipboard HTML payload %s: %s", path, exc)
+            return
+        write_clipboard_content({"format": "html", "data": raw})
+        return
 
     if extension == ".txt":
         try:
@@ -1398,6 +1627,19 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                         win32clipboard.SetClipboardData(
                             win32con.CF_UNICODETEXT, normalized["data"]
                         )
+                    elif fmt == "html":
+                        html_data = normalized.get("data", "")
+                        if isinstance(html_data, (bytes, bytearray, memoryview)):
+                            html_bytes = _ensure_bytes(html_data)
+                        else:
+                            html_bytes = str(html_data).encode("utf-8")
+                        payload = _build_html_clipboard_payload(html_bytes)
+                        if CF_HTML is None and CF_TEXTHTML is None:
+                            raise ValueError("HTML clipboard format is not available.")
+                        target_fmt = CF_HTML or CF_TEXTHTML
+                        if target_fmt is None:
+                            raise ValueError("HTML clipboard format is not available.")
+                        _win32_set_clipboard_bytes(target_fmt, payload)
                     elif fmt == "image":
                         encoding = normalized.get("encoding") or "dib"
                         if encoding == "dib":
@@ -1446,12 +1688,21 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
         return
 
     # Fallback – csak szöveg támogatott
-    if fmt != "text":
+    if fmt not in {"text", "html"}:
         logging.info(
             "Non-text clipboard item ignored on non-Windows platform: %s",
             _describe_clipboard_item(normalized),
         )
         return
+
+    if fmt == "html":
+        html_data = normalized.get("data", "")
+        if isinstance(html_data, (bytes, bytearray, memoryview)):
+            html_text = _ensure_bytes(html_data).decode("utf-8", errors="replace")
+        else:
+            html_text = str(html_data)
+        normalized["data"] = html_text
+        fmt = "text"
 
     for attempt in range(retries):
         try:
