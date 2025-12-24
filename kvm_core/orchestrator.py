@@ -196,7 +196,6 @@ class KVMOrchestrator(QObject):
         self.clipboard_manager = ClipboardManager(
             self.settings,
             _broadcast_clipboard,
-            send_data_callback=self.peer_manager.send_data,
             send_to_peer_callback=self.peer_manager.send_to_peer,
             get_server_socket=lambda: self.server_socket,
             send_to_provider_callback=self._send_to_provider,
