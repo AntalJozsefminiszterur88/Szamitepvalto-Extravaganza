@@ -297,13 +297,37 @@ class PeerManager:
         connection = self._resolve_connection(peer)
         if connection is None:
             return False
-        return connection.send(message)
+        peer_name = getattr(connection, "peer_name", peer)
+        try:
+            sent = connection.send(message)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logging.warning(
+                "Failed to send to peer %s. Buffer full?.",
+                peer_name,
+            )
+            logging.debug("Send error for peer %s: %s", peer_name, exc, exc_info=True)
+            return False
+        if not sent:
+            logging.warning("Failed to send to peer %s. Buffer full?.", peer_name)
+        return sent
 
     def send_data(self, peer, data) -> bool:
         data_connection = self._resolve_data_connection(peer)
         if data_connection is None:
             return False
-        return data_connection.send_data(data)
+        peer_name = getattr(data_connection, "peer_name", peer)
+        try:
+            sent = data_connection.send_data(data)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logging.warning(
+                "Failed to send to peer %s. Buffer full?.",
+                peer_name,
+            )
+            logging.debug("Send data error for peer %s: %s", peer_name, exc, exc_info=True)
+            return False
+        if not sent:
+            logging.warning("Failed to send to peer %s. Buffer full?.", peer_name)
+        return sent
 
     # ------------------------------------------------------------------
     # Server components
