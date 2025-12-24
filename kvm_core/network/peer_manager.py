@@ -301,10 +301,7 @@ class PeerManager:
         try:
             sent = connection.send(message)
         except Exception as exc:  # pragma: no cover - defensive guard
-            logging.warning(
-                "Failed to send to peer %s. Buffer full?.",
-                peer_name,
-            )
+            logging.error("Failed to send to peer %s.", peer_name)
             logging.debug("Send error for peer %s: %s", peer_name, exc, exc_info=True)
             return False
         if not sent:
@@ -319,10 +316,7 @@ class PeerManager:
         try:
             sent = data_connection.send_data(data)
         except Exception as exc:  # pragma: no cover - defensive guard
-            logging.warning(
-                "Failed to send to peer %s. Buffer full?.",
-                peer_name,
-            )
+            logging.error("Failed to send to peer %s.", peer_name)
             logging.debug("Send data error for peer %s: %s", peer_name, exc, exc_info=True)
             return False
         if not sent:

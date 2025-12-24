@@ -876,7 +876,6 @@ class ClipboardManager:
         try:
             self._ignore_next_clipboard_change.set()
             set_clipboard_from_file(final_path, fmt)
-            self._write_cooldown = time.time() + 1.5
         except Exception as exc:
             logging.error("Failed to apply clipboard payload: %s", exc, exc_info=True)
             return
@@ -901,7 +900,9 @@ class ClipboardManager:
                 stored[key] = metadata[key]
 
         self._remember_last_clipboard(stored)
+        self.last_clipboard_item = stored.copy()
         self._last_clipboard_metadata = stored.copy()
+        self._write_cooldown = time.time() + 1.5
         with self.clipboard_lock:
             self.shared_clipboard_item = stored
 
@@ -1016,13 +1017,13 @@ class ClipboardManager:
     def _clipboard_loop_server(self) -> None:
         logging.info("Clipboard server loop started.")
         while self._running.is_set():
+            if time.time() < self._write_cooldown:
+                time.sleep(0.1)
+                continue
             if self._ignore_next_clipboard_change.is_set():
                 self._ignore_next_clipboard_change.clear()
                 self._refresh_clipboard_sequence_marker()
                 time.sleep(0.5)
-                continue
-            if time.time() < self._write_cooldown:
-                time.sleep(0.3)
                 continue
 
             sequence = get_clipboard_sequence_number()
@@ -1033,11 +1034,7 @@ class ClipboardManager:
                     continue
                 previous_sequence = self._last_clipboard_sequence
                 self._last_clipboard_sequence = sequence
-                logging.info(
-                    "Local clipboard changed. Sequence: %s -> %s. Checking duplicates...",
-                    previous_sequence,
-                    sequence,
-                )
+                logging.info("Local clipboard changed. Checking for duplicates...")
 
             metadata = get_clipboard_metadata()
             if metadata:
@@ -1118,13 +1115,13 @@ class ClipboardManager:
     def _clipboard_loop_client(self) -> None:
         logging.info("Clipboard client loop started.")
         while self._running.is_set():
+            if time.time() < self._write_cooldown:
+                time.sleep(0.1)
+                continue
             if self._ignore_next_clipboard_change.is_set():
                 self._ignore_next_clipboard_change.clear()
                 self._refresh_clipboard_sequence_marker()
                 time.sleep(0.5)
-                continue
-            if time.time() < self._write_cooldown:
-                time.sleep(0.3)
                 continue
 
             sequence = get_clipboard_sequence_number()
@@ -1134,11 +1131,7 @@ class ClipboardManager:
                     continue
                 previous_sequence = self._last_clipboard_sequence
                 self._last_clipboard_sequence = sequence
-                logging.info(
-                    "Local clipboard changed. Sequence: %s -> %s. Checking duplicates...",
-                    previous_sequence,
-                    sequence,
-                )
+                logging.info("Local clipboard changed. Checking for duplicates...")
 
             metadata = get_clipboard_metadata()
             if metadata:

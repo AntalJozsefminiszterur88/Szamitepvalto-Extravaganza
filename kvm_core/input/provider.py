@@ -81,27 +81,16 @@ class InputProvider:
     # Internal helpers
     # ------------------------------------------------------------------
     def _send_event(self, payload: dict) -> bool:
-        attempts = 3
-        last_error: Optional[Exception] = None
-        for _ in range(attempts):
-            try:
-                result = self._send_callback(payload)
-            except Exception as exc:  # pragma: no cover - defensive guard
-                last_error = exc
-                result = False
-            if result:
-                self._send_failure_count = 0
-                return True
-            time.sleep(self._send_retry_delay)
+        try:
+            result = self._send_callback(payload)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logging.error("Provider callback raised %s", exc, exc_info=True)
+            result = False
+        if result:
+            self._send_failure_count = 0
+            return True
         self._send_failure_count += 1
-        if last_error is not None:
-            logging.error("Provider callback raised %s", last_error, exc_info=True)
-        if self._send_failure_count >= self._max_send_failures:
-            logging.warning(
-                "Stopping input provider after %d consecutive send failures.",
-                self._send_failure_count,
-            )
-            self._stop_event.set()
+        logging.warning("Failed to send input event, dropping frame.")
         return False
 
     def _aggregator_loop(self) -> None:
@@ -113,9 +102,7 @@ class InputProvider:
                 self._pending_move['dx'] = 0
                 self._pending_move['dy'] = 0
             if dx or dy:
-                if not self._send_event({'type': 'move_relative', 'dx': dx, 'dy': dy}):
-                    if self._stop_event.is_set():
-                        break
+                self._send_event({'type': 'move_relative', 'dx': dx, 'dy': dy})
 
     def _queue_relative_move(self, dx: int, dy: int) -> None:
         with self._movement_lock:
