@@ -924,6 +924,15 @@ class ClipboardManager:
             metadata['selected_format'] = selected_format
         self.remote_clipboard_metadata = metadata
         logging.debug("Stored remote clipboard metadata from %s: %s", sock, metadata)
+        if not selected_format:
+            return
+        logging.info("Auto-requesting clipboard data...")
+        request_payload = {
+            'type': 'clipboard_request',
+            'requested_format': selected_format,
+            'timestamp': metadata.get('timestamp', time.time()),
+        }
+        self._send_to_peer_callback(sock, request_payload)
 
     def _handle_clipboard_request_message(self, sock, data: dict) -> None:
         metadata = get_clipboard_metadata()
