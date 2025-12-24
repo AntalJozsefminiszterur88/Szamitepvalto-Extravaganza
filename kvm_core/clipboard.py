@@ -131,7 +131,7 @@ class ClipboardManager:
             self._handle_clipboard_announce_message(peer, data)
             return True
         if msg_type == 'clipboard_request':
-            self._handle_clipboard_request_message(peer)
+            self._handle_clipboard_request_message(peer, data)
             return True
         if msg_type == 'clipboard_clear':
             self._handle_clipboard_clear_message(peer)
@@ -643,7 +643,14 @@ class ClipboardManager:
             'format': metadata.get('format'),
             'timestamp': ts,
         }
-        for key in ('encoding', 'size', 'file_count', 'total_size', 'files_preview'):
+        for key in (
+            'available_formats',
+            'encoding',
+            'size',
+            'file_count',
+            'total_size',
+            'files_preview',
+        ):
             if key in metadata:
                 payload[key] = metadata[key]
         return payload
@@ -849,6 +856,8 @@ class ClipboardManager:
         encoding = metadata.get('encoding')
         if fmt == 'text':
             extension = ".txt"
+        elif fmt == 'html':
+            extension = ".html"
         elif fmt == 'image':
             extension = ".png" if encoding == 'png' else ".dib"
         elif fmt == 'files':
@@ -864,7 +873,7 @@ class ClipboardManager:
 
         try:
             self._ignore_next_clipboard_change.set()
-            set_clipboard_from_file(final_path)
+            set_clipboard_from_file(final_path, fmt)
         except Exception as exc:
             logging.error("Failed to apply clipboard payload: %s", exc, exc_info=True)
             return
@@ -902,31 +911,46 @@ class ClipboardManager:
 
     def _handle_clipboard_announce_message(self, sock, data: dict) -> None:
         metadata = {key: value for key, value in data.items() if key != 'type'}
+        available_formats = metadata.get('available_formats')
+        if not isinstance(available_formats, list):
+            fmt = metadata.get('format')
+            available_formats = [fmt] if fmt else []
+        priority = ('files', 'image', 'html', 'text')
+        selected_format = next(
+            (fmt for fmt in priority if fmt in available_formats),
+            available_formats[0] if available_formats else None,
+        )
+        if selected_format:
+            metadata['selected_format'] = selected_format
         self.remote_clipboard_metadata = metadata
         logging.debug("Stored remote clipboard metadata from %s: %s", sock, metadata)
 
-    def _handle_clipboard_request_message(self, sock) -> None:
+    def _handle_clipboard_request_message(self, sock, data: dict) -> None:
         metadata = get_clipboard_metadata()
         if not metadata:
             logging.debug("No clipboard payload available to satisfy request from %s", sock)
             return
 
+        requested_format = data.get('requested_format') or data.get('format')
         fmt = metadata.get('format')
-        if fmt in {'text', 'image'}:
+        if fmt in {'text', 'image', 'html'}:
             item = read_clipboard_content()
-            if not item:
-                logging.debug("No clipboard payload available to satisfy request from %s", sock)
-                return
-            metadata = item
+            if item:
+                metadata = item
         elif fmt == 'files' and not metadata.get('paths'):
             item = read_clipboard_content()
             if item:
                 metadata = item
 
+        if requested_format and metadata.get('available_formats'):
+            available_formats = metadata.get('available_formats')
+            if isinstance(available_formats, list) and requested_format not in available_formats:
+                requested_format = metadata.get('format')
+
         if 'timestamp' not in metadata:
             metadata['timestamp'] = time.time()
 
-        stream = create_clipboard_stream(metadata)
+        stream = create_clipboard_stream(metadata, requested_format=requested_format)
         iterator = iter(stream)
         try:
             current = next(iterator)
@@ -1026,7 +1050,7 @@ class ClipboardManager:
                             clients = list(self._get_client_sockets())
                             if clients:
                                 self._broadcast_callback(payload, exclude)
-                elif fmt in {'image', 'files'}:
+                elif fmt in {'image', 'files', 'html'}:
                     now = time.time()
                     metadata['timestamp'] = now
                     is_duplicate = metadata == self._last_clipboard_metadata
@@ -1098,7 +1122,7 @@ class ClipboardManager:
                                 payload = self._build_clipboard_payload(item)
                                 if not self._send_to_peer_callback(sock, payload):
                                     logging.warning("Failed to send clipboard update to server.")
-                elif fmt in {'image', 'files'}:
+                elif fmt in {'image', 'files', 'html'}:
                     now = time.time()
                     metadata['timestamp'] = now
                     is_duplicate = metadata == self._last_clipboard_metadata
