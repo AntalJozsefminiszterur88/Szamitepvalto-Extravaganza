@@ -15,14 +15,15 @@ from utils.path_helpers import resolve_documents_directory
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
-    create_clipboard_stream,
     get_clipboard_sequence_number,
     get_clipboard_metadata,
     normalize_clipboard_item,
+    pack_files_to_zip,
     read_clipboard_content,
     set_clipboard_from_file,
     write_clipboard_content,
 )
+from utils.clipboard_http import ClipboardHTTPServer, download_file
 
 CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
 CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
@@ -75,6 +76,7 @@ class ClipboardManager:
         self._incoming_clipboard_path: Optional[str] = None
         self._incoming_clipboard_metadata: Optional[dict] = None
         self._write_cooldown: float = 0.0
+        self._clipboard_http_server: Optional[ClipboardHTTPServer] = None
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -651,7 +653,7 @@ class ClipboardManager:
             'size',
             'file_count',
             'total_size',
-            'files_preview',
+            'files',
         ):
             if key in metadata:
                 payload[key] = metadata[key]
@@ -710,6 +712,9 @@ class ClipboardManager:
         return self._build_clipboard_payload(item)
 
     def _handle_clipboard_data_message(self, sock, data: dict, *, from_local: bool = False) -> None:
+        if data.get('format') == 'files' and data.get('download_url'):
+            self._handle_clipboard_http_download(data)
+            return
         item = normalize_clipboard_item(data)
         if not item:
             logging.debug("Ignoring invalid clipboard payload from %s", sock)
@@ -768,6 +773,87 @@ class ClipboardManager:
         self._incoming_clipboard_handle = None
         self._incoming_clipboard_path = None
         self._incoming_clipboard_metadata = None
+
+    def _get_clipboard_http_server(self) -> ClipboardHTTPServer:
+        if self._clipboard_http_server is None:
+            self._clipboard_http_server = ClipboardHTTPServer()
+        return self._clipboard_http_server
+
+    def _handle_clipboard_http_download(self, data: dict) -> None:
+        url = data.get('download_url')
+        if not isinstance(url, str) or not url:
+            logging.debug("Missing download URL for clipboard files.")
+            return
+
+        metadata = {
+            key: data.get(key)
+            for key in (
+                'encoding',
+                'size',
+                'digest',
+                'timestamp',
+                'entries',
+                'file_count',
+                'total_size',
+            )
+            if key in data
+        }
+        metadata['format'] = 'files'
+
+        temp = None
+        try:
+            temp = tempfile.NamedTemporaryFile(
+                suffix=".zip", prefix="clipboard_http_", delete=False
+            )
+            target_path = temp.name
+        except Exception as exc:
+            logging.error("Failed to create download target for clipboard files: %s", exc)
+            if temp:
+                try:
+                    temp.close()
+                except Exception:
+                    pass
+            return
+        finally:
+            if temp:
+                try:
+                    temp.close()
+                except Exception:
+                    pass
+
+        def _apply_download() -> None:
+            download_thread = download_file(url, target_path)
+            download_thread.join()
+            if not os.path.exists(target_path):
+                return
+            try:
+                self._ignore_next_clipboard_change.set()
+                set_clipboard_from_file(target_path, 'files')
+            except Exception as exc:
+                logging.error("Failed to apply downloaded clipboard files: %s", exc, exc_info=True)
+                return
+
+            stored: dict[str, Any] = {
+                'format': 'files',
+                'encoding': metadata.get('encoding', 'zip'),
+                'size': metadata.get('size'),
+                'digest': metadata.get('digest'),
+                'timestamp': metadata.get('timestamp', time.time()),
+            }
+            for key in ('entries', 'file_count', 'total_size'):
+                if key in metadata:
+                    stored[key] = metadata[key]
+
+            self._remember_last_clipboard(stored)
+            self.last_clipboard_item = stored.copy()
+            self._last_clipboard_metadata = stored.copy()
+            self._write_cooldown = time.time() + 1.5
+            with self.clipboard_lock:
+                self.shared_clipboard_item = stored
+
+        threading.Thread(
+            target=_apply_download, name="ClipboardHTTPApply", daemon=True
+        ).start()
 
     def _handle_clipboard_data_chunk(self, sock, data: dict) -> None:
         chunk = data.get('data')
@@ -964,52 +1050,53 @@ class ClipboardManager:
         if 'timestamp' not in metadata:
             metadata['timestamp'] = time.time()
 
-        stream = create_clipboard_stream(metadata, requested_format=requested_format)
-        iterator = iter(stream)
-        try:
-            current = next(iterator)
-        except StopIteration:
-            logging.debug("Clipboard stream produced no data for %s", sock)
+        fmt = metadata.get('format')
+        if fmt == 'files':
+            paths = metadata.get('paths')
+            if not paths:
+                item = read_clipboard_content()
+                if item:
+                    paths = item.get('paths')
+            if not paths:
+                logging.debug("No clipboard files to package for %s", sock)
+                return
+            packaged = pack_files_to_zip(paths)
+            if not packaged:
+                logging.debug("Failed to package clipboard files for %s", sock)
+                return
+            server = self._get_clipboard_http_server()
+            try:
+                download_url = server.serve_file(packaged['path'])
+            except Exception as exc:
+                logging.error("Failed to serve clipboard zip via HTTP: %s", exc)
+                return
+            payload = {
+                'type': 'clipboard_data',
+                'format': 'files',
+                'encoding': packaged.get('encoding'),
+                'size': packaged.get('size'),
+                'digest': packaged.get('digest'),
+                'timestamp': metadata.get('timestamp', time.time()),
+                'entries': packaged.get('entries'),
+                'file_count': packaged.get('file_count'),
+                'total_size': packaged.get('total_size'),
+                'download_url': download_url,
+            }
+            if not self._send_to_peer_callback(sock, payload):
+                logging.warning("Failed to send clipboard HTTP payload to %s", sock)
             return
 
-        def _build_chunk_payload(chunk: bytes, *, last: bool) -> dict:
-            payload = {
-                'type': 'clipboard_data_chunk',
-                'format': metadata.get('format'),
-                'encoding': metadata.get('encoding'),
-                'size': metadata.get('size'),
-                'digest': metadata.get('digest'),
-                'timestamp': metadata.get('timestamp', time.time()),
-                'last': last,
-                'data': chunk,
-            }
-            for key in (
-                'length',
-                'width',
-                'height',
-                'bits_per_pixel',
-                'entries',
-                'file_count',
-                'total_size',
-            ):
-                if key in metadata:
-                    payload[key] = metadata[key]
-            return payload
-
-        for next_chunk in iterator:
-            payload = _build_chunk_payload(current, last=False)
-            if not self._send_data_callback(sock, payload):
-                logging.warning(
-                    "Failed to send clipboard chunk over data channel to %s", sock
-                )
-                return
-            current = next_chunk
-
-        payload = _build_chunk_payload(current, last=True)
-        if not self._send_data_callback(sock, payload):
-            logging.warning(
-                "Failed to send clipboard chunk over data channel to %s", sock
-            )
+        item = read_clipboard_content()
+        if not item:
+            logging.debug("Clipboard read produced no data for %s", sock)
+            return
+        if requested_format:
+            item['format'] = requested_format
+        if 'timestamp' not in item:
+            item['timestamp'] = metadata.get('timestamp', time.time())
+        payload = self._build_clipboard_payload(item)
+        if not self._send_to_peer_callback(sock, payload):
+            logging.warning("Failed to send clipboard payload to %s", sock)
 
     # ------------------------------------------------------------------
     # Clipboard synchronisation loops

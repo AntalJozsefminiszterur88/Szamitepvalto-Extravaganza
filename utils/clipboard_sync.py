@@ -690,186 +690,69 @@ def _compute_file_payload_digest_from_file(file_obj: Any) -> str:
     return hasher.hexdigest()
 
 
-def _iter_bytes(data: bytes, chunk_size: int) -> Iterable[bytes]:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
-    for offset in range(0, len(data), chunk_size):
-        yield data[offset : offset + chunk_size]
+def pack_files_to_zip(paths: Sequence[str]) -> Optional[dict[str, Any]]:
+    info = _build_clipboard_file_metadata(paths)
+    if not info:
+        return None
 
+    plan = info["plan"]
+    entries = info["entries"]
+    file_count = info["file_count"]
+    total_size = info["total_size"]
 
-def _iter_file_chunks(handle: Any, chunk_size: int) -> Iterable[bytes]:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be positive")
-    while True:
-        chunk = handle.read(chunk_size)
-        if not chunk:
-            break
-        yield chunk
+    temp_dir = tempfile.mkdtemp(prefix="clipboard_files_")
+    zip_path = os.path.join(temp_dir, "clipboard_content.zip")
 
-
-def create_clipboard_stream(
-    metadata: ClipboardItem,
-    requested_format: Optional[str] = None,
-    *,
-    chunk_size: int = 256 * 1024,
-) -> Iterable[bytes]:
-    fmt = requested_format or metadata.get("format")
-    if fmt:
-        metadata["format"] = fmt
-    if fmt == "text":
-        text = metadata.get("data")
-        if text is None:
-            item = read_clipboard_content()
-            if not item or item.get("format") != "text":
-                return []
-            text = item.get("data")
-        if text is None:
-            return []
-        raw = str(text).encode("utf-8")
-        metadata.update(
-            {
-                "encoding": "utf-8",
-                "size": len(raw),
-                "length": len(str(text)),
-                "digest": _compute_digest("text", "utf-8", raw),
-            }
-        )
-        return _iter_bytes(raw, chunk_size)
-
-    if fmt == "html":
-        data = metadata.get("data")
-        raw: Optional[bytes] = None
-        if data is None:
-            raw = _win32_get_html_clipboard_bytes()
-        else:
-            if isinstance(data, (bytes, bytearray, memoryview)):
-                raw = _ensure_bytes(data)
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for item in plan:
+            root_name = item["root_name"]
+            base_path = item["path"]
+            if item["is_dir"]:
+                for root, _, files in os.walk(base_path):
+                    rel_dir = os.path.relpath(root, base_path)
+                    archive_root = (
+                        root_name
+                        if rel_dir in (".", os.curdir)
+                        else os.path.join(root_name, rel_dir).replace("\\", "/")
+                    )
+                    for filename in files:
+                        full_path = os.path.join(root, filename)
+                        arcname = os.path.join(archive_root, filename).replace("\\", "/")
+                        try:
+                            archive.write(full_path, arcname=arcname)
+                        except Exception as exc:
+                            logging.debug(
+                                "Failed to add %s to clipboard archive: %s",
+                                full_path,
+                                exc,
+                            )
+                            continue
             else:
-                raw = str(data).encode("utf-8")
-        if raw is None:
-            return []
-        raw = _strip_html_clipboard_header(raw)
-        metadata.update(
-            {
-                "encoding": "utf-8",
-                "size": len(raw),
-                "digest": _compute_digest("html", "utf-8", raw),
-            }
-        )
-        return _iter_bytes(raw, chunk_size)
-
-    if fmt == "image":
-        data = metadata.get("data")
-        if data is None:
-            item = read_clipboard_content()
-            if not item or item.get("format") != "image":
-                return []
-            data = item.get("data")
-            if item.get("encoding"):
-                metadata["encoding"] = item.get("encoding")
-        if data is None:
-            return []
-        encoding = metadata.get("encoding") or "dib"
-        raw = _ensure_bytes(data)
-        metadata.update(
-            {
-                "encoding": encoding,
-                "size": len(raw),
-                "digest": _compute_digest("image", encoding, raw),
-            }
-        )
-        _extract_image_metadata(metadata, raw)
-        return _iter_bytes(raw, chunk_size)
-
-    if fmt == "files":
-        paths = metadata.get("paths") or _coerce_path_list(metadata.get("data"))
-        if not paths:
-            return []
-        info = _build_clipboard_file_metadata(paths)
-        if not info:
-            return []
-
-        plan = info["plan"]
-        entries = info["entries"]
-        file_count = info["file_count"]
-        total_size = info["total_size"]
-
-        temp_file = tempfile.TemporaryFile()
-
-        def _file_stream() -> Iterable[bytes]:
-            try:
-                with zipfile.ZipFile(
-                    temp_file, "w", compression=zipfile.ZIP_DEFLATED
-                ) as archive:
-                    for item in plan:
-                        root_name = item["root_name"]
-                        base_path = item["path"]
-                        if item["is_dir"]:
-                            for root, _, files in os.walk(base_path):
-                                rel_dir = os.path.relpath(root, base_path)
-                                archive_root = (
-                                    root_name
-                                    if rel_dir in (".", os.curdir)
-                                    else os.path.join(root_name, rel_dir).replace(
-                                        "\\", "/"
-                                    )
-                                )
-                                for filename in files:
-                                    full_path = os.path.join(root, filename)
-                                    arcname = os.path.join(
-                                        archive_root, filename
-                                    ).replace("\\", "/")
-                                    try:
-                                        archive.write(full_path, arcname=arcname)
-                                    except Exception as exc:
-                                        logging.debug(
-                                            "Failed to add %s to clipboard archive: %s",
-                                            full_path,
-                                            exc,
-                                        )
-                                        continue
-                        else:
-                            try:
-                                archive.write(base_path, arcname=root_name)
-                            except Exception as exc:
-                                logging.debug(
-                                    "Failed to add %s to clipboard archive: %s",
-                                    base_path,
-                                    exc,
-                                )
-                                continue
-
-                temp_file.seek(0, os.SEEK_END)
-                payload_size = temp_file.tell()
-                temp_file.seek(0)
-                if payload_size == 0:
-                    return
-
-                metadata.update(
-                    {
-                        "encoding": "zip",
-                        "entries": entries,
-                        "file_count": file_count,
-                        "total_size": total_size,
-                        "size": payload_size,
-                    }
-                )
-
-                digest = _compute_file_payload_digest_from_file(temp_file)
-                metadata["digest"] = digest
-                temp_file.seek(0)
-
-                for chunk in _iter_file_chunks(temp_file, chunk_size):
-                    yield chunk
-            finally:
                 try:
-                    temp_file.close()
-                except Exception:
-                    pass
+                    archive.write(base_path, arcname=root_name)
+                except Exception as exc:
+                    logging.debug(
+                        "Failed to add %s to clipboard archive: %s",
+                        base_path,
+                        exc,
+                    )
+                    continue
 
-        return _file_stream()
+    if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+        return None
 
-    return []
+    with open(zip_path, "rb") as handle:
+        digest = _compute_file_payload_digest_from_file(handle)
+
+    return {
+        "path": zip_path,
+        "encoding": "zip",
+        "entries": entries,
+        "file_count": file_count,
+        "total_size": total_size,
+        "size": os.path.getsize(zip_path),
+        "digest": digest,
+    }
 
 
 def _win32_build_dropfiles_payload(paths: Sequence[str]) -> bytes:
@@ -1345,20 +1228,9 @@ def get_clipboard_metadata() -> Optional[ClipboardItem]:
     """Read clipboard metadata without loading large payloads."""
 
     def _build_files_metadata(paths: list[str]) -> ClipboardItem:
-        preview = [os.path.basename(path) for path in paths[:5]]
-        total_size = 0
-        for path in paths:
-            try:
-                if os.path.isfile(path):
-                    total_size += os.path.getsize(path)
-            except OSError:
-                continue
         return {
             "format": "files",
-            "file_count": len(paths),
-            "total_size": total_size,
-            "files_preview": preview,
-            "paths": paths,
+            "files": [os.path.basename(path) for path in paths],
         }
 
     if win32clipboard is not None:  # pragma: no cover - Windows-specifikus út
