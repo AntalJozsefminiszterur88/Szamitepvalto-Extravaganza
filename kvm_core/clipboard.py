@@ -74,6 +74,7 @@ class ClipboardManager:
         self._incoming_clipboard_handle: Optional[io.BufferedWriter] = None
         self._incoming_clipboard_path: Optional[str] = None
         self._incoming_clipboard_metadata: Optional[dict] = None
+        self._write_cooldown: float = 0.0
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -578,6 +579,7 @@ class ClipboardManager:
         try:
             self._ignore_next_clipboard_change.set()
             write_clipboard_content(item)
+            self._write_cooldown = time.time() + 1.5
             logging.debug("System clipboard updated from shared data.")
         except Exception as exc:
             logging.error("Failed to set clipboard: %s", exc, exc_info=True)
@@ -874,6 +876,7 @@ class ClipboardManager:
         try:
             self._ignore_next_clipboard_change.set()
             set_clipboard_from_file(final_path, fmt)
+            self._write_cooldown = time.time() + 1.5
         except Exception as exc:
             logging.error("Failed to apply clipboard payload: %s", exc, exc_info=True)
             return
@@ -898,6 +901,7 @@ class ClipboardManager:
                 stored[key] = metadata[key]
 
         self._remember_last_clipboard(stored)
+        self._last_clipboard_metadata = stored.copy()
         with self.clipboard_lock:
             self.shared_clipboard_item = stored
 
@@ -1017,6 +1021,9 @@ class ClipboardManager:
                 self._refresh_clipboard_sequence_marker()
                 time.sleep(0.5)
                 continue
+            if time.time() < self._write_cooldown:
+                time.sleep(0.3)
+                continue
 
             sequence = get_clipboard_sequence_number()
             if sequence is not None:
@@ -1024,7 +1031,13 @@ class ClipboardManager:
                     self._check_clipboard_expiration()
                     time.sleep(0.3)
                     continue
+                previous_sequence = self._last_clipboard_sequence
                 self._last_clipboard_sequence = sequence
+                logging.info(
+                    "Local clipboard changed. Sequence: %s -> %s. Checking duplicates...",
+                    previous_sequence,
+                    sequence,
+                )
 
             metadata = get_clipboard_metadata()
             if metadata:
@@ -1043,6 +1056,10 @@ class ClipboardManager:
                         ):
                             is_duplicate = False
                         if not is_duplicate:
+                            logging.info(
+                                "Broadcasting new clipboard content (format: %s).",
+                                fmt,
+                            )
                             stored = self._store_shared_clipboard(item, timestamp=now)
                             self._remember_last_clipboard(stored)
                             if sequence is not None:
@@ -1059,6 +1076,8 @@ class ClipboardManager:
                             clients = list(self._get_client_sockets())
                             if clients:
                                 self._broadcast_callback(payload, exclude)
+                        else:
+                            logging.info("Ignored duplicate clipboard content.")
                 elif fmt in {'image', 'files', 'html'}:
                     now = time.time()
                     metadata['timestamp'] = now
@@ -1070,6 +1089,10 @@ class ClipboardManager:
                     ):
                         is_duplicate = False
                     if not is_duplicate:
+                        logging.info(
+                            "Broadcasting new clipboard content (format: %s).",
+                            fmt,
+                        )
                         stored = self._store_shared_clipboard_metadata(metadata, timestamp=now)
                         self._last_clipboard_metadata = stored.copy()
                         if sequence is not None:
@@ -1086,6 +1109,8 @@ class ClipboardManager:
                         clients = list(self._get_client_sockets())
                         if clients:
                             self._broadcast_callback(payload, exclude)
+                    else:
+                        logging.info("Ignored duplicate clipboard content.")
             self._check_clipboard_expiration()
             time.sleep(0.3)
         logging.info("Clipboard server loop stopped.")
@@ -1098,13 +1123,22 @@ class ClipboardManager:
                 self._refresh_clipboard_sequence_marker()
                 time.sleep(0.5)
                 continue
+            if time.time() < self._write_cooldown:
+                time.sleep(0.3)
+                continue
 
             sequence = get_clipboard_sequence_number()
             if sequence is not None:
                 if self._last_clipboard_sequence == sequence:
                     time.sleep(0.3)
                     continue
+                previous_sequence = self._last_clipboard_sequence
                 self._last_clipboard_sequence = sequence
+                logging.info(
+                    "Local clipboard changed. Sequence: %s -> %s. Checking duplicates...",
+                    previous_sequence,
+                    sequence,
+                )
 
             metadata = get_clipboard_metadata()
             if metadata:
@@ -1129,8 +1163,14 @@ class ClipboardManager:
                             sock = self._get_server_socket()
                             if sock:
                                 payload = self._build_clipboard_payload(item)
+                                logging.info(
+                                    "Broadcasting new clipboard content (format: %s).",
+                                    fmt,
+                                )
                                 if not self._send_to_peer_callback(sock, payload):
                                     logging.warning("Failed to send clipboard update to server.")
+                        else:
+                            logging.info("Ignored duplicate clipboard content.")
                 elif fmt in {'image', 'files', 'html'}:
                     now = time.time()
                     metadata['timestamp'] = now
@@ -1148,8 +1188,14 @@ class ClipboardManager:
                         sock = self._get_server_socket()
                         if sock:
                             payload = self._build_clipboard_announce_payload(metadata, timestamp=now)
+                            logging.info(
+                                "Broadcasting new clipboard content (format: %s).",
+                                fmt,
+                            )
                             if not self._send_to_peer_callback(sock, payload):
                                 logging.warning("Failed to send clipboard announce to server.")
+                    else:
+                        logging.info("Ignored duplicate clipboard content.")
             time.sleep(0.3)
         logging.info("Clipboard client loop stopped.")
 

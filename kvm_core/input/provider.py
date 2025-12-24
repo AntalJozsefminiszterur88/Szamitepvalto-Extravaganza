@@ -38,6 +38,9 @@ class InputProvider:
 
         self._movement_lock = threading.Lock()
         self._pending_move = {'dx': 0, 'dy': 0}
+        self._send_failure_count = 0
+        self._max_send_failures = 3
+        self._send_retry_delay = 0.05
 
     # ------------------------------------------------------------------
     # Public API
@@ -78,12 +81,28 @@ class InputProvider:
     # Internal helpers
     # ------------------------------------------------------------------
     def _send_event(self, payload: dict) -> bool:
-        try:
-            result = self._send_callback(payload)
-        except Exception as exc:  # pragma: no cover - defensive guard
-            logging.error("Provider callback raised %s", exc, exc_info=True)
-            return False
-        return bool(result)
+        attempts = 3
+        last_error: Optional[Exception] = None
+        for _ in range(attempts):
+            try:
+                result = self._send_callback(payload)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                last_error = exc
+                result = False
+            if result:
+                self._send_failure_count = 0
+                return True
+            time.sleep(self._send_retry_delay)
+        self._send_failure_count += 1
+        if last_error is not None:
+            logging.error("Provider callback raised %s", last_error, exc_info=True)
+        if self._send_failure_count >= self._max_send_failures:
+            logging.warning(
+                "Stopping input provider after %d consecutive send failures.",
+                self._send_failure_count,
+            )
+            self._stop_event.set()
+        return False
 
     def _aggregator_loop(self) -> None:
         while self._is_running() and not self._stop_event.is_set():
@@ -95,8 +114,8 @@ class InputProvider:
                 self._pending_move['dy'] = 0
             if dx or dy:
                 if not self._send_event({'type': 'move_relative', 'dx': dx, 'dy': dy}):
-                    self._stop_event.set()
-                    break
+                    if self._stop_event.is_set():
+                        break
 
     def _queue_relative_move(self, dx: int, dy: int) -> None:
         with self._movement_lock:
