@@ -181,6 +181,7 @@ class KVMOrchestrator(QObject):
             self.state,
             self.zeroconf,
             port=self.settings['port'],
+            data_port=self.settings['port'] + 1,
             device_name=self.device_name,
             message_callback=_peer_message_handler,
         )
@@ -1416,4 +1417,3 @@ class KVMOrchestrator(QObject):
     def run_client(self):
         """Deprecated: client logic replaced by peer discovery."""
         pass
-
