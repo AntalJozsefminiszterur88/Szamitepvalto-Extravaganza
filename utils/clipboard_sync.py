@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - más platformok
     win32con = None  # type: ignore
     ctypes = None  # type: ignore
     wintypes = None  # type: ignore
+    _KERNEL32 = None  # type: ignore
 
 
 ClipboardItem = Dict[str, Any]
@@ -287,6 +288,37 @@ def _win32_clipboard_object_to_bytes(data: Any, fmt_hint: Optional[int] = None) 
                 )
 
     return None
+
+
+def _win32_clipboard_object_size(data: Any) -> Optional[int]:
+    if win32clipboard is None or _KERNEL32 is None:  # pragma: no cover - non-Windows
+        return None
+
+    if isinstance(data, (bytes, bytearray, memoryview)):
+        return len(bytes(data))
+
+    handle: Optional[int] = None
+    for attr in ("handle", "value"):
+        if hasattr(data, attr):
+            try:
+                handle = int(getattr(data, attr))
+                break
+            except (TypeError, ValueError):
+                continue
+
+    if handle is None:
+        try:
+            handle = int(data)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    try:
+        size = int(_KERNEL32.GlobalSize(handle))  # type: ignore[arg-type]
+    except Exception as exc:
+        logging.debug("Failed to read clipboard handle size: %s", exc, exc_info=True)
+        return None
+
+    return size if size > 0 else None
 
 
 def _win32_clipboard_has_move_effect() -> bool:
@@ -936,6 +968,82 @@ def _win32_close_clipboard() -> None:
         pass
 
 
+def get_clipboard_metadata() -> Optional[ClipboardItem]:
+    """Read clipboard metadata without loading large payloads."""
+
+    def _build_files_metadata(paths: list[str]) -> ClipboardItem:
+        preview = [os.path.basename(path) for path in paths[:5]]
+        total_size = 0
+        for path in paths:
+            try:
+                if os.path.isfile(path):
+                    total_size += os.path.getsize(path)
+            except OSError:
+                continue
+        return {
+            "format": "files",
+            "file_count": len(paths),
+            "total_size": total_size,
+            "files_preview": preview,
+        }
+
+    if win32clipboard is not None:  # pragma: no cover - Windows-specifikus út
+        try:
+            if _win32_open_clipboard(retries=8, delay=0.03, backoff=1.6):
+                try:
+                    if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
+                        data = win32clipboard.GetClipboardData(CF_PNG)
+                        return {
+                            "format": "image",
+                            "encoding": "png",
+                            "size": _win32_clipboard_object_size(data),
+                        }
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                        data = win32clipboard.GetClipboardData(win32con.CF_DIB)
+                        return {
+                            "format": "image",
+                            "encoding": "dib",
+                            "size": _win32_clipboard_object_size(data),
+                        }
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+                        try:
+                            paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+                        except Exception as exc:  # pragma: no cover - unexpected
+                            logging.debug("Failed to read CF_HDROP payload: %s", exc)
+                        else:
+                            if _win32_clipboard_has_move_effect():
+                                logging.debug(
+                                    "Ignoring clipboard file list with move effect (local cut)."
+                                )
+                            else:
+                                file_list = list(paths) if paths else []
+                                if file_list:
+                                    return _build_files_metadata(file_list)
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                        text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                        if text:
+                            return {"format": "text", "data": str(text)}
+                finally:
+                    _win32_close_clipboard()
+        except Exception as exc:
+            logging.error("Failed to read clipboard metadata through win32 API: %s", exc, exc_info=True)
+
+    try:
+        content = pyperclip.paste()
+    except PyperclipException as e:
+        if (
+            "Error calling OpenClipboard" in str(e)
+            and "Der Vorgang wurde erfolgreich beendet" in str(e)
+        ):
+            logging.debug("Ignoring benign pyperclip clipboard error: %s", e)
+            return None
+        logging.error("Failed to access clipboard via pyperclip: %s", e)
+        return None
+    if content:
+        return {"format": "text", "data": str(content)}
+    return None
+
+
 def read_clipboard_content() -> Optional[ClipboardItem]:
     """Olvassa a rendszer vágólapját és normalizált elemet ad vissza."""
 
@@ -1156,4 +1264,3 @@ def safe_paste() -> Optional[str]:
     if item and item.get("format") == "text":
         return item.get("data")
     return None
-
