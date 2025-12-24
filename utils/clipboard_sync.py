@@ -104,7 +104,7 @@ CF_PNG = None
 CFSTR_PREFERREDDROPEFFECT = None
 DROPEFFECT_COPY = 0x0001
 DROPEFFECT_MOVE = 0x0002
-MAX_FILE_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MiB hard limit for shared files
+MAX_FILE_PAYLOAD_BYTES = 8 * 1024 * 1024 * 1024  # 8 GiB hard limit for shared files
 MAX_IMAGE_PAYLOAD_BYTES = MAX_FILE_PAYLOAD_BYTES
 _LAST_EXTRACTED_DIR: Optional[str] = None
 if win32clipboard is not None:  # pragma: no cover - Windows specifikus
@@ -497,17 +497,26 @@ def _detect_windows_file_paths(text: str) -> Optional[list[str]]:
     return paths
 
 
-def _pack_clipboard_files(
-    paths: Sequence[str],
-) -> Optional[tuple[bytes, list[dict], int, int, str]]:
-    if not paths:
+def _build_file_payload_limit_bytes() -> Optional[int]:
+    if MAX_FILE_PAYLOAD_BYTES <= 0:
         return None
+    return MAX_FILE_PAYLOAD_BYTES
 
-    archive_buffer = io.BytesIO()
-    entries: list[dict] = []
-    file_count = 0
-    total_size = 0
+
+def _clip_limit_exceeded(current_total: int, next_size: int) -> bool:
+    limit = _build_file_payload_limit_bytes()
+    if limit is None:
+        return False
+    if next_size > limit:
+        return True
+    if current_total + next_size > limit:
+        return True
+    return False
+
+
+def _prepare_clipboard_file_plan(paths: Sequence[str]) -> list[dict]:
     used_root_names: set[str] = set()
+    plan: list[dict] = []
 
     def _unique_root(name: str) -> str:
         base = name or "item"
@@ -519,106 +528,263 @@ def _pack_clipboard_files(
         used_root_names.add(candidate)
         return candidate
 
-    def _stat_file_size(path: str) -> Optional[int]:
+    for original in paths:
+        if not original:
+            continue
         try:
-            return int(os.path.getsize(path))
-        except Exception as exc:
-            logging.debug("Failed to determine size of %s: %s", path, exc)
-            return None
+            normalized_path = os.path.abspath(original)
+        except Exception:
+            logging.debug("Failed to normalise clipboard path: %r", original)
+            continue
 
-    def _would_exceed_limit(path: str, next_size: int) -> bool:
-        if next_size > MAX_FILE_PAYLOAD_BYTES:
-            logging.warning(
-                "Clipboard file %s exceeds maximum payload size (%.2f MiB > %.2f MiB).",
-                path,
-                next_size / (1024 * 1024),
-                MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
-            )
-            return True
-        if total_size + next_size > MAX_FILE_PAYLOAD_BYTES:
-            logging.warning(
-                "Clipboard file selection exceeds maximum payload size when adding %s (%.2f MiB > %.2f MiB).",
-                path,
-                (total_size + next_size) / (1024 * 1024),
-                MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
-            )
-            return True
-        return False
+        if not os.path.exists(normalized_path):
+            logging.debug("Clipboard path does not exist anymore: %s", normalized_path)
+            continue
 
-    with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for original in paths:
-            if not original:
+        base_name = os.path.basename(normalized_path.rstrip("/\\")) or os.path.basename(
+            normalized_path
+        )
+        root_name = _unique_root(base_name)
+        plan.append(
+            {
+                "path": normalized_path,
+                "root_name": root_name,
+                "is_dir": os.path.isdir(normalized_path),
+            }
+        )
+
+    return plan
+
+
+def _stat_file_size(path: str) -> Optional[int]:
+    try:
+        return int(os.path.getsize(path))
+    except Exception as exc:
+        logging.debug("Failed to determine size of %s: %s", path, exc)
+        return None
+
+
+def _build_clipboard_file_metadata(paths: Sequence[str]) -> Optional[dict]:
+    plan = _prepare_clipboard_file_plan(paths)
+    if not plan:
+        return None
+    entries: list[dict] = []
+    file_count = 0
+    total_size = 0
+
+    for item in plan:
+        root_name = item["root_name"]
+        is_dir = bool(item["is_dir"])
+        entries.append({"name": root_name, "is_dir": is_dir})
+        if is_dir:
+            for root, _, files in os.walk(item["path"]):
+                for filename in files:
+                    full_path = os.path.join(root, filename)
+                    size = _stat_file_size(full_path)
+                    if size is None:
+                        continue
+                    if _clip_limit_exceeded(total_size, size):
+                        logging.warning(
+                            "Clipboard file selection exceeds maximum payload size when adding %s.",
+                            full_path,
+                        )
+                        return None
+                    total_size += size
+                    file_count += 1
+        else:
+            size = _stat_file_size(item["path"])
+            if size is None:
                 continue
+            if _clip_limit_exceeded(total_size, size):
+                logging.warning(
+                    "Clipboard file selection exceeds maximum payload size when adding %s.",
+                    item["path"],
+                )
+                return None
+            total_size += size
+            file_count += 1
+
+    return {
+        "plan": plan,
+        "entries": entries,
+        "file_count": file_count,
+        "total_size": total_size,
+    }
+
+
+def _compute_file_payload_digest_from_file(file_obj: Any) -> str:
+    hasher = hashlib.sha256()
+    with zipfile.ZipFile(file_obj, "r") as archive:
+        for info in sorted(archive.infolist(), key=lambda entry: entry.filename):
+            name = info.filename.replace("\\", "/")
+            if info.is_dir():
+                hasher.update(b"D\0")
+                hasher.update(name.encode("utf-8"))
+                hasher.update(b"\0")
+                continue
+
+            hasher.update(b"F\0")
+            hasher.update(name.encode("utf-8"))
+            hasher.update(b"\0")
+            with archive.open(info, "r") as source:
+                for chunk in iter(lambda: source.read(65536), b""):
+                    hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _iter_bytes(data: bytes, chunk_size: int) -> Iterable[bytes]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    for offset in range(0, len(data), chunk_size):
+        yield data[offset : offset + chunk_size]
+
+
+def _iter_file_chunks(handle: Any, chunk_size: int) -> Iterable[bytes]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    while True:
+        chunk = handle.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+
+def create_clipboard_stream(
+    metadata: ClipboardItem, *, chunk_size: int = 256 * 1024
+) -> Iterable[bytes]:
+    fmt = metadata.get("format")
+    if fmt == "text":
+        text = metadata.get("data")
+        if text is None:
+            item = read_clipboard_content()
+            if not item or item.get("format") != "text":
+                return []
+            text = item.get("data")
+        if text is None:
+            return []
+        raw = str(text).encode("utf-8")
+        metadata.update(
+            {
+                "encoding": "utf-8",
+                "size": len(raw),
+                "length": len(str(text)),
+                "digest": _compute_digest("text", "utf-8", raw),
+            }
+        )
+        return _iter_bytes(raw, chunk_size)
+
+    if fmt == "image":
+        data = metadata.get("data")
+        if data is None:
+            item = read_clipboard_content()
+            if not item or item.get("format") != "image":
+                return []
+            data = item.get("data")
+            if item.get("encoding"):
+                metadata["encoding"] = item.get("encoding")
+        if data is None:
+            return []
+        encoding = metadata.get("encoding") or "dib"
+        raw = _ensure_bytes(data)
+        metadata.update(
+            {
+                "encoding": encoding,
+                "size": len(raw),
+                "digest": _compute_digest("image", encoding, raw),
+            }
+        )
+        _extract_image_metadata(metadata, raw)
+        return _iter_bytes(raw, chunk_size)
+
+    if fmt == "files":
+        paths = metadata.get("paths") or _coerce_path_list(metadata.get("data"))
+        if not paths:
+            return []
+        info = _build_clipboard_file_metadata(paths)
+        if not info:
+            return []
+
+        plan = info["plan"]
+        entries = info["entries"]
+        file_count = info["file_count"]
+        total_size = info["total_size"]
+
+        temp_file = tempfile.TemporaryFile()
+
+        def _file_stream() -> Iterable[bytes]:
             try:
-                normalized_path = os.path.abspath(original)
-            except Exception:
-                logging.debug("Failed to normalise clipboard path: %r", original)
-                continue
+                with zipfile.ZipFile(
+                    temp_file, "w", compression=zipfile.ZIP_DEFLATED
+                ) as archive:
+                    for item in plan:
+                        root_name = item["root_name"]
+                        base_path = item["path"]
+                        if item["is_dir"]:
+                            for root, _, files in os.walk(base_path):
+                                rel_dir = os.path.relpath(root, base_path)
+                                archive_root = (
+                                    root_name
+                                    if rel_dir in (".", os.curdir)
+                                    else os.path.join(root_name, rel_dir).replace(
+                                        "\\", "/"
+                                    )
+                                )
+                                for filename in files:
+                                    full_path = os.path.join(root, filename)
+                                    arcname = os.path.join(
+                                        archive_root, filename
+                                    ).replace("\\", "/")
+                                    try:
+                                        archive.write(full_path, arcname=arcname)
+                                    except Exception as exc:
+                                        logging.debug(
+                                            "Failed to add %s to clipboard archive: %s",
+                                            full_path,
+                                            exc,
+                                        )
+                                        continue
+                        else:
+                            try:
+                                archive.write(base_path, arcname=root_name)
+                            except Exception as exc:
+                                logging.debug(
+                                    "Failed to add %s to clipboard archive: %s",
+                                    base_path,
+                                    exc,
+                                )
+                                continue
 
-            if not os.path.exists(normalized_path):
-                logging.debug("Clipboard path does not exist anymore: %s", normalized_path)
-                continue
+                temp_file.seek(0, os.SEEK_END)
+                payload_size = temp_file.tell()
+                temp_file.seek(0)
+                if payload_size == 0:
+                    return
 
-            base_name = os.path.basename(normalized_path.rstrip("/\\")) or os.path.basename(normalized_path)
-            root_name = _unique_root(base_name)
+                metadata.update(
+                    {
+                        "encoding": "zip",
+                        "entries": entries,
+                        "file_count": file_count,
+                        "total_size": total_size,
+                        "size": payload_size,
+                    }
+                )
 
-            if os.path.isdir(normalized_path):
-                entries.append({"name": root_name, "is_dir": True})
-                for root, _, files in os.walk(normalized_path):
-                    rel_dir = os.path.relpath(root, normalized_path)
-                    archive_root = root_name if rel_dir in (".", os.curdir) else os.path.join(root_name, rel_dir).replace("\\", "/")
-                    for filename in files:
-                        full_path = os.path.join(root, filename)
-                        arcname = os.path.join(archive_root, filename).replace("\\", "/")
-                        size = _stat_file_size(full_path)
-                        if size is None:
-                            continue
-                        if _would_exceed_limit(full_path, size):
-                            return None
-                        try:
-                            archive.write(full_path, arcname=arcname)
-                        except Exception as exc:
-                            logging.debug("Failed to add %s to clipboard archive: %s", full_path, exc)
-                            continue
-                        total_size += size
-                        file_count += 1
-            else:
-                entries.append({"name": root_name, "is_dir": False})
-                size = _stat_file_size(normalized_path)
-                if size is None:
-                    continue
-                if _would_exceed_limit(normalized_path, size):
-                    return None
+                digest = _compute_file_payload_digest_from_file(temp_file)
+                metadata["digest"] = digest
+                temp_file.seek(0)
+
+                for chunk in _iter_file_chunks(temp_file, chunk_size):
+                    yield chunk
+            finally:
                 try:
-                    archive.write(normalized_path, arcname=root_name)
-                except Exception as exc:
-                    logging.debug("Failed to add %s to clipboard archive: %s", normalized_path, exc)
-                    continue
-                total_size += size
-                file_count += 1
+                    temp_file.close()
+                except Exception:
+                    pass
 
-    if file_count == 0:
-        logging.debug("Clipboard file packaging yielded no files – skipping.")
-        return None
+        return _file_stream()
 
-    if total_size > MAX_FILE_PAYLOAD_BYTES:
-        logging.warning(
-            "Clipboard file payload too large (%.2f MiB > %.2f MiB). Ignoring.",
-            total_size / (1024 * 1024),
-            MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
-        )
-        return None
-
-    payload = archive_buffer.getvalue()
-    digest = _compute_file_payload_digest(payload)
-    if len(payload) > MAX_FILE_PAYLOAD_BYTES:
-        logging.warning(
-            "Clipboard archive is too large to share (%.2f MiB > %.2f MiB).",
-            len(payload) / (1024 * 1024),
-            MAX_FILE_PAYLOAD_BYTES / (1024 * 1024),
-        )
-        return None
-    return payload, entries, file_count, total_size, digest
+    return []
 
 
 def _win32_build_dropfiles_payload(paths: Sequence[str]) -> bytes:
@@ -649,78 +815,98 @@ def _win32_set_file_clipboard(data: bytes, entries: Sequence[Dict[str, Any]]) ->
 
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            _cleanup_last_temp_dir()
-            temp_dir = tempfile.mkdtemp(prefix="clipboard_files_")
-
-            try:
-                archive.extractall(temp_dir)
-            except Exception as exc:
-                logging.error("Failed to extract clipboard archive: %s", exc)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return
-
-            targets: list[str] = []
-            if entries:
-                for entry in entries:
-                    name = entry.get("name") if isinstance(entry, dict) else None
-                    if not name:
-                        continue
-                    candidate = os.path.join(temp_dir, name)
-                    if os.path.exists(candidate):
-                        targets.append(candidate)
-            if not targets:
-                # fall back to top-level archive members
-                roots = {
-                    item.split("/", 1)[0]
-                    for item in archive.namelist()
-                    if item
-                }
-                for name in roots:
-                    candidate = os.path.join(temp_dir, name)
-                    if os.path.exists(candidate):
-                        targets.append(candidate)
-
-            if not targets:
-                logging.error("Could not determine extracted clipboard targets; aborting.")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return
-
-            try:
-                payload = _win32_build_dropfiles_payload(targets)
-            except Exception as exc:
-                logging.error("Failed to build DROPFILES payload: %s", exc)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return
-
-            try:
-                _win32_set_clipboard_bytes(win32con.CF_HDROP, payload)
-                if CFSTR_PREFERREDDROPEFFECT is not None:
-                    try:
-                        effect_data = struct.pack("<I", DROPEFFECT_COPY)
-                        _win32_set_clipboard_bytes(
-                            CFSTR_PREFERREDDROPEFFECT, effect_data
-                        )
-                    except Exception as exc:
-                        logging.debug(
-                            "Failed to set preferred drop effect on clipboard: %s",
-                            exc,
-                        )
-                logging.info(
-                    "Set clipboard file list (%d item%s) from shared data.",
-                    len(targets),
-                    "s" if len(targets) != 1 else "",
-                )
-            except Exception as exc:
-                logging.error("Failed to apply file clipboard payload: %s", exc)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return
+            _win32_set_file_clipboard_from_archive(archive, entries)
 
     except zipfile.BadZipFile:
         logging.error("Received invalid clipboard archive; refusing to apply.")
         return
 
+
+def _win32_set_file_clipboard_from_archive(
+    archive: zipfile.ZipFile, entries: Sequence[Dict[str, Any]]
+) -> None:
+    _cleanup_last_temp_dir()
+    temp_dir = tempfile.mkdtemp(prefix="clipboard_files_")
+
+    try:
+        archive.extractall(temp_dir)
+    except Exception as exc:
+        logging.error("Failed to extract clipboard archive: %s", exc)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+
+    targets: list[str] = []
+    if entries:
+        for entry in entries:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if not name:
+                continue
+            candidate = os.path.join(temp_dir, name)
+            if os.path.exists(candidate):
+                targets.append(candidate)
+    if not targets:
+        roots = {
+            item.split("/", 1)[0]
+            for item in archive.namelist()
+            if item
+        }
+        for name in roots:
+            candidate = os.path.join(temp_dir, name)
+            if os.path.exists(candidate):
+                targets.append(candidate)
+
+    if not targets:
+        logging.error("Could not determine extracted clipboard targets; aborting.")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+
+    try:
+        payload = _win32_build_dropfiles_payload(targets)
+    except Exception as exc:
+        logging.error("Failed to build DROPFILES payload: %s", exc)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+
+    try:
+        _win32_set_clipboard_bytes(win32con.CF_HDROP, payload)
+        if CFSTR_PREFERREDDROPEFFECT is not None:
+            try:
+                effect_data = struct.pack("<I", DROPEFFECT_COPY)
+                _win32_set_clipboard_bytes(
+                    CFSTR_PREFERREDDROPEFFECT, effect_data
+                )
+            except Exception as exc:
+                logging.debug(
+                    "Failed to set preferred drop effect on clipboard: %s",
+                    exc,
+                )
+        logging.info(
+            "Set clipboard file list (%d item%s) from shared data.",
+            len(targets),
+            "s" if len(targets) != 1 else "",
+        )
+    except Exception as exc:
+        logging.error("Failed to apply file clipboard payload: %s", exc)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return
+
     global _LAST_EXTRACTED_DIR
     _LAST_EXTRACTED_DIR = temp_dir
+
+
+def _win32_set_file_clipboard_from_path(
+    path: str, entries: Sequence[Dict[str, Any]]
+) -> None:
+    if win32clipboard is None:
+        return
+    if not path:
+        logging.debug("Ignoring empty file clipboard payload")
+        return
+    try:
+        with zipfile.ZipFile(path) as archive:
+            _win32_set_file_clipboard_from_archive(archive, entries)
+    except zipfile.BadZipFile:
+        logging.error("Received invalid clipboard archive; refusing to apply.")
 
 
 def _extract_image_metadata(item: ClipboardItem, raw: bytes) -> None:
@@ -857,11 +1043,19 @@ def normalize_clipboard_item(item: Optional[ClipboardItem]) -> Optional[Clipboar
         paths = _coerce_path_list(data)
         if not paths:
             return None
-        packed = _pack_clipboard_files(paths)
-        if not packed:
+        metadata = _build_clipboard_file_metadata(paths)
+        if not metadata:
             return None
-        payload, entries_data, file_count, total_size, digest = packed
-        encoding = "zip"
+        normalized.update(
+            {
+                "encoding": "zip",
+                "paths": paths,
+                "entries": metadata.get("entries", []),
+                "file_count": metadata.get("file_count"),
+                "total_size": metadata.get("total_size"),
+            }
+        )
+        return normalized
 
     normalized.update(
         {
@@ -985,6 +1179,7 @@ def get_clipboard_metadata() -> Optional[ClipboardItem]:
             "file_count": len(paths),
             "total_size": total_size,
             "files_preview": preview,
+            "paths": paths,
         }
 
     if win32clipboard is not None:  # pragma: no cover - Windows-specifikus út
@@ -1126,6 +1321,49 @@ def read_clipboard_content() -> Optional[ClipboardItem]:
             )
         return item
     return None
+
+
+def set_clipboard_from_file(path: str) -> None:
+    if not path or not os.path.exists(path):
+        logging.debug("Clipboard payload file does not exist: %s", path)
+        return
+
+    _, ext = os.path.splitext(path)
+    extension = ext.lower()
+
+    if extension == ".txt":
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except Exception as exc:
+            logging.error("Failed to read clipboard text payload %s: %s", path, exc)
+            return
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("utf-8", errors="replace")
+        write_clipboard_content({"format": "text", "data": text})
+        return
+
+    if extension in {".png", ".dib"}:
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except Exception as exc:
+            logging.error("Failed to read clipboard image payload %s: %s", path, exc)
+            return
+        encoding = "png" if extension == ".png" else "dib"
+        write_clipboard_content({"format": "image", "encoding": encoding, "data": raw})
+        return
+
+    if extension == ".zip":
+        if win32clipboard is None:
+            logging.info("File clipboard payload ignored on non-Windows platform.")
+            return
+        _win32_set_file_clipboard_from_path(path, [])
+        return
+
+    logging.debug("Unsupported clipboard payload extension: %s", extension)
 
 
 def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float = 0.05) -> None:
