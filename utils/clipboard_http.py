@@ -33,6 +33,11 @@ class ClipboardHTTPServer:
         self._url_path: str | None = None
         self.base_url: str | None = None
         self._lock = threading.Lock()
+        self._download_event = threading.Event()
+
+    @property
+    def has_downloaded(self) -> bool:
+        return self._download_event.is_set()
 
     def _build_handler(self) -> type[http.server.BaseHTTPRequestHandler]:
         server = self
@@ -52,6 +57,8 @@ class ClipboardHTTPServer:
                 if request_path != f"/{url_path}":
                     self.send_error(404, "Clipboard payload not found.")
                     return
+
+                server._download_event.set()
 
                 try:
                     file_size = os.path.getsize(file_path)
@@ -95,13 +102,14 @@ class ClipboardHTTPServer:
                     daemon=True,
                 )
                 self._thread.start()
-                host, port = self._server.server_address[:2]
-                self.base_url = f"http://{get_lan_ip()}:{port}"
+            host, port = self._server.server_address[:2]
+            self.base_url = f"http://{get_lan_ip()}:{port}/{self._url_path}"
+            self._download_event.clear()
 
-        if self.base_url is None or self._url_path is None:
+        if self.base_url is None:
             raise RuntimeError("Clipboard HTTP server failed to start.")
 
-        return f"{self.base_url}/{self._url_path}"
+        return self.base_url
 
     def stop(self) -> None:
         with self._lock:
@@ -116,6 +124,7 @@ class ClipboardHTTPServer:
             self._file_path = None
             self._url_path = None
             self.base_url = None
+            self._download_event.clear()
 
 
 def download_file(url: str, target_path: str, *, chunk_size: int = 64 * 1024) -> bool:
