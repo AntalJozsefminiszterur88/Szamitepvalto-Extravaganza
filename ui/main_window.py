@@ -37,6 +37,7 @@ from kvm_core.orchestrator import KVMOrchestrator
 from kvm_core.clipboard import ClipboardManager
 from config.constants import APP_NAME, ORG_NAME, ICON_PATH
 from config.settings import DEFAULT_PORT
+from utils.clipboard_sync import set_clipboard_from_file
 from utils.remote_logging import get_remote_log_handler
 from utils.stability_monitor import get_global_monitor
 from ui.file_transfer_widget import FileTransferWidget
@@ -330,6 +331,7 @@ class MainWindow(QMainWindow):
         self.kvm_thread.started.connect(self.kvm_worker.run)
         self.kvm_worker.finished.connect(self.on_service_stopped)
         self.kvm_worker.status_update.connect(self.on_status_update)
+        self.kvm_worker.clipboard_write_request.connect(self.apply_clipboard_content)
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         # Prevent accidental double starts
@@ -414,6 +416,10 @@ class MainWindow(QMainWindow):
     def on_status_update(self, message):
         self.status_label.setText(message)
         logging.info(f"GUI Status Update: {message}")
+
+    def apply_clipboard_content(self, path, fmt):
+        logging.info("INFO: Main thread writing clipboard content....")
+        set_clipboard_from_file(path, fmt)
 
     def get_temp_icon(self):
         """Return the application icon."""
