@@ -175,6 +175,8 @@ class KVMOrchestrator(QObject):
 
         def _peer_message_handler(peer_connection, data):
             sock = getattr(peer_connection, 'socket', None)
+            if role != 'ado' and self.server_socket is None and sock is not None:
+                self.server_socket = sock
             self.message_queue.put((sock, data))
 
         self.peer_manager = PeerManager(

@@ -7,7 +7,6 @@ import threading
 import logging
 import os
 import socket
-import subprocess
 from typing import Optional
 
 # Windows specific module only available on that platform
@@ -48,52 +47,37 @@ from ui.shared_clipboard_widget import SharedClipboardWidget
 # gui.py -> JAVÍTOTT, HELYES IDÉZŐJELEZÉSŰ set_autostart függvény
 
 def set_autostart(enabled: bool) -> None:
-    """Enable or disable autostart using the Task Scheduler for higher priority."""
-    app_name = "MyKVM_Start"  # A feladat neve a Feladatütemezőben
+    """Enable or disable autostart using the current user's Run registry key."""
+    app_name = "MyKVM_Start"
+
+    if getattr(sys, "frozen", False):  # Ha PyInstaller exe-ként fut
+        executable = f'"{sys.executable}"'
+        arguments = '--tray'
+    else:  # Ha sima python szkriptként fut
+        executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
+        script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "main.py")
+        arguments = f'"{script_path}" --tray'
+
+    run_command = f"{executable} {arguments}"
 
     try:
-        if enabled:
-            # Összeállítjuk az indítandó parancsot és az argumentumait
-            if getattr(sys, "frozen", False):  # Ha PyInstaller exe-ként fut
-                executable = f'"{sys.executable}"'
-                arguments = '--tray'
-            else:  # Ha sima python szkriptként fut
-                executable = f'"{sys.executable.replace("python.exe", "pythonw.exe")}"'
-                script_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "main.py")
-                arguments = f'"{script_path}" --tray'
-
-            # --- JAVÍTOTT RÉSZ ---
-            # A teljes futtatandó parancs egyetlen stringként,
-            # amit a schtasks helyesen tud értelmezni.
-            task_run_command = f"{executable} {arguments}"
-
-            command = [
-                'schtasks', '/Create', '/TN', app_name,
-                '/TR', task_run_command,  # Itt már a tiszta stringet adjuk át
-                '/SC', 'ONLOGON', '/F'
-            ]
-
-            logging.info(f"Autostart feladat létrehozása: {' '.join(command)}")
-            # A shell=True itt fontos, hogy a Windows helyesen értelmezze a parancsot
-            result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
-            logging.info("Automatikus indulás (Feladatütemező) sikeresen beállítva. Kimenet: %s", result.stdout)
-
-        else:
-            command = ['schtasks', '/Delete', '/TN', app_name, '/F']
-            logging.info(f"Autostart feladat törlése: {' '.join(command)}")
-            result = subprocess.run(command, check=True, shell=True, capture_output=True, text=True)
-            logging.info("Automatikus indulás (Feladatütemező) sikeresen törölve. Kimenet: %s", result.stdout)
-
-    except subprocess.CalledProcessError as e:
-        # Ha a parancs hibával tér vissza, kiírjuk a hibaüzenetét is
-        logging.error("Hiba az automatikus indulás beállításakor (schtasks). Visszatérési kód: %d", e.returncode)
-        logging.error("Schtasks HIBA kimenet: %s", e.stderr)
-        # Itt jön a jogosultsági probléma gyanúja
-        if e.returncode == 1 and ("Access is denied" in e.stderr or "A hozzáférés megtagadva" in e.stderr):
-            logging.error(">>> A hiba oka valószínűleg a hiányzó RENDSZERGAZDAI JOGOSULTSÁG. <<<")
-            # Itt jelezhetnénk a felhasználónak is a GUI-n, ha szükséges
-    except FileNotFoundError:
-        logging.info("Autostart beállítás kihagyva: nem támogatott platform (schtasks nem található).")
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as registry_key:
+            if enabled:
+                winreg.SetValueEx(registry_key, app_name, 0, winreg.REG_SZ, run_command)
+                logging.info("Automatikus indulás beállítva (Run kulcs): %s", run_command)
+            else:
+                try:
+                    winreg.DeleteValue(registry_key, app_name)
+                    logging.info("Automatikus indulás törölve (Run kulcs).")
+                except FileNotFoundError:
+                    logging.info("Automatikus indulás törlése kihagyva: nincs bejegyzés.")
+    except OSError as exc:
+        logging.error("Hiba az automatikus indulás beállításakor (Run kulcs): %s", exc)
 
 
 class MainWindow(QMainWindow):
