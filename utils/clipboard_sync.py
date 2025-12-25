@@ -14,6 +14,7 @@ import re
 import shutil
 import struct
 import tempfile
+import threading
 import time
 import zipfile
 from typing import Any, Dict, Iterable, Optional, Sequence
@@ -39,6 +40,7 @@ except ImportError:  # pragma: no cover - más platformok
 ClipboardItem = Dict[str, Any]
 
 PyperclipException = getattr(pyperclip, "PyperclipException", Exception)
+_CLIPBOARD_LOCK = threading.Lock()
 
 
 def _describe_clipboard_item(item: ClipboardItem) -> str:
@@ -1345,85 +1347,90 @@ def get_clipboard_metadata() -> Optional[ClipboardItem]:
 def read_clipboard_content() -> Optional[ClipboardItem]:
     """Olvassa a rendszer vágólapját és normalizált elemet ad vissza."""
 
-    if win32clipboard is not None:  # pragma: no cover - Windows-specifikus út
-        try:
-            if _win32_open_clipboard(retries=8, delay=0.03, backoff=1.6):
-                try:
-                    if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
-                        data = win32clipboard.GetClipboardData(CF_PNG)
-                        item = normalize_clipboard_item(
-                            {"format": "image", "encoding": "png", "data": data}
-                        )
-                        if item:
-                            logging.debug(
-                                "Read clipboard item via win32 API: %s",
-                                _describe_clipboard_item(item),
+    with _CLIPBOARD_LOCK:
+        if win32clipboard is not None:  # pragma: no cover - Windows-specifikus út
+            try:
+                if _win32_open_clipboard(retries=8, delay=0.03, backoff=1.6):
+                    try:
+                        if CF_PNG and win32clipboard.IsClipboardFormatAvailable(CF_PNG):
+                            data = win32clipboard.GetClipboardData(CF_PNG)
+                            item = normalize_clipboard_item(
+                                {"format": "image", "encoding": "png", "data": data}
                             )
-                            return item
-                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
-                        data = win32clipboard.GetClipboardData(win32con.CF_DIB)
-                        item = normalize_clipboard_item(
-                            {"format": "image", "encoding": "dib", "data": data}
-                        )
-                        if item:
-                            logging.debug(
-                                "Read clipboard item via win32 API: %s",
-                                _describe_clipboard_item(item),
-                            )
-                            return item
-                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
-                        try:
-                            paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
-                        except Exception as exc:  # pragma: no cover - unexpected
-                            logging.debug("Failed to read CF_HDROP payload: %s", exc)
-                        else:
-                            if _win32_clipboard_has_move_effect():
-                                logging.debug("Ignoring clipboard file list with move effect (local cut).")
-                            else:
-                                file_list = list(paths) if paths else []
-                                item = normalize_clipboard_item(
-                                    {"format": "files", "data": file_list}
+                            if item:
+                                logging.debug(
+                                    "Read clipboard item via win32 API: %s",
+                                    _describe_clipboard_item(item),
                                 )
-                                if item:
-                                    logging.debug(
-                                        "Read clipboard item via win32 API: %s",
-                                        _describe_clipboard_item(item),
-                                    )
-                                    return item
-                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
-                        text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-                        item = normalize_clipboard_item({"format": "text", "data": text})
-                        if item:
-                            logging.debug(
-                                "Read clipboard item via win32 API: %s",
-                                _describe_clipboard_item(item),
+                                return item
+                        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                            data = win32clipboard.GetClipboardData(win32con.CF_DIB)
+                            item = normalize_clipboard_item(
+                                {"format": "image", "encoding": "dib", "data": data}
                             )
-                            return item
-                finally:
-                    _win32_close_clipboard()
-        except Exception as exc:
-            logging.error("Failed to read clipboard through win32 API: %s", exc, exc_info=True)
+                            if item:
+                                logging.debug(
+                                    "Read clipboard item via win32 API: %s",
+                                    _describe_clipboard_item(item),
+                                )
+                                return item
+                        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+                            try:
+                                paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+                            except Exception as exc:  # pragma: no cover - unexpected
+                                logging.debug("Failed to read CF_HDROP payload: %s", exc)
+                            else:
+                                if _win32_clipboard_has_move_effect():
+                                    logging.debug(
+                                        "Ignoring clipboard file list with move effect (local cut)."
+                                    )
+                                else:
+                                    file_list = list(paths) if paths else []
+                                    item = normalize_clipboard_item(
+                                        {"format": "files", "data": file_list}
+                                    )
+                                    if item:
+                                        logging.debug(
+                                            "Read clipboard item via win32 API: %s",
+                                            _describe_clipboard_item(item),
+                                        )
+                                        return item
+                        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                            text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                            item = normalize_clipboard_item({"format": "text", "data": text})
+                            if item:
+                                logging.debug(
+                                    "Read clipboard item via win32 API: %s",
+                                    _describe_clipboard_item(item),
+                                )
+                                return item
+                    finally:
+                        _win32_close_clipboard()
+            except Exception as exc:
+                logging.error(
+                    "Failed to read clipboard through win32 API: %s", exc, exc_info=True
+                )
 
-    try:
-        content = pyperclip.paste()
-    except PyperclipException as e:
-        if (
-            "Error calling OpenClipboard" in str(e)
-            and "Der Vorgang wurde erfolgreich beendet" in str(e)
-        ):
-            logging.debug("Ignoring benign pyperclip clipboard error: %s", e)
+        try:
+            content = pyperclip.paste()
+        except PyperclipException as e:
+            if (
+                "Error calling OpenClipboard" in str(e)
+                and "Der Vorgang wurde erfolgreich beendet" in str(e)
+            ):
+                logging.debug("Ignoring benign pyperclip clipboard error: %s", e)
+                return None
+            logging.error("Failed to access clipboard via pyperclip: %s", e)
             return None
-        logging.error("Failed to access clipboard via pyperclip: %s", e)
+        if content:
+            item = normalize_clipboard_item({"format": "text", "data": str(content)})
+            if item:
+                logging.debug(
+                    "Read clipboard item via pyperclip: %s",
+                    _describe_clipboard_item(item),
+                )
+            return item
         return None
-    if content:
-        item = normalize_clipboard_item({"format": "text", "data": str(content)})
-        if item:
-            logging.debug(
-                "Read clipboard item via pyperclip: %s",
-                _describe_clipboard_item(item),
-            )
-        return item
-    return None
 
 
 def set_clipboard_from_file(path: str, fmt: Optional[str] = None) -> None:
@@ -1482,32 +1489,52 @@ def set_clipboard_from_file(path: str, fmt: Optional[str] = None) -> None:
 def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float = 0.05) -> None:
     """Vágólap beállítása normalizált elem alapján."""
 
-    normalized = normalize_clipboard_item(item)
-    if not normalized:
+    with _CLIPBOARD_LOCK:
+        normalized = normalize_clipboard_item(item)
+        if not normalized:
+            logging.debug(
+                "Ignoring clipboard write request with invalid payload: %s",
+                _describe_clipboard_item(
+                    item if isinstance(item, dict) else {"format": "unknown", "data": item}
+                ),
+            )
+            return
+
+        fmt = normalized["format"]
+
         logging.debug(
-            "Ignoring clipboard write request with invalid payload: %s",
-            _describe_clipboard_item(
-                item if isinstance(item, dict) else {"format": "unknown", "data": item}
-            ),
+            "Requested clipboard write: %s", _describe_clipboard_item(normalized)
         )
-        return
 
-    fmt = normalized["format"]
-
-    logging.debug(
-        "Requested clipboard write: %s", _describe_clipboard_item(normalized)
-    )
-
-    if win32clipboard is not None:  # pragma: no cover - Windows
-        for attempt in range(retries):
-            try:
-                if not _win32_open_clipboard(
-                    retries=max(3, retries), delay=delay, backoff=1.5
-                ):
-                    break
+        if win32clipboard is not None:  # pragma: no cover - Windows
+            for attempt in range(retries):
+                clipboard_opened = False
                 try:
-                    win32clipboard.EmptyClipboard()
-                    retry_due_to_clipboard = False
+                    try:
+                        win32clipboard.OpenClipboard(None)
+                        clipboard_opened = True
+                    except Exception as exc:
+                        logging.warning(
+                            "Failed to open clipboard (attempt %d/%d): %s",
+                            attempt + 1,
+                            retries,
+                            exc,
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    try:
+                        win32clipboard.EmptyClipboard()
+                    except Exception as exc:
+                        logging.warning(
+                            "Failed to empty clipboard (attempt %d/%d): %s",
+                            attempt + 1,
+                            retries,
+                            exc,
+                        )
+                        time.sleep(delay)
+                        continue
+
                     try:
                         if fmt == "text":
                             win32clipboard.SetClipboardData(
@@ -1565,59 +1592,59 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                                 attempt + 1,
                                 retries,
                             )
-                            retry_due_to_clipboard = True
                         else:
-                            raise
-                    if retry_due_to_clipboard:
+                            logging.warning(
+                                "Failed to set clipboard data (attempt %d/%d): %s",
+                                attempt + 1,
+                                retries,
+                                exc,
+                            )
                         time.sleep(delay)
                         continue
+
                     return
                 finally:
-                    _win32_close_clipboard()
-            except Exception as exc:
+                    if clipboard_opened:
+                        _win32_close_clipboard()
+            else:
+                logging.error("Giving up on setting clipboard via win32 API.")
+            return
+
+        # Fallback – csak szöveg támogatott
+        if fmt not in {"text", "html"}:
+            logging.info(
+                "Non-text clipboard item ignored on non-Windows platform: %s",
+                _describe_clipboard_item(normalized),
+            )
+            return
+
+        if fmt == "html":
+            html_data = normalized.get("data", "")
+            if isinstance(html_data, (bytes, bytearray, memoryview)):
+                html_text = _ensure_bytes(html_data).decode("utf-8", errors="replace")
+            else:
+                html_text = str(html_data)
+            normalized["data"] = html_text
+            fmt = "text"
+
+        for attempt in range(retries):
+            try:
+                pyperclip.copy(normalized["data"])
+                logging.debug(
+                    "Set clipboard text via pyperclip on attempt %d: %s",
+                    attempt + 1,
+                    _describe_clipboard_item(normalized),
+                )
+                return
+            except PyperclipException as exc:
                 logging.warning(
-                    "Failed to write clipboard via win32 API (attempt %d/%d): %s",
+                    "pyperclip.copy failed (attempt %d/%d): %s",
                     attempt + 1,
                     retries,
                     exc,
                 )
                 time.sleep(delay)
-        else:
-            logging.error("Giving up on setting clipboard via win32 API.")
-        return
-
-    # Fallback – csak szöveg támogatott
-    if fmt not in {"text", "html"}:
-        logging.info(
-            "Non-text clipboard item ignored on non-Windows platform: %s",
-            _describe_clipboard_item(normalized),
-        )
-        return
-
-    if fmt == "html":
-        html_data = normalized.get("data", "")
-        if isinstance(html_data, (bytes, bytearray, memoryview)):
-            html_text = _ensure_bytes(html_data).decode("utf-8", errors="replace")
-        else:
-            html_text = str(html_data)
-        normalized["data"] = html_text
-        fmt = "text"
-
-    for attempt in range(retries):
-        try:
-            pyperclip.copy(normalized["data"])
-            logging.debug(
-                "Set clipboard text via pyperclip on attempt %d: %s",
-                attempt + 1,
-                _describe_clipboard_item(normalized),
-            )
-            return
-        except PyperclipException as exc:
-            logging.warning(
-                "pyperclip.copy failed (attempt %d/%d): %s", attempt + 1, retries, exc
-            )
-            time.sleep(delay)
-    logging.error("Failed to write clipboard using pyperclip after retries")
+        logging.error("Failed to write clipboard using pyperclip after retries")
 
 
 def clear_clipboard() -> None:
