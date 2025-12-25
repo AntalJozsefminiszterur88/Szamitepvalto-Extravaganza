@@ -676,7 +676,7 @@ class ClipboardManager:
 
         server = self._get_clipboard_http_server()
         try:
-            download_url = server.serve_file(packaged['path'])
+            download_url = server.start(packaged['path'])
         except Exception as exc:
             logging.error("Failed to serve clipboard zip via HTTP: %s", exc)
             return None
@@ -914,9 +914,7 @@ class ClipboardManager:
                     pass
 
         def _apply_download() -> None:
-            download_thread = download_file(url, target_path)
-            download_thread.join()
-            if not os.path.exists(target_path):
+            if not download_file(url, target_path):
                 return
             try:
                 self.is_internal_update = True
