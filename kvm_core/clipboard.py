@@ -15,6 +15,8 @@ from utils.path_helpers import resolve_documents_directory
 from utils.clipboard_sync import (
     clear_clipboard,
     clipboard_items_equal,
+    _compute_digest,
+    _compute_file_payload_digest,
     get_clipboard_sequence_number,
     get_clipboard_metadata,
     normalize_clipboard_item,
@@ -74,6 +76,7 @@ class ClipboardManager:
         self._clipboard_http_server: Optional[ClipboardHTTPServer] = None
         self._clipboard_http_shutdown_timer: Optional[threading.Timer] = None
         self._internal_update_flag = False
+        self._last_injected_digest: Optional[str] = None
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -580,6 +583,44 @@ class ClipboardManager:
     def _remember_last_clipboard(self, item: Optional[dict]) -> None:
         self.last_clipboard_item = item.copy() if item else None
 
+    def _compute_item_digest(self, item: dict) -> Optional[str]:
+        digest = item.get('digest')
+        if isinstance(digest, str) and digest:
+            return digest
+        fmt = item.get('format')
+        if fmt in {'text', 'html'}:
+            data = item.get('data')
+            if data is None:
+                return None
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                raw = bytes(data)
+            else:
+                raw = str(data).encode('utf-8')
+            return _compute_digest(fmt, 'utf-8', raw)
+        if fmt == 'image':
+            data = item.get('data')
+            if data is None:
+                return None
+            if not isinstance(data, (bytes, bytearray, memoryview)):
+                return None
+            encoding = str(item.get('encoding') or 'dib')
+            return _compute_digest('image', encoding, bytes(data))
+        if fmt == 'files':
+            data = item.get('data')
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                try:
+                    return _compute_file_payload_digest(bytes(data))
+                except Exception:
+                    return None
+        return None
+
+    def _is_self_injected(self, item: dict) -> bool:
+        digest = self._compute_item_digest(item)
+        if digest and digest == self._last_injected_digest:
+            logging.info("Ignored self-injected clipboard content (hash match).")
+            return True
+        return False
+
     def _apply_system_clipboard(self, item: dict) -> None:
         if not item:
             return
@@ -587,6 +628,9 @@ class ClipboardManager:
             self._ignore_next_clipboard_change.set()
             write_clipboard_content(item)
             self._last_clipboard_write_time = time.time()
+            digest = self._compute_item_digest(item)
+            if digest:
+                self._last_injected_digest = digest
             logging.debug("System clipboard updated from shared data.")
         except Exception as exc:
             logging.error("Failed to set clipboard: %s", exc, exc_info=True)
@@ -800,7 +844,6 @@ class ClipboardManager:
             if not from_local and not clipboard_items_equal(item, self.last_clipboard_item):
                 self._internal_update_flag = True
                 self._apply_system_clipboard(item)
-                time.sleep(0.2)
                 self._internal_update_flag = False
             self._remember_last_clipboard(stored)
             payload = self._build_clipboard_payload(stored)
@@ -827,7 +870,6 @@ class ClipboardManager:
             if not clipboard_items_equal(item, self.last_clipboard_item):
                 self._internal_update_flag = True
                 self._apply_system_clipboard(item)
-                time.sleep(0.2)
                 self._internal_update_flag = False
             self._remember_last_clipboard(item)
             if timestamp is not None:
@@ -871,7 +913,6 @@ class ClipboardManager:
         item['timestamp'] = ts_value
         self._internal_update_flag = True
         self._apply_system_clipboard(item)
-        time.sleep(0.2)
         self._internal_update_flag = False
         self._remember_last_clipboard(item)
         with self.clipboard_lock:
@@ -925,7 +966,6 @@ class ClipboardManager:
         def _apply_download() -> None:
             if not download_file(url, target_path):
                 return
-            time.sleep(0.5)
             try:
                 self._internal_update_flag = True
                 if fmt == 'image':
@@ -933,11 +973,28 @@ class ClipboardManager:
                     if extracted:
                         self._ignore_next_clipboard_change.set()
                         set_clipboard_from_file(extracted)
+                        try:
+                            with open(extracted, "rb") as handle:
+                                raw = handle.read()
+                            _, extension = os.path.splitext(extracted)
+                            encoding = "png" if extension.lower() == ".png" else "dib"
+                            self._last_injected_digest = _compute_digest(
+                                "image", encoding, raw
+                            )
+                        except Exception:
+                            self._last_injected_digest = metadata.get("digest")
                 else:
                     self._ignore_next_clipboard_change.set()
                     set_clipboard_from_file(target_path, 'files')
+                    digest = metadata.get("digest")
+                    if not digest:
+                        try:
+                            with open(target_path, "rb") as handle:
+                                digest = _compute_file_payload_digest(handle.read())
+                        except Exception:
+                            digest = None
+                    self._last_injected_digest = digest
                 self._last_clipboard_write_time = time.time()
-                time.sleep(0.2)
             except Exception as exc:
                 logging.error("Failed to apply downloaded clipboard files: %s", exc, exc_info=True)
                 return
@@ -1105,6 +1162,8 @@ class ClipboardManager:
                 if fmt == 'text':
                     item = read_clipboard_content()
                     if item:
+                        if self._is_self_injected(item):
+                            continue
                         now = time.time()
                         item['timestamp'] = now
                         self._last_clipboard_metadata = None
@@ -1141,6 +1200,8 @@ class ClipboardManager:
                 elif fmt in {'image', 'files', 'html'}:
                     now = time.time()
                     metadata['timestamp'] = now
+                    if self._is_self_injected(metadata):
+                        continue
                     is_duplicate = metadata == self._last_clipboard_metadata
                     if (
                         is_duplicate
@@ -1163,9 +1224,15 @@ class ClipboardManager:
                                 logging.debug("Clipboard read produced no data for %s.", fmt)
                                 continue
                             item['timestamp'] = now
+                            if fmt == 'image' and self._is_self_injected(item):
+                                continue
                             payload = self._build_clipboard_download_payload(item, fmt, timestamp=now)
                             if not payload:
                                 logging.debug("Failed to build clipboard download payload for %s.", fmt)
+                                continue
+                            if fmt == 'files' and not item.get('digest'):
+                                item['digest'] = payload.get('digest')
+                            if fmt == 'files' and self._is_self_injected(item):
                                 continue
                             provider = self._get_input_provider_socket()
                             exclude: set[Any] = set()
@@ -1224,6 +1291,8 @@ class ClipboardManager:
                 if fmt == 'text':
                     item = read_clipboard_content()
                     if item:
+                        if self._is_self_injected(item):
+                            continue
                         now = time.time()
                         item['timestamp'] = now
                         self._last_clipboard_metadata = None
@@ -1252,6 +1321,8 @@ class ClipboardManager:
                 elif fmt in {'image', 'files', 'html'}:
                     now = time.time()
                     metadata['timestamp'] = now
+                    if self._is_self_injected(metadata):
+                        continue
                     is_duplicate = metadata == self._last_clipboard_metadata
                     if (
                         is_duplicate
@@ -1271,6 +1342,8 @@ class ClipboardManager:
                                     logging.debug("Clipboard read produced no data for %s.", fmt)
                                     continue
                                 item['timestamp'] = now
+                                if fmt == 'image' and self._is_self_injected(item):
+                                    continue
                                 payload = self._build_clipboard_download_payload(
                                     item, fmt, timestamp=now
                                 )
@@ -1279,6 +1352,10 @@ class ClipboardManager:
                                         "Failed to build clipboard download payload for %s.",
                                         fmt,
                                     )
+                                    continue
+                                if fmt == 'files' and not item.get('digest'):
+                                    item['digest'] = payload.get('digest')
+                                if fmt == 'files' and self._is_self_injected(item):
                                     continue
                                 logging.info(
                                     "Broadcasting new clipboard content (format: %s).",
