@@ -925,6 +925,7 @@ class ClipboardManager:
         def _apply_download() -> None:
             if not download_file(url, target_path):
                 return
+            time.sleep(0.5)
             try:
                 self._internal_update_flag = True
                 if fmt == 'image':

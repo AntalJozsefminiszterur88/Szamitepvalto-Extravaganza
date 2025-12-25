@@ -24,6 +24,7 @@ try:  # pragma: no cover - elérhető csak Windows alatt
     import ctypes
     from ctypes import wintypes
 
+    import pywintypes  # type: ignore
     import win32clipboard  # type: ignore
     import win32con  # type: ignore
 except ImportError:  # pragma: no cover - más platformok
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover - más platformok
     win32con = None  # type: ignore
     ctypes = None  # type: ignore
     wintypes = None  # type: ignore
+    pywintypes = None  # type: ignore
     _KERNEL32 = None  # type: ignore
 
 
@@ -1196,7 +1198,7 @@ def _win32_open_clipboard(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            win32clipboard.OpenClipboard()
+            win32clipboard.OpenClipboard(None)
             return True
         except Exception as exc:  # pragma: no cover - ritka hibák
             last_error = exc
@@ -1213,6 +1215,16 @@ def _win32_open_clipboard(
                 current_delay = min(current_delay * max(1.0, backoff), max_delay)
 
     raise RuntimeError("Unable to open clipboard after retries") from last_error
+
+
+def _is_clipboard_error_1418(exc: BaseException) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror == 1418:
+        return True
+    args = getattr(exc, "args", ())
+    if isinstance(args, tuple) and args:
+        return 1418 in args
+    return False
 
 
 def _win32_close_clipboard() -> None:
@@ -1495,55 +1507,70 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                     break
                 try:
                     win32clipboard.EmptyClipboard()
-                    if fmt == "text":
-                        win32clipboard.SetClipboardData(
-                            win32con.CF_UNICODETEXT, normalized["data"]
-                        )
-                    elif fmt == "html":
-                        html_data = normalized.get("data", "")
-                        if isinstance(html_data, (bytes, bytearray, memoryview)):
-                            html_bytes = _ensure_bytes(html_data)
-                        else:
-                            html_bytes = str(html_data).encode("utf-8")
-                        payload = _build_html_clipboard_payload(html_bytes)
-                        if CF_HTML is None and CF_TEXTHTML is None:
-                            raise ValueError("HTML clipboard format is not available.")
-                        target_fmt = CF_HTML or CF_TEXTHTML
-                        if target_fmt is None:
-                            raise ValueError("HTML clipboard format is not available.")
-                        _win32_set_clipboard_bytes(target_fmt, payload)
-                    elif fmt == "image":
-                        encoding = normalized.get("encoding") or "dib"
-                        if encoding == "dib":
-                            _win32_set_clipboard_bytes(
-                                win32con.CF_DIB, normalized["data"]
+                    retry_due_to_clipboard = False
+                    try:
+                        if fmt == "text":
+                            win32clipboard.SetClipboardData(
+                                win32con.CF_UNICODETEXT, normalized["data"]
                             )
+                        elif fmt == "html":
+                            html_data = normalized.get("data", "")
+                            if isinstance(html_data, (bytes, bytearray, memoryview)):
+                                html_bytes = _ensure_bytes(html_data)
+                            else:
+                                html_bytes = str(html_data).encode("utf-8")
+                            payload = _build_html_clipboard_payload(html_bytes)
+                            if CF_HTML is None and CF_TEXTHTML is None:
+                                raise ValueError("HTML clipboard format is not available.")
+                            target_fmt = CF_HTML or CF_TEXTHTML
+                            if target_fmt is None:
+                                raise ValueError("HTML clipboard format is not available.")
+                            _win32_set_clipboard_bytes(target_fmt, payload)
+                        elif fmt == "image":
+                            encoding = normalized.get("encoding") or "dib"
+                            if encoding == "dib":
+                                _win32_set_clipboard_bytes(
+                                    win32con.CF_DIB, normalized["data"]
+                                )
+                                logging.info(
+                                    "Set clipboard image (encoding=dib, attempt=%d)",
+                                    attempt + 1,
+                                )
+                            elif encoding == "png" and CF_PNG:
+                                _win32_set_clipboard_bytes(CF_PNG, normalized["data"])
+                                logging.info(
+                                    "Set clipboard image (encoding=png, attempt=%d)",
+                                    attempt + 1,
+                                )
+                            else:
+                                raise ValueError(
+                                    f"Unsupported image encoding for clipboard: {encoding}"
+                                )
+                        elif fmt == "files":
+                            entries = normalized.get("entries") or []
+                            _win32_set_file_clipboard(normalized["data"], entries)
                             logging.info(
-                                "Set clipboard image (encoding=dib, attempt=%d)",
+                                "Set clipboard files (count=%s, attempt=%d)",
+                                normalized.get("file_count")
+                                or len(entries)
+                                or "?",
                                 attempt + 1,
                             )
-                        elif encoding == "png" and CF_PNG:
-                            _win32_set_clipboard_bytes(CF_PNG, normalized["data"])
-                            logging.info(
-                                "Set clipboard image (encoding=png, attempt=%d)",
+                        else:  # pragma: no cover - nem érhető el
+                            raise ValueError(f"Unsupported clipboard format: {fmt}")
+                    except Exception as exc:
+                        if _is_clipboard_error_1418(exc):
+                            logging.warning(
+                                "Clipboard write failed with 1418; retrying (attempt %d/%d).",
                                 attempt + 1,
+                                retries,
                             )
+                            retry_due_to_clipboard = True
                         else:
-                            raise ValueError(
-                                f"Unsupported image encoding for clipboard: {encoding}"
-                            )
-                    elif fmt == "files":
-                        entries = normalized.get("entries") or []
-                        _win32_set_file_clipboard(normalized["data"], entries)
-                        logging.info(
-                            "Set clipboard files (count=%s, attempt=%d)",
-                            normalized.get("file_count")
-                            or len(entries)
-                            or "?",
-                            attempt + 1,
-                        )
-                    else:  # pragma: no cover - nem érhető el
-                        raise ValueError(f"Unsupported clipboard format: {fmt}")
+                            raise
+                    if retry_due_to_clipboard:
+                        time.sleep(delay)
+                        continue
                     return
                 finally:
                     _win32_close_clipboard()
