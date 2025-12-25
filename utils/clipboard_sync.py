@@ -778,34 +778,29 @@ def _win32_build_dropfiles_payload(paths: Sequence[str]) -> bytes:
     return header + encoded
 
 
-def _win32_set_file_clipboard(data: bytes, entries: Sequence[Dict[str, Any]]) -> None:
+def _prepare_win32_file_payload(
+    data: bytes, entries: Sequence[Dict[str, Any]]
+) -> bytes:
     if win32clipboard is None:
-        return
+        raise RuntimeError("File clipboard operations require Windows APIs")
     if not data:
-        logging.debug("Ignoring empty file clipboard payload")
-        return
+        raise ValueError("Empty file clipboard payload supplied")
 
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            _win32_set_file_clipboard_from_archive(archive, entries)
-
-    except zipfile.BadZipFile:
-        logging.error("Received invalid clipboard archive; refusing to apply.")
-        return
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        return _prepare_win32_file_payload_from_archive(archive, entries)
 
 
-def _win32_set_file_clipboard_from_archive(
+def _prepare_win32_file_payload_from_archive(
     archive: zipfile.ZipFile, entries: Sequence[Dict[str, Any]]
-) -> None:
+) -> bytes:
     _cleanup_last_temp_dir()
     temp_dir = tempfile.mkdtemp(prefix="clipboard_files_")
 
     try:
         archive.extractall(temp_dir)
-    except Exception as exc:
-        logging.error("Failed to extract clipboard archive: %s", exc)
+    except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return
+        raise
 
     targets: list[str] = []
     if entries:
@@ -828,57 +823,29 @@ def _win32_set_file_clipboard_from_archive(
                 targets.append(candidate)
 
     if not targets:
-        logging.error("Could not determine extracted clipboard targets; aborting.")
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return
+        raise ValueError("Could not determine extracted clipboard targets")
 
     try:
         payload = _win32_build_dropfiles_payload(targets)
-    except Exception as exc:
-        logging.error("Failed to build DROPFILES payload: %s", exc)
+    except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        return
-
-    try:
-        _win32_set_clipboard_bytes(win32con.CF_HDROP, payload)
-        if CFSTR_PREFERREDDROPEFFECT is not None:
-            try:
-                effect_data = struct.pack("<I", DROPEFFECT_COPY)
-                _win32_set_clipboard_bytes(
-                    CFSTR_PREFERREDDROPEFFECT, effect_data
-                )
-            except Exception as exc:
-                logging.debug(
-                    "Failed to set preferred drop effect on clipboard: %s",
-                    exc,
-                )
-        logging.info(
-            "Set clipboard file list (%d item%s) from shared data.",
-            len(targets),
-            "s" if len(targets) != 1 else "",
-        )
-    except Exception as exc:
-        logging.error("Failed to apply file clipboard payload: %s", exc)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return
+        raise
 
     global _LAST_EXTRACTED_DIR
     _LAST_EXTRACTED_DIR = temp_dir
+    return payload
 
 
-def _win32_set_file_clipboard_from_path(
+def _prepare_win32_file_payload_from_path(
     path: str, entries: Sequence[Dict[str, Any]]
-) -> None:
+) -> bytes:
     if win32clipboard is None:
-        return
+        raise RuntimeError("File clipboard operations require Windows APIs")
     if not path:
-        logging.debug("Ignoring empty file clipboard payload")
-        return
-    try:
-        with zipfile.ZipFile(path) as archive:
-            _win32_set_file_clipboard_from_archive(archive, entries)
-    except zipfile.BadZipFile:
-        logging.error("Received invalid clipboard archive; refusing to apply.")
+        raise ValueError("Empty file clipboard payload supplied")
+    with zipfile.ZipFile(path) as archive:
+        return _prepare_win32_file_payload_from_archive(archive, entries)
 
 
 def _extract_image_metadata(item: ClipboardItem, raw: bytes) -> None:
@@ -1480,7 +1447,13 @@ def set_clipboard_from_file(path: str, fmt: Optional[str] = None) -> None:
         if win32clipboard is None:
             logging.info("File clipboard payload ignored on non-Windows platform.")
             return
-        _win32_set_file_clipboard_from_path(path, [])
+        try:
+            with open(path, "rb") as handle:
+                raw = handle.read()
+        except Exception as exc:
+            logging.error("Failed to read clipboard file payload %s: %s", path, exc)
+            return
+        write_clipboard_content({"format": "files", "data": raw})
         return
 
     logging.debug("Unsupported clipboard payload extension: %s", extension)
@@ -1505,6 +1478,18 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
         logging.debug(
             "Requested clipboard write: %s", _describe_clipboard_item(normalized)
         )
+
+        file_payload: Optional[bytes] = None
+        file_entries: Sequence[Dict[str, Any]] = []
+        if fmt == "files" and win32clipboard is not None:  # pragma: no cover - Windows
+            file_entries = normalized.get("entries") or []
+            try:
+                file_payload = _prepare_win32_file_payload(
+                    normalized["data"], file_entries
+                )
+            except Exception as exc:
+                logging.error("Failed to prepare file clipboard payload: %s", exc)
+                return
 
         if win32clipboard is not None:  # pragma: no cover - Windows
             for attempt in range(retries):
@@ -1574,12 +1559,26 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                                     f"Unsupported image encoding for clipboard: {encoding}"
                                 )
                         elif fmt == "files":
-                            entries = normalized.get("entries") or []
-                            _win32_set_file_clipboard(normalized["data"], entries)
+                            if file_payload is None:
+                                raise ValueError("File clipboard payload not prepared")
+                            win32clipboard.SetClipboardData(
+                                win32con.CF_HDROP, file_payload
+                            )
+                            if CFSTR_PREFERREDDROPEFFECT is not None:
+                                try:
+                                    effect_data = struct.pack("<I", DROPEFFECT_COPY)
+                                    _win32_set_clipboard_bytes(
+                                        CFSTR_PREFERREDDROPEFFECT, effect_data
+                                    )
+                                except Exception as exc:
+                                    logging.debug(
+                                        "Failed to set preferred drop effect on clipboard: %s",
+                                        exc,
+                                    )
                             logging.info(
                                 "Set clipboard files (count=%s, attempt=%d)",
                                 normalized.get("file_count")
-                                or len(entries)
+                                or len(file_entries)
                                 or "?",
                                 attempt + 1,
                             )
@@ -1607,6 +1606,8 @@ def write_clipboard_content(item: ClipboardItem, retries: int = 5, delay: float 
                     if clipboard_opened:
                         _win32_close_clipboard()
             else:
+                if file_payload is not None:
+                    _cleanup_last_temp_dir()
                 logging.error("Giving up on setting clipboard via win32 API.")
             return
 
