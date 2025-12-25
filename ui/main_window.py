@@ -417,9 +417,12 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         logging.info(f"GUI Status Update: {message}")
 
-    def apply_clipboard_content(self, path, fmt):
-        logging.info("INFO: Main thread writing clipboard content....")
-        set_clipboard_from_file(path, fmt)
+    def apply_clipboard_content(self, path: str, fmt: str) -> None:
+        logging.info(f"Main thread writing clipboard content (path={path}, fmt={fmt})...")
+        try:
+            set_clipboard_from_file(path, fmt)
+        except Exception as e:
+            logging.error(f"Failed to set clipboard in main thread: {e}")
 
     def get_temp_icon(self):
         """Return the application icon."""

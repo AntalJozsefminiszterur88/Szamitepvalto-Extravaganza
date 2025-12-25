@@ -941,6 +941,7 @@ class ClipboardManager(QObject):
 
     def _handle_clipboard_notify_message(self, sock, data: dict) -> None:
         filename = data.get('filename')
+        logging.info(f"Received clipboard notify: {filename}")
         if not isinstance(filename, str) or not filename:
             logging.debug("Missing filename in clipboard notify payload from %s", sock)
             return
@@ -988,7 +989,6 @@ class ClipboardManager(QObject):
                 if digest:
                     self._last_injected_digest = digest
                 self._last_clipboard_write_time = time.time()
-                self.clipboard_write_request.emit(target_path, fmt)
             except Exception as exc:
                 logging.error("Failed to apply downloaded clipboard payload: %s", exc, exc_info=True)
                 return
@@ -1002,6 +1002,7 @@ class ClipboardManager(QObject):
             self._last_clipboard_metadata = stored.copy()
             with self.clipboard_lock:
                 self.shared_clipboard_item = stored
+            self.clipboard_write_request.emit(target_path, fmt)
 
         threading.Thread(
             target=_apply_download, name="ClipboardCentralApply", daemon=True
