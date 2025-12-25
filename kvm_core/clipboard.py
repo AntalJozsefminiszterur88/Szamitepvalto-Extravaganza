@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Callable, Iterable, Optional
 
+from PySide6.QtCore import QObject, Signal
+
 from config.constants import BRAND_NAME
 from kvm_core.clipboard_server import CentralClipboardServer, CENTRAL_CLIPBOARD_PORT
 from utils.path_helpers import resolve_documents_directory
@@ -25,16 +27,16 @@ from utils.clipboard_sync import (
     normalize_clipboard_item,
     pack_files_to_zip,
     read_clipboard_content,
-    set_clipboard_from_file,
-    write_clipboard_content,
 )
 
 CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
 CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 
-class ClipboardManager:
+class ClipboardManager(QObject):
     """Encapsulates shared clipboard synchronisation logic."""
+
+    clipboard_write_request = Signal(str, str)
 
     def __init__(
         self,
@@ -47,6 +49,7 @@ class ClipboardManager:
         get_input_provider_socket: Optional[Callable[[], Any]] = None,
         get_client_sockets: Optional[Callable[[], Iterable[Any]]] = None,
     ) -> None:
+        super().__init__()
         self.settings = settings
         self._broadcast_callback = send_message_callback
         self._send_to_peer_callback = send_to_peer_callback
@@ -619,12 +622,18 @@ class ClipboardManager:
             return
         try:
             self._ignore_next_clipboard_change.set()
-            write_clipboard_content(item)
-            self._last_clipboard_write_time = time.time()
-            digest = self._compute_item_digest(item)
+            fmt = str(item.get('format') or 'text')
+            prepared = self._prepare_clipboard_upload(item, fmt)
+            if not prepared:
+                logging.error("Failed to prepare clipboard payload for %s.", fmt)
+                return
+            file_path, metadata, _cleanup_paths = prepared
+            digest = metadata.get('digest') or self._compute_item_digest(item)
             if digest:
                 self._last_injected_digest = digest
-            logging.debug("System clipboard updated from shared data.")
+            self._last_clipboard_write_time = time.time()
+            self.clipboard_write_request.emit(file_path, fmt)
+            logging.debug("System clipboard write requested from shared data.")
         except Exception as exc:
             logging.error("Failed to set clipboard: %s", exc, exc_info=True)
 
@@ -963,8 +972,6 @@ class ClipboardManager:
             try:
                 self._internal_update_flag = True
                 self._ignore_next_clipboard_change.set()
-                set_clipboard_from_file(target_path, fmt if fmt == 'files' else None)
-                self._last_clipboard_write_time = time.time()
                 try:
                     with open(target_path, "rb") as handle:
                         raw = handle.read()
@@ -978,7 +985,10 @@ class ClipboardManager:
                         digest = _compute_file_payload_digest(raw)
                 except Exception:
                     digest = metadata.get('digest')
-                self._last_injected_digest = digest
+                if digest:
+                    self._last_injected_digest = digest
+                self._last_clipboard_write_time = time.time()
+                self.clipboard_write_request.emit(target_path, fmt)
             except Exception as exc:
                 logging.error("Failed to apply downloaded clipboard payload: %s", exc, exc_info=True)
                 return
