@@ -77,6 +77,7 @@ class KVMOrchestrator(QObject):
 
     finished = Signal()
     status_update = Signal(str)
+    clipboard_write_request = Signal(str, str)
 
     def __init__(
         self,
@@ -201,6 +202,9 @@ class KVMOrchestrator(QObject):
             send_to_provider_callback=self._send_to_provider,
             get_input_provider_socket=lambda: self.input_provider_socket,
             get_client_sockets=self.state.get_client_sockets,
+        )
+        self.clipboard_manager.clipboard_write_request.connect(
+            self.clipboard_write_request
         )
 
         self.message_handler = MessageHandler(
