@@ -70,9 +70,10 @@ class ClipboardManager:
         self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
         self._persisted_payloads: dict[tuple[str, str], list[str]] = {}
         self._last_processed_clipboard_sequence: Optional[int] = None
-        self._write_cooldown: float = 0.0
+        self._last_clipboard_write_time: float = 0.0
         self._clipboard_http_server: Optional[ClipboardHTTPServer] = None
-        self.is_internal_update = False
+        self._clipboard_http_shutdown_timer: Optional[threading.Timer] = None
+        self._internal_update_flag = False
 
         if self.settings.get('role') == 'ado':
             self._initialize_clipboard_storage()
@@ -113,6 +114,11 @@ class ClipboardManager:
         self._thread = None
         self._last_clipboard_sequence = None
         self._last_processed_clipboard_sequence = None
+        if self._clipboard_http_server:
+            self._clipboard_http_server.stop()
+        if self._clipboard_http_shutdown_timer:
+            self._clipboard_http_shutdown_timer.cancel()
+            self._clipboard_http_shutdown_timer = None
         logging.info(f"{self.__class__.__name__} stopped.")
 
     # ------------------------------------------------------------------
@@ -580,7 +586,7 @@ class ClipboardManager:
         try:
             self._ignore_next_clipboard_change.set()
             write_clipboard_content(item)
-            self._write_cooldown = time.time() + 1.5
+            self._last_clipboard_write_time = time.time()
             logging.debug("System clipboard updated from shared data.")
         except Exception as exc:
             logging.error("Failed to set clipboard: %s", exc, exc_info=True)
@@ -676,16 +682,22 @@ class ClipboardManager:
 
         server = self._get_clipboard_http_server()
         try:
-            download_url = server.start(packaged['path'])
+            server.start(packaged['path'])
         except Exception as exc:
             logging.error("Failed to serve clipboard zip via HTTP: %s", exc)
             return None
+
+        if not server.base_url:
+            logging.error("Clipboard HTTP server did not provide a download URL.")
+            return None
+
+        self._schedule_clipboard_http_shutdown()
 
         ts = float(timestamp if timestamp is not None else item.get('timestamp', time.time()))
         payload = {
             'type': 'clipboard_download',
             'format': fmt,
-            'url': download_url,
+            'url': server.base_url,
             'timestamp': ts,
             'encoding': packaged.get('encoding'),
             'size': packaged.get('size'),
@@ -770,9 +782,6 @@ class ClipboardManager:
         return self._build_clipboard_payload(item)
 
     def _handle_clipboard_data_message(self, sock, data: dict, *, from_local: bool = False) -> None:
-        if data.get('format') == 'files' and data.get('download_url'):
-            self._handle_clipboard_http_download(data)
-            return
         item = normalize_clipboard_item(data)
         if not item:
             logging.debug("Ignoring invalid clipboard payload from %s", sock)
@@ -789,10 +798,10 @@ class ClipboardManager:
                     item['timestamp'] = float(time.time())
             stored = self._store_shared_clipboard(item, timestamp=item.get('timestamp'))
             if not from_local and not clipboard_items_equal(item, self.last_clipboard_item):
-                self.is_internal_update = True
+                self._internal_update_flag = True
                 self._apply_system_clipboard(item)
-                time.sleep(1)
-                self.is_internal_update = False
+                time.sleep(0.2)
+                self._internal_update_flag = False
             self._remember_last_clipboard(stored)
             payload = self._build_clipboard_payload(stored)
             provider = self._get_input_provider_socket()
@@ -816,10 +825,10 @@ class ClipboardManager:
                 except (TypeError, ValueError):
                     item['timestamp'] = float(time.time())
             if not clipboard_items_equal(item, self.last_clipboard_item):
-                self.is_internal_update = True
+                self._internal_update_flag = True
                 self._apply_system_clipboard(item)
-                time.sleep(1)
-                self.is_internal_update = False
+                time.sleep(0.2)
+                self._internal_update_flag = False
             self._remember_last_clipboard(item)
             if timestamp is not None:
                 stored = item.copy()
@@ -860,10 +869,10 @@ class ClipboardManager:
         except (TypeError, ValueError):
             ts_value = time.time()
         item['timestamp'] = ts_value
-        self.is_internal_update = True
+        self._internal_update_flag = True
         self._apply_system_clipboard(item)
-        time.sleep(1)
-        self.is_internal_update = False
+        time.sleep(0.2)
+        self._internal_update_flag = False
         self._remember_last_clipboard(item)
         with self.clipboard_lock:
             self.shared_clipboard_item = item.copy()
@@ -890,7 +899,7 @@ class ClipboardManager:
         }
         metadata['format'] = fmt
 
-        logging.info("Nagy adat érkezett, letöltés HTTP-n...")
+        logging.info("Downloading clipboard from %s.", url)
 
         temp = None
         try:
@@ -917,7 +926,7 @@ class ClipboardManager:
             if not download_file(url, target_path):
                 return
             try:
-                self.is_internal_update = True
+                self._internal_update_flag = True
                 if fmt == 'image':
                     extracted = self._extract_single_file_from_zip(target_path)
                     if extracted:
@@ -926,12 +935,13 @@ class ClipboardManager:
                 else:
                     self._ignore_next_clipboard_change.set()
                     set_clipboard_from_file(target_path, 'files')
-                time.sleep(1)
+                self._last_clipboard_write_time = time.time()
+                time.sleep(0.2)
             except Exception as exc:
                 logging.error("Failed to apply downloaded clipboard files: %s", exc, exc_info=True)
                 return
             finally:
-                self.is_internal_update = False
+                self._internal_update_flag = False
 
             stored: dict[str, Any] = {
                 'format': fmt,
@@ -947,16 +957,12 @@ class ClipboardManager:
             self._remember_last_clipboard(stored)
             self.last_clipboard_item = stored.copy()
             self._last_clipboard_metadata = stored.copy()
-            self._write_cooldown = time.time() + 1.5
             with self.clipboard_lock:
                 self.shared_clipboard_item = stored
 
         threading.Thread(
             target=_apply_download, name="ClipboardHTTPApply", daemon=True
         ).start()
-
-    def _handle_clipboard_http_download(self, data: dict) -> None:
-        self._handle_clipboard_download_message(None, data)
 
     def _handle_clipboard_clear_message(self, sock) -> None:
         role = self.settings.get('role')
@@ -1040,6 +1046,20 @@ class ClipboardManager:
             if not self._send_to_peer_callback(sock, payload):
                 logging.warning("Failed to send clipboard HTTP payload to %s", sock)
             return
+        if fmt == 'image':
+            item = read_clipboard_content()
+            if not item:
+                logging.debug("Clipboard read produced no data for %s", sock)
+                return
+            payload = self._build_clipboard_download_payload(
+                item, 'image', timestamp=metadata.get('timestamp', time.time())
+            )
+            if not payload:
+                logging.debug("Failed to package clipboard image for %s", sock)
+                return
+            if not self._send_to_peer_callback(sock, payload):
+                logging.warning("Failed to send clipboard HTTP payload to %s", sock)
+            return
 
         item = read_clipboard_content()
         if not item:
@@ -1059,10 +1079,7 @@ class ClipboardManager:
     def _clipboard_loop_server(self) -> None:
         logging.info("Clipboard server loop started.")
         while self._running.is_set():
-            if self.is_internal_update:
-                time.sleep(0.5)
-                continue
-            if time.time() < self._write_cooldown:
+            if self._internal_update_flag or time.time() - self._last_clipboard_write_time < 1:
                 time.sleep(0.1)
                 continue
             if self._ignore_next_clipboard_change.is_set():
@@ -1182,10 +1199,7 @@ class ClipboardManager:
     def _clipboard_loop_client(self) -> None:
         logging.info("Clipboard client loop started.")
         while self._running.is_set():
-            if self.is_internal_update:
-                time.sleep(0.5)
-                continue
-            if time.time() < self._write_cooldown:
+            if self._internal_update_flag or time.time() - self._last_clipboard_write_time < 1:
                 time.sleep(0.1)
                 continue
             if self._ignore_next_clipboard_change.is_set():
@@ -1294,3 +1308,18 @@ class ClipboardManager:
         sequence = get_clipboard_sequence_number()
         if sequence is not None:
             self._last_clipboard_sequence = sequence
+
+    def _schedule_clipboard_http_shutdown(self, timeout: float = 60.0) -> None:
+        if self._clipboard_http_shutdown_timer:
+            self._clipboard_http_shutdown_timer.cancel()
+        timer = threading.Timer(timeout, self._maybe_stop_clipboard_http_server)
+        timer.daemon = True
+        self._clipboard_http_shutdown_timer = timer
+        timer.start()
+
+    def _maybe_stop_clipboard_http_server(self) -> None:
+        server = self._clipboard_http_server
+        if server and not server.has_downloaded:
+            logging.info("Stopping clipboard HTTP server after inactivity.")
+            server.stop()
+        self._clipboard_http_shutdown_timer = None
