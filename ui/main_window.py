@@ -3,6 +3,7 @@
 
 import sys
 import time
+import threading
 import logging
 import os
 import socket
@@ -331,7 +332,10 @@ class MainWindow(QMainWindow):
         self.kvm_thread.started.connect(self.kvm_worker.run)
         self.kvm_worker.finished.connect(self.on_service_stopped)
         self.kvm_worker.status_update.connect(self.on_status_update)
-        self.kvm_worker.clipboard_write_request.connect(self.apply_clipboard_content)
+        self.kvm_worker.clipboard_write_request.connect(
+            self.apply_clipboard_content,
+            Qt.QueuedConnection,
+        )
         self.kvm_thread.start()
         self.start_button.setText("KVM Szolgáltatás Leállítása")
         # Prevent accidental double starts
@@ -418,7 +422,15 @@ class MainWindow(QMainWindow):
         logging.info(f"GUI Status Update: {message}")
 
     def apply_clipboard_content(self, path: str, fmt: str) -> None:
-        logging.info(f"Main thread writing clipboard content (path={path}, fmt={fmt})...")
+        current_thread = threading.current_thread().name
+        on_main_thread = current_thread == "MainThread"
+        logging.info(
+            "Main thread clipboard write request (path=%s, fmt=%s, thread=%s, is_main=%s)",
+            path,
+            fmt,
+            current_thread,
+            on_main_thread,
+        )
         try:
             set_clipboard_from_file(path, fmt)
         except Exception as e:

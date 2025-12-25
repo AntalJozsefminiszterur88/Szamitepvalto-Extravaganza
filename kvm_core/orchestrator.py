@@ -34,7 +34,7 @@ from kvm_core.input.host_capture import HostInputCapture
 from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
 from kvm_core.state import KVMState
-from PySide6.QtCore import QObject, Signal, QSettings
+from PySide6.QtCore import QObject, Signal, QSettings, Qt
 from config.constants import (
     SERVICE_TYPE,
     SERVICE_NAME_PREFIX,
@@ -204,7 +204,8 @@ class KVMOrchestrator(QObject):
             get_client_sockets=self.state.get_client_sockets,
         )
         self.clipboard_manager.clipboard_write_request.connect(
-            self.clipboard_write_request
+            self.clipboard_write_request.emit,
+            Qt.QueuedConnection,
         )
 
         self.message_handler = MessageHandler(
