@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from queue import Empty, Queue
 from typing import Callable, Dict, Optional
 
 import serial
@@ -24,6 +25,8 @@ class ButtonInputManager:
         self.worker = worker
         self._running = threading.Event()
         self._serial_thread: Optional[threading.Thread] = None
+        self._serial_action_thread: Optional[threading.Thread] = None
+        self._serial_queue: Queue[Optional[str]] = Queue()
         self._keyboard_listener: Optional[keyboard.Listener] = None
         self._keyboard_controller = Controller()
         self._synthetic_keys: set[Key] = set()
@@ -42,6 +45,12 @@ class ButtonInputManager:
             return
         self._running.set()
         self._start_keyboard_listener()
+        self._serial_action_thread = threading.Thread(
+            target=self._serial_action_loop,
+            daemon=True,
+            name="PicoSerialActionWorker",
+        )
+        self._serial_action_thread.start()
         self._serial_thread = threading.Thread(
             target=self._serial_loop,
             daemon=True,
@@ -62,6 +71,10 @@ class ButtonInputManager:
         if self._serial_thread and self._serial_thread.is_alive():
             self._serial_thread.join(timeout=2)
         self._serial_thread = None
+        if self._serial_action_thread and self._serial_action_thread.is_alive():
+            self._serial_queue.put_nowait(None)
+            self._serial_action_thread.join(timeout=2)
+        self._serial_action_thread = None
         logging.info("ButtonInputManager stopped")
 
     # ------------------------------------------------------------------
@@ -290,12 +303,25 @@ class ButtonInputManager:
                             continue
                         if not message:
                             continue
-                        action = self._serial_action_map.get(message)
-                        if action:
-                            action()
-                        else:
-                            logging.debug("Unknown Pico message: %s", message)
+                        try:
+                            self._serial_queue.put_nowait(message)
+                        except Exception:
+                            logging.warning("Serial message queue full, dropping: %s", message)
             except serial.SerialException as exc:
                 logging.info("Unable to open Pico serial device %s: %s", port_name, exc)
                 time.sleep(1)
         logging.info("Pico serial listener terminated")
+
+    def _serial_action_loop(self) -> None:
+        while self._running.is_set():
+            try:
+                message = self._serial_queue.get(timeout=0.5)
+            except Empty:
+                continue
+            if message is None:
+                continue
+            action = self._serial_action_map.get(message)
+            if action:
+                action()
+            else:
+                logging.debug("Unknown Pico message: %s", message)
