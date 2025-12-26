@@ -77,6 +77,7 @@ class ButtonInputManager:
             Key.f16: lambda: self._handle_hdmi1("keyboard F16"),
             Key.f17: lambda: self._handle_hdmi2("keyboard F17"),
             Key.f21: lambda: self._handle_monitor_toggle("keyboard F21"),
+            Key.f22: lambda: self._forward_or_emit_host_key(Key.f22, "keyboard F22"),
         }
         self._serial_action_map = {
             "KEY_Asztal": lambda: self._handle_asztal("pico KEY_Asztal"),
