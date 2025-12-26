@@ -189,7 +189,7 @@ class KVMOrchestrator(QObject):
         if ENABLE_SHARED_CLIPBOARD:
             self.clipboard_manager = ClipboardManager(
                 role=role,
-                get_server_ip=lambda: settings_store.value("network/last_server_ip", None),
+                get_server_ip=self._get_clipboard_server_ip,
             )
         else:
             logging.info("Shared clipboard sync is temporarily disabled.")
@@ -256,6 +256,22 @@ class KVMOrchestrator(QObject):
         if role != "ado" and self.remote_log_handler:
             root_logger.addHandler(self.remote_log_handler)
             logging.info("Remote logging handler attached for client role.")
+
+    def _get_clipboard_server_ip(self) -> Optional[str]:
+        if self.server_socket:
+            try:
+                peer = self.server_socket.getpeername()
+            except OSError:
+                peer = None
+            if isinstance(peer, tuple) and peer:
+                return peer[0]
+        if self.last_server_ip:
+            return self.last_server_ip
+        settings_store = QSettings(ORG_NAME, APP_NAME)
+        stored_ip = settings_store.value("network/last_server_ip", None)
+        if stored_ip:
+            self.last_server_ip = stored_ip
+        return stored_ip
 
     def release_hotkey_keys(self):
         """Release potential stuck hotkey keys without generating input."""
