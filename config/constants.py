@@ -23,7 +23,7 @@ CLIPBOARD_PORT = 54545
 CLIPBOARD_PROTOCOL_ID = b"LAN_CLIPBOARD_SECURE_V4"
 
 # Közös vágólap szinkron ideiglenes kapcsoló
-ENABLE_SHARED_CLIPBOARD = False
+ENABLE_SHARED_CLIPBOARD = True
 
 # Gyorsbillentyű virtuális kódjai
 VK_CTRL = 162  # bal Ctrl
