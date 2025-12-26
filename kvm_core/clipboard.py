@@ -2,809 +2,657 @@ import io
 import logging
 import os
 import shutil
+import socket
+import struct
+import subprocess
 import threading
 import time
 import zipfile
-from datetime import datetime
-from pathlib import PurePosixPath
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
-from config.constants import BRAND_NAME
-from utils.path_helpers import resolve_documents_directory
-from utils.clipboard_sync import (
-    clear_clipboard,
-    clipboard_items_equal,
-    get_clipboard_sequence_number,
-    normalize_clipboard_item,
-    read_clipboard_content,
-    write_clipboard_content,
+import pyperclip
+from PIL import Image, ImageGrab
+import win32clipboard
+from PySide6.QtCore import Q_ARG, QCoreApplication, QMetaObject, QObject, Qt, QThread, Slot
+from PySide6.QtGui import QGuiApplication
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QPushButton,
+    QProgressBar,
+    QVBoxLayout,
+    QWidget,
 )
 
-CLIPBOARD_STORAGE_DIRNAME = "SharedClipboard"
+from config.constants import CLIPBOARD_PORT, CLIPBOARD_PROTOCOL_ID
+
 CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+
+CACHE_DIR = r"C:\Users\Szerver\Documents\UMKGL Solutions\Szamitepvalto-Extravaganza\ClipboardCache"
+RECONNECT_DELAY = 3
+
+CONFIRM_FILE_COUNT = 10
+CONFIRM_SIZE_MB = 50
+MAX_RAM_ZIP_SIZE = 500 * 1024 * 1024
+
+TYPE_HANDSHAKE = 0
+TYPE_TEXT = 1
+TYPE_IMAGE = 2
+TYPE_FILES = 3
+
+
+class FloatingProgress(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowFlags(
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setFixedSize(300, 80)
+
+        container = QWidget(self)
+        container.setStyleSheet("background-color: #333333; border-radius: 6px;")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(12, 10, 12, 10)
+
+        self.label = QLabel("Feldolgozás...")
+        self.label.setStyleSheet("color: white; font-size: 10pt;")
+        layout.addWidget(self.label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        layout.addWidget(self.progress)
+
+        container.setGeometry(0, 0, 300, 80)
+        self._position_window()
+
+    def _position_window(self) -> None:
+        screen = QGuiApplication.primaryScreen()
+        if not screen:
+            return
+        geometry = screen.availableGeometry()
+        x = geometry.right() - self.width() - 20
+        y = geometry.bottom() - self.height() - 60
+        self.move(x, y)
+
+    def update_text(self, text: str) -> None:
+        self.label.setText(text)
+
+    def stop_and_close(self) -> None:
+        self.close()
+
+
+class ConfirmDialog(QDialog):
+    def __init__(self, file_list: list[str], total_size_mb: float) -> None:
+        super().__init__()
+        self.setWindowTitle("Megerősítés")
+        self.setModal(True)
+        self.resize(500, 400)
+        self.result = False
+
+        layout = QVBoxLayout(self)
+        header = QLabel("ADAT FOGADÁSA")
+        header.setStyleSheet("color: #2196F3; font-size: 14pt; font-weight: bold;")
+        header.setAlignment(Qt.AlignCenter)
+        layout.addWidget(header)
+
+        info_text = f"Méret: {total_size_mb:.2f} MB\nFájlok száma: {len(file_list)} db"
+        info_label = QLabel(info_text)
+        info_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(info_label)
+
+        list_widget = QListWidget()
+        for path in file_list:
+            list_widget.addItem(os.path.basename(path))
+        layout.addWidget(list_widget)
+
+        button_layout = QHBoxLayout()
+        cancel_button = QPushButton("ELVETÉS")
+        cancel_button.setStyleSheet("background-color: #f44336; color: white; padding: 6px 12px;")
+        cancel_button.clicked.connect(self._on_cancel)
+        ok_button = QPushButton("BEILLESZTÉS")
+        ok_button.setStyleSheet("background-color: #4CAF50; color: white; padding: 6px 12px;")
+        ok_button.clicked.connect(self._on_ok)
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(ok_button)
+        layout.addLayout(button_layout)
+
+    def _on_ok(self) -> None:
+        self.result = True
+        self.accept()
+
+    def _on_cancel(self) -> None:
+        self.result = False
+        self.reject()
+
+
+class ClipboardUiHelper(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.progress_win: Optional[FloatingProgress] = None
+
+    @Slot(object)
+    def show_progress(self, text: object) -> None:
+        message = str(text)
+        if self.progress_win:
+            self.progress_win.update_text(message)
+            return
+        self.progress_win = FloatingProgress()
+        self.progress_win.update_text(message)
+        self.progress_win.show()
+
+    @Slot()
+    def hide_progress(self) -> None:
+        if not self.progress_win:
+            return
+        self.progress_win.stop_and_close()
+        self.progress_win = None
+
+    @Slot(object, object, object)
+    def confirm_files(self, file_list: object, total_size_mb: object, result_container: object) -> None:
+        files = list(file_list) if isinstance(file_list, (list, tuple)) else []
+        size_mb = float(total_size_mb) if total_size_mb is not None else 0.0
+        dialog = ConfirmDialog(files, size_mb)
+        dialog.exec()
+        if isinstance(result_container, dict):
+            result_container["result"] = dialog.result
+            event = result_container.get("event")
+            if isinstance(event, threading.Event):
+                event.set()
 
 
 class ClipboardManager:
-    """Encapsulates shared clipboard synchronisation logic."""
+    """Clipboard synchronization via dedicated TCP socket connections."""
 
-    def __init__(
-        self,
-        settings: dict,
-        send_message_callback: Callable[[dict, Optional[Iterable[Any]]], None],
-        *,
-        send_to_peer_callback: Callable[[Any, dict], bool],
-        get_server_socket: Callable[[], Any],
-        send_to_provider_callback: Optional[Callable[[dict], bool]] = None,
-        get_input_provider_socket: Optional[Callable[[], Any]] = None,
-        get_client_sockets: Optional[Callable[[], Iterable[Any]]] = None,
-    ) -> None:
-        self.settings = settings
-        self._broadcast_callback = send_message_callback
-        self._send_to_peer_callback = send_to_peer_callback
-        self._get_server_socket = get_server_socket
-        self._send_to_provider_callback = send_to_provider_callback or (lambda payload: False)
-        self._get_input_provider_socket = get_input_provider_socket or (lambda: None)
-        self._get_client_sockets = get_client_sockets or (lambda: [])
+    def __init__(self, *, role: str, get_server_ip: Optional[Callable[[], Optional[str]]] = None) -> None:
+        self.role = role
+        self.is_server = role == "ado"
+        self._get_server_ip = get_server_ip or (lambda: None)
 
-        self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
-        self._running.clear()
+        self._thread: Optional[threading.Thread] = None
+        self._monitor_thread: Optional[threading.Thread] = None
+
+        self.server_socket: Optional[socket.socket] = None
+        self.client_socket: Optional[socket.socket] = None
+        self.clients: list[socket.socket] = []
+        self._clients_lock = threading.Lock()
+
+        self.ignore_next_change = False
+        self.is_internal_update = False
 
         self.clipboard_lock = threading.Lock()
-        self.last_clipboard_item: Optional[dict] = None
-        self.shared_clipboard_item: Optional[dict] = None
-        self.clipboard_expiry_seconds = 12 * 60 * 60
-        self._ignore_next_clipboard_change = threading.Event()
-        self._last_clipboard_sequence: Optional[int] = None
+        self.last_text_content = ""
+        self.last_image_hash: Optional[int] = None
+        self.last_file_list_hash: Optional[int] = None
 
-        self.clipboard_storage_dir: Optional[str] = None
-        self._clipboard_cleanup_marker: Optional[str] = None
-        self._clipboard_last_cleanup: float = 0.0
-        self._clipboard_last_persisted_digest: Optional[tuple[str, str]] = None
-        self._persisted_payloads: dict[tuple[str, str], list[str]] = {}
-        self._last_processed_clipboard_sequence: Optional[int] = None
+        self._ui_helper: Optional[ClipboardUiHelper] = None
+        app_instance = QCoreApplication.instance()
+        if app_instance:
+            self._ui_helper = ClipboardUiHelper()
+            self._ui_helper.moveToThread(app_instance.thread())
 
-        if self.settings.get('role') == 'ado':
-            self._initialize_clipboard_storage()
+        os.makedirs(CACHE_DIR, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # Lifecycle helpers
-    # ------------------------------------------------------------------
     @property
     def thread(self) -> Optional[threading.Thread]:
-        return self._thread
+        return self._monitor_thread
 
     @property
     def storage_dir(self) -> Optional[str]:
-        return self.clipboard_storage_dir
+        return CACHE_DIR
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
 
+        logging.info("Starting clipboard sync (%s)", "server" if self.is_server else "client")
         self._running.set()
-        self._last_clipboard_sequence = None
-        self._last_processed_clipboard_sequence = None
-        role = self.settings.get('role')
-        if role == 'ado':
-            target = self._clipboard_loop_server
-            name = "ClipboardSrv"
+        self.flush_startup_clipboard()
+        self.clean_cache_directory()
+
+        self._monitor_thread = threading.Thread(
+            target=self.clipboard_monitor_loop,
+            daemon=True,
+            name="ClipboardMonitor",
+        )
+        self._monitor_thread.start()
+
+        if self.is_server:
+            target = self.start_server
+            name = "ClipboardServer"
         else:
-            target = self._clipboard_loop_client
-            name = "ClipboardCli"
+            target = self.start_client_loop
+            name = "ClipboardClient"
+
         self._thread = threading.Thread(target=target, daemon=True, name=name)
         self._thread.start()
 
     def stop(self) -> None:
-        logging.info(f"Stopping {self.__class__.__name__}...")
+        logging.info("Stopping ClipboardManager...")
         self._running.clear()
+        self._close_sockets()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1)
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=1)
         self._thread = None
-        self._last_clipboard_sequence = None
-        self._last_processed_clipboard_sequence = None
-        logging.info(f"{self.__class__.__name__} stopped.")
+        self._monitor_thread = None
+        self._invoke_ui("hide_progress")
+        logging.info("ClipboardManager stopped.")
 
-    # ------------------------------------------------------------------
-    # External interface
-    # ------------------------------------------------------------------
     def handle_network_message(self, peer: Any, data: dict) -> bool:
-        msg_type = data.get('type')
-        if msg_type == 'clipboard_data':
-            self._handle_clipboard_data_message(peer, data)
-            return True
-        if msg_type == 'clipboard_clear':
-            self._handle_clipboard_clear_message(peer)
-            return True
         return False
 
     def ensure_storage_cleanup(self, *, force: bool = False) -> None:
-        self._ensure_clipboard_storage_cleanup(force=force)
+        self.clean_cache_directory()
 
-    def get_shared_clipboard_snapshot(self) -> Optional[dict]:
-        """Return a serialisable snapshot of the shared clipboard state."""
+    def _invoke_ui(self, method: str, *args: object) -> None:
+        if not self._ui_helper:
+            return
+        helper = self._ui_helper
+        if QThread.currentThread() == helper.thread():
+            getattr(helper, method)(*args)
+            return
+        qargs = [Q_ARG(object, arg) for arg in args]
+        QMetaObject.invokeMethod(helper, method, Qt.QueuedConnection, *qargs)
 
-        with self.clipboard_lock:
-            if not self.shared_clipboard_item:
-                return None
-            item = self.shared_clipboard_item.copy()
+    def show_progress(self, text: str) -> None:
+        self._invoke_ui("show_progress", text)
 
-        snapshot: dict[str, Any] = {
-            'format': item.get('format'),
-            'timestamp': float(item.get('timestamp')) if item.get('timestamp') else None,
-        }
+    def hide_progress(self) -> None:
+        self._invoke_ui("hide_progress")
 
-        if snapshot['format'] == 'files':
-            entries: list[dict[str, Any]] = []
-            raw_entries = item.get('entries')
-            if isinstance(raw_entries, Iterable):
-                for entry in raw_entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    entries.append(
-                        {
-                            'name': str(entry.get('name', '')),
-                            'is_dir': bool(entry.get('is_dir', False)),
-                            'size': entry.get('size'),
-                        }
-                    )
-            snapshot['entries'] = entries
-            snapshot['file_count'] = item.get('file_count') or len(entries)
-            snapshot['total_size'] = item.get('total_size')
-            snapshot['size'] = item.get('size')
+    def confirm_files(self, file_list: list[str], total_size_mb: float) -> bool:
+        if not self._ui_helper:
+            return True
+        result_container = {"event": threading.Event(), "result": False}
+        self._invoke_ui("confirm_files", file_list, total_size_mb, result_container)
+        event = result_container["event"]
+        event.wait()
+        return bool(result_container.get("result"))
 
-        return snapshot
-
-    def clear_shared_clipboard(self, *, broadcast: bool = False) -> bool:
-        """Clear the shared clipboard contents if present."""
-
-        with self.clipboard_lock:
-            has_item = self.shared_clipboard_item is not None
-        if not has_item:
-            return False
-
-        self._clear_shared_clipboard(broadcast=broadcast)
-        return True
-
-    def purge_shared_clipboard_artifacts(self) -> int:
-        """Remove persisted files related to the active shared clipboard entry."""
-
-        directory = self.clipboard_storage_dir
-        if not directory:
-            return 0
-
-        with self.clipboard_lock:
-            item = self.shared_clipboard_item
-
-        if not item:
-            return 0
-
-        fmt = item.get('format')
-        digest = item.get('digest')
-        if not digest or not fmt:
-            return 0
-
-        key = (fmt, str(digest))
-        stored_paths = self._persisted_payloads.pop(key, [])
-        removed = 0
-        for path in stored_paths:
-            try:
-                if os.path.exists(path):
-                    os.remove(path)
-                    removed += 1
-            except Exception as exc:  # pragma: no cover - best-effort cleanup
-                logging.debug(
-                    "Failed to remove persisted clipboard artifact %s: %s",
-                    path,
-                    exc,
-                    exc_info=True,
-                )
-
-        if key == self._clipboard_last_persisted_digest:
-            self._clipboard_last_persisted_digest = None
-
-        return removed
-
-    # ------------------------------------------------------------------
-    # Clipboard utilities
-    # ------------------------------------------------------------------
-    def _initialize_clipboard_storage(self) -> None:
-        documents_dir = resolve_documents_directory()
-        if not documents_dir.exists():
-            try:
-                documents_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as exc:
-                logging.error(
-                    "Unable to create base documents directory %s: %s",
-                    documents_dir,
-                    exc,
-                    exc_info=True,
-                )
-                return
-
-        base_dir = os.path.join(
-            str(documents_dir),
-            BRAND_NAME,
-            "Szamitepvalto-Extravaganza",
-            CLIPBOARD_STORAGE_DIRNAME,
-        )
+    def flush_startup_clipboard(self) -> None:
+        logging.info("Clipboard startup snapshot...")
         try:
-            os.makedirs(base_dir, exist_ok=True)
-        except Exception as exc:
-            logging.error(
-                "Unable to create shared clipboard directory %s: %s",
-                base_dir,
-                exc,
-                exc_info=True,
-            )
-            return
+            self.last_text_content = pyperclip.paste()
+            content = ImageGrab.grabclipboard()
+            if isinstance(content, list):
+                self.last_file_list_hash = hash("".join(content))
+            elif isinstance(content, Image.Image):
+                buf = io.BytesIO()
+                content.save(buf, format="PNG")
+                self.last_image_hash = hash(buf.getvalue())
+        except Exception:
+            pass
 
-        self.clipboard_storage_dir = base_dir
-        self._clipboard_cleanup_marker = os.path.join(base_dir, ".last_cleanup")
-        logging.info("Shared clipboard storage initialised at %s", base_dir)
-        self._ensure_clipboard_storage_cleanup()
+    def send_message(self, sock: socket.socket, data_bytes: bytes, msg_type: int) -> None:
+        type_header = struct.pack("B", msg_type)
+        len_header = struct.pack(">I", len(data_bytes))
+        sock.sendall(type_header + len_header + data_bytes)
 
-    def _ensure_clipboard_storage_cleanup(self, *, force: bool = False) -> None:
-        directory = self.clipboard_storage_dir
-        marker = self._clipboard_cleanup_marker
-        if not directory or not marker:
-            return
-
-        now = time.time()
-        last_cleanup = self._clipboard_last_cleanup or 0.0
-
-        marker_timestamp: Optional[float] = None
-        if os.path.exists(marker):
-            try:
-                with open(marker, "r", encoding="utf-8") as handle:
-                    content = handle.read().strip()
-                if content:
-                    marker_timestamp = float(content)
-            except Exception as exc:
-                logging.debug(
-                    "Failed to read clipboard cleanup marker %s: %s",
-                    marker,
-                    exc,
-                )
-                marker_timestamp = None
-            if marker_timestamp is None:
-                try:
-                    marker_timestamp = os.path.getmtime(marker)
-                except OSError:
-                    marker_timestamp = None
-
-        if marker_timestamp:
-            last_cleanup = marker_timestamp
-            self._clipboard_last_cleanup = last_cleanup
-
-        if not force and last_cleanup and now - last_cleanup < CLIPBOARD_CLEANUP_INTERVAL_SECONDS:
-            return
-
-        logging.info(
-            "Performing daily cleanup of shared clipboard storage at %s",
-            directory,
-        )
-
+    def receive_message(self, sock: socket.socket) -> tuple[Optional[int], Optional[bytes]]:
         try:
-            entries = os.listdir(directory)
-        except Exception as exc:
-            logging.warning(
-                "Failed to list clipboard storage directory %s: %s",
-                directory,
-                exc,
-            )
-            entries = []
+            type_data = sock.recv(1)
+            if not type_data:
+                return None, None
+            msg_type = struct.unpack("B", type_data)[0]
 
-        performed_cleanup = False
-        for entry in entries:
-            path = os.path.join(directory, entry)
-            try:
-                if marker and os.path.abspath(path) == os.path.abspath(marker):
-                    continue
-            except OSError:
-                if marker and path == marker:
-                    continue
-            try:
-                if os.path.isdir(path):
-                    shutil.rmtree(path, ignore_errors=False)
-                else:
-                    os.remove(path)
-            except FileNotFoundError:
-                continue
-            except Exception as exc:
-                logging.warning(
-                    "Failed to remove clipboard artifact %s: %s",
-                    path,
-                    exc,
-                )
-            else:
-                performed_cleanup = True
+            len_data = sock.recv(4)
+            if not len_data:
+                return None, None
+            msg_len = struct.unpack(">I", len_data)[0]
 
+            data = b""
+            while len(data) < msg_len:
+                chunk = sock.recv(min(1024 * 1024, msg_len - len(data)))
+                if not chunk:
+                    return None, None
+                data += chunk
+            return msg_type, data
+        except Exception:
+            return None, None
+
+    def process_incoming_data(self, msg_type: int, data: bytes) -> None:
         try:
-            with open(marker, "w", encoding="utf-8") as handle:
-                handle.write(str(now))
-            os.utime(marker, (now, now))
-        except Exception as exc:
-            logging.warning(
-                "Failed to update clipboard cleanup marker %s: %s",
-                marker,
-                exc,
-            )
-        else:
-            self._clipboard_last_cleanup = now
-            if performed_cleanup:
-                self._persisted_payloads.clear()
+            self.is_internal_update = True
 
-    def _build_unique_storage_name(
-        self, base_name: str, *, extension: Optional[str] = None
-    ) -> str:
-        directory = self.clipboard_storage_dir
-        if not directory:
-            return base_name
-
-        safe_base = base_name.replace(os.sep, "_")
-        if os.altsep:
-            safe_base = safe_base.replace(os.altsep, "_")
-        candidate = safe_base
-        counter = 1
-
-        def _target(name: str) -> str:
-            if extension:
-                return os.path.join(directory, f"{name}{extension}")
-            return os.path.join(directory, name)
-
-        while os.path.exists(_target(candidate)):
-            counter += 1
-            candidate = f"{safe_base}_{counter:02d}"
-
-        return candidate
-
-    def _persist_clipboard_item(self, item: dict) -> None:
-        if self.settings.get('role') != 'ado':
-            return
-
-        self._ensure_clipboard_storage_cleanup()
-
-        directory = self.clipboard_storage_dir
-        if not directory:
-            logging.debug("Clipboard storage directory is not initialised; skipping persistence.")
-            return
-
-        fmt = item.get('format')
-        if fmt not in {'image', 'files'}:
-            return
-
-        digest = item.get('digest')
-        key: Optional[tuple[str, str]] = None
-        if digest:
-            key = (fmt, str(digest))
-            if key == self._clipboard_last_persisted_digest:
-                logging.debug(
-                    "Skipping clipboard persistence for duplicate %s payload (digest=%s).",
-                    fmt,
-                    digest,
-                )
-                return
-            stored_paths = self._persisted_payloads.get(key)
-            if stored_paths and all(os.path.exists(path) for path in stored_paths):
-                logging.debug(
-                    "Reusing existing persisted %s payload for digest %s (paths=%s).",
-                    fmt,
-                    digest,
-                    stored_paths,
-                )
-                self._clipboard_last_persisted_digest = key
-                return
-            if stored_paths:
-                self._persisted_payloads.pop(key, None)
-
-        raw_data = item.get('data')
-        if isinstance(raw_data, bytes):
-            payload = raw_data
-        elif isinstance(raw_data, bytearray):
-            payload = bytes(raw_data)
-        elif isinstance(raw_data, memoryview):
-            payload = raw_data.tobytes()
-        else:
-            logging.debug(
-                "Clipboard item in format %s does not provide raw bytes; skipping persistence.",
-                fmt,
-            )
-            return
-
-        digest_fragment = str(item.get('digest') or 'nohash')[:12]
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        base_name = f"{timestamp}_{fmt}_{digest_fragment}"
-
-        if fmt == 'image':
-            encoding = str(item.get('encoding') or 'dib').lower()
-            extension = '.png' if encoding == 'png' else '.dib'
-            unique_name = self._build_unique_storage_name(base_name, extension=extension)
-            target_path = os.path.join(directory, f"{unique_name}{extension}")
-            try:
-                with open(target_path, 'wb') as handle:
-                    handle.write(payload)
-            except Exception as exc:
-                logging.error(
-                    "Failed to persist clipboard image to %s: %s",
-                    target_path,
-                    exc,
-                    exc_info=True,
-                )
-                return
-
-            logging.info(
-                "Clipboard image saved to %s (%d bytes, encoding=%s).",
-                target_path,
-                len(payload),
-                encoding,
-            )
-            if key:
-                self._clipboard_last_persisted_digest = key
-                self._persisted_payloads[key] = [target_path]
-            return
-
-        if fmt != 'files':
-            return
-
-        unique_name = self._build_unique_storage_name(base_name)
-
-        extracted_files = []
-        skipped_members = 0
-        try:
-            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-
-                    normalized = PurePosixPath(info.filename.replace("\\", "/"))
-                    parts = [
-                        part
-                        for part in normalized.parts
-                        if part not in {"", ".", ".."}
-                    ]
-                    if not parts:
-                        skipped_members += 1
-                        continue
-
-                    original_name = parts[-1]
-                    stem, extension = os.path.splitext(original_name)
-
-                    prefix = "_".join(parts[:-1])
-                    if prefix:
-                        stem = f"{prefix}_{stem}" if stem else prefix
-
-                    candidate_base = f"{unique_name}_{stem}" if stem else unique_name
-                    safe_base = self._build_unique_storage_name(
-                        candidate_base,
-                        extension=extension if extension else None,
-                    )
-                    if extension:
-                        target_path = os.path.join(directory, f"{safe_base}{extension}")
-                    else:
-                        target_path = os.path.join(directory, safe_base)
-
-                    try:
-                        with archive.open(info, "r") as source, open(
-                            target_path, "wb"
-                        ) as destination:
-                            shutil.copyfileobj(source, destination)
-                    except Exception as exc:
-                        logging.warning(
-                            "Failed to extract clipboard file %s: %s",
-                            info.filename,
-                            exc,
-                        )
-                        try:
-                            os.remove(target_path)
-                        except OSError:
-                            pass
-                        continue
-
-                    extracted_files.append(target_path)
-        except zipfile.BadZipFile as exc:
-            logging.error(
-                "Clipboard file payload is not a valid archive: %s",
-                exc,
-            )
-            return
-        except Exception as exc:
-            logging.error(
-                "Failed to unpack clipboard files into %s: %s",
-                directory,
-                exc,
-                exc_info=True,
-            )
-            for path in extracted_files:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-            return
-
-        if not extracted_files:
-            logging.info(
-                "Clipboard file payload did not contain any extractable files (skipped %d members).",
-                skipped_members,
-            )
-            return
-
-        file_count = item.get('file_count')
-        if not file_count and item.get('entries'):
-            file_count = len(item['entries'])
-        try:
-            file_count_int = int(file_count) if file_count is not None else None
-        except (TypeError, ValueError):
-            file_count_int = None
-
-        logging.info(
-            "Clipboard files saved into %s (%s item%s, %d bytes payload, %d skipped).",
-            directory,
-            file_count_int if file_count_int is not None else 'unknown',
-            '' if file_count_int == 1 else 's',
-            len(payload),
-            skipped_members,
-        )
-        if key:
-            self._clipboard_last_persisted_digest = key
-            self._persisted_payloads[key] = extracted_files
-
-    def _remember_last_clipboard(self, item: Optional[dict]) -> None:
-        self.last_clipboard_item = item.copy() if item else None
-
-    def _apply_system_clipboard(self, item: dict) -> None:
-        if not item:
-            return
-        try:
-            self._ignore_next_clipboard_change.set()
-            write_clipboard_content(item)
-            logging.debug("System clipboard updated from shared data.")
-        except Exception as exc:
-            logging.error("Failed to set clipboard: %s", exc, exc_info=True)
-
-    def _store_shared_clipboard(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
-        stored = item.copy()
-        stored['timestamp'] = float(timestamp if timestamp is not None else time.time())
-        with self.clipboard_lock:
-            self.shared_clipboard_item = stored
-        if self.settings.get('role') == 'ado':
-            try:
-                self._persist_clipboard_item(stored)
-            except Exception as exc:
-                logging.error(
-                    "Failed to persist clipboard payload locally: %s",
-                    exc,
-                    exc_info=True,
-                )
-        return stored
-
-    def _build_clipboard_payload(self, item: dict, *, timestamp: Optional[float] = None) -> dict:
-        ts = float(timestamp if timestamp is not None else item.get('timestamp', time.time()))
-        payload = {
-            'type': 'clipboard_data',
-            'format': item['format'],
-            'encoding': item.get('encoding'),
-            'size': item.get('size'),
-            'digest': item.get('digest'),
-            'timestamp': ts,
-            'data': item['data'],
-        }
-        if 'length' in item:
-            payload['length'] = item['length']
-        if 'width' in item:
-            payload['width'] = item['width']
-        if 'height' in item:
-            payload['height'] = item['height']
-        if 'bits_per_pixel' in item:
-            payload['bits_per_pixel'] = item['bits_per_pixel']
-        if 'entries' in item:
-            payload['entries'] = item['entries']
-        if 'file_count' in item:
-            payload['file_count'] = item['file_count']
-        if 'total_size' in item:
-            payload['total_size'] = item['total_size']
-        return payload
-
-    def _apply_clipboard_clear(self) -> None:
-        self._ignore_next_clipboard_change.set()
-        try:
-            clear_clipboard()
-        except Exception as exc:
-            logging.error("Failed to clear clipboard: %s", exc, exc_info=True)
-        self._remember_last_clipboard(None)
-        with self.clipboard_lock:
-            self.shared_clipboard_item = None
-
-    def _clear_shared_clipboard(self, *, broadcast: bool = False) -> None:
-        logging.info("Clearing shared clipboard contents.")
-        self._apply_clipboard_clear()
-        if broadcast and self.settings.get('role') == 'ado':
-            payload = {'type': 'clipboard_clear', 'timestamp': time.time()}
-            provider = self._get_input_provider_socket()
-            exclude: set[Any] = set()
-            if provider:
-                if not self._send_to_provider_callback(payload):
-                    logging.warning("Failed to notify input provider about clipboard clear.")
-                exclude.add(provider)
-            clients = list(self._get_client_sockets())
-            if clients:
-                self._broadcast_callback(payload, exclude)
-
-    def _check_clipboard_expiration(self) -> None:
-        if self.settings.get('role') != 'ado':
-            return
-        with self.clipboard_lock:
-            item = self.shared_clipboard_item
-        if not item:
-            return
-        timestamp = item.get('timestamp')
-        if not timestamp:
-            return
-        if time.time() - float(timestamp) >= self.clipboard_expiry_seconds:
-            logging.info(
-                "Shared clipboard entry expired after %.0f seconds.",
-                self.clipboard_expiry_seconds,
-            )
-            self._clear_shared_clipboard(broadcast=True)
-
-    def _get_shared_clipboard_payload(self) -> Optional[dict]:
-        with self.clipboard_lock:
-            item = self.shared_clipboard_item
-        if not item:
-            return None
-        timestamp = item.get('timestamp')
-        if timestamp and time.time() - float(timestamp) >= self.clipboard_expiry_seconds:
-            return None
-        return self._build_clipboard_payload(item)
-
-    def _handle_clipboard_data_message(self, sock, data: dict, *, from_local: bool = False) -> None:
-        item = normalize_clipboard_item(data)
-        if not item:
-            logging.debug("Ignoring invalid clipboard payload from %s", sock)
-            return
-        timestamp = data.get('timestamp')
-        if from_local or timestamp is None:
-            timestamp = time.time()
-        role = self.settings.get('role')
-        if role == 'ado':
-            if timestamp is not None:
-                try:
-                    item['timestamp'] = float(timestamp)
-                except (TypeError, ValueError):
-                    item['timestamp'] = float(time.time())
-            stored = self._store_shared_clipboard(item, timestamp=item.get('timestamp'))
-            if not from_local and not clipboard_items_equal(item, self.last_clipboard_item):
-                self._apply_system_clipboard(item)
-            self._remember_last_clipboard(stored)
-            payload = self._build_clipboard_payload(stored)
-            provider = self._get_input_provider_socket()
-            exclude: set[Any] = set()
-            if sock:
-                exclude.add(sock)
-            if provider:
-                if provider is not sock:
-                    if not self._send_to_provider_callback(payload):
-                        logging.warning("Failed to forward clipboard update to input provider.")
-                    exclude.add(provider)
-                else:
-                    exclude.add(provider)
-            clients = list(self._get_client_sockets())
-            if clients:
-                self._broadcast_callback(payload, exclude)
-        else:
-            if timestamp is not None:
-                try:
-                    item['timestamp'] = float(timestamp)
-                except (TypeError, ValueError):
-                    item['timestamp'] = float(time.time())
-            if not clipboard_items_equal(item, self.last_clipboard_item):
-                self._apply_system_clipboard(item)
-            self._remember_last_clipboard(item)
-            if timestamp is not None:
-                stored = item.copy()
-                stored['timestamp'] = float(timestamp)
+            if msg_type == TYPE_TEXT:
+                text = data.decode("utf-8")
+                logging.info("Szöveg érkezett: %s kar.", len(text))
                 with self.clipboard_lock:
-                    self.shared_clipboard_item = stored
+                    self.last_text_content = text
+                    pyperclip.copy(text)
 
-    def _handle_clipboard_clear_message(self, sock) -> None:
-        role = self.settings.get('role')
-        if role == 'ado':
-            self._clear_shared_clipboard(broadcast=True)
-        else:
-            self._apply_clipboard_clear()
+            elif msg_type == TYPE_IMAGE:
+                logging.info("Kép érkezett: %s bájt.", len(data))
+                self.safe_set_clipboard_image(data)
 
-    # ------------------------------------------------------------------
-    # Clipboard synchronisation loops
-    # ------------------------------------------------------------------
-    def _clipboard_loop_server(self) -> None:
-        logging.info("Clipboard server loop started.")
+            elif msg_type == TYPE_FILES:
+                self.show_progress("Fogadás és kicsomagolás...")
+                logging.info("Zip érkezett (%0.1f KB).", len(data) / 1024)
+                file_paths = self.unpack_and_cache_files(data)
+
+                if file_paths:
+                    total_size = sum(os.path.getsize(f) for f in file_paths)
+                    size_mb = total_size / (1024 * 1024)
+                    count = len(file_paths)
+
+                    self.hide_progress()
+
+                    should_paste = True
+                    if count >= CONFIRM_FILE_COUNT or size_mb > CONFIRM_SIZE_MB:
+                        should_paste = self.confirm_files(file_paths, size_mb)
+
+                    if should_paste:
+                        logging.info("Beillesztés folyamatban...")
+                        self.set_clipboard_files_via_powershell(file_paths)
+                    else:
+                        logging.info("Elutasítva.")
+                        self.is_internal_update = False
+        except Exception as exc:
+            logging.exception("Clipboard processing error: %s", exc)
+            self.hide_progress()
+            self.is_internal_update = False
+
+    def clean_cache_directory(self) -> None:
+        try:
+            for filename in os.listdir(CACHE_DIR):
+                path = os.path.join(CACHE_DIR, filename)
+                try:
+                    if os.path.isfile(path):
+                        os.unlink(path)
+                    elif os.path.isdir(path):
+                        shutil.rmtree(path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def pack_files_to_zip(self, file_paths: list[str]) -> Optional[bytes]:
+        try:
+            self.show_progress("Tömörítés...")
+            mem_zip = io.BytesIO()
+            with zipfile.ZipFile(mem_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                for file_path in file_paths:
+                    if os.path.exists(file_path) and os.path.isfile(file_path):
+                        zf.write(file_path, os.path.basename(file_path))
+            return mem_zip.getvalue()
+        except Exception as exc:
+            logging.error("Zip hiba: %s", exc)
+            return None
+        finally:
+            self.hide_progress()
+
+    def unpack_and_cache_files(self, zip_bytes: bytes) -> list[str]:
+        self.clean_cache_directory()
+        try:
+            mem_zip = io.BytesIO(zip_bytes)
+            with zipfile.ZipFile(mem_zip, "r") as zf:
+                zf.extractall(CACHE_DIR)
+                extracted = [
+                    os.path.abspath(os.path.normpath(os.path.join(CACHE_DIR, name)))
+                    for name in zf.namelist()
+                ]
+            return extracted
+        except Exception as exc:
+            logging.error("Unzip hiba: %s", exc)
+            return []
+
+    def start_server(self) -> None:
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.server_socket.bind(("0.0.0.0", CLIPBOARD_PORT))
+            self.server_socket.listen(5)
+            logging.info("Clipboard server active (port: %s)", CLIPBOARD_PORT)
+
+            while self._running.is_set():
+                try:
+                    self.server_socket.settimeout(1.0)
+                    client_sock, addr = self.server_socket.accept()
+                    try:
+                        client_sock.settimeout(2.0)
+                        msg_type, data = self.receive_message(client_sock)
+                        client_sock.settimeout(None)
+                        if msg_type == TYPE_HANDSHAKE and data == CLIPBOARD_PROTOCOL_ID:
+                            logging.info("Clipboard client connected: %s", addr)
+                            with self._clients_lock:
+                                self.clients.append(client_sock)
+                            threading.Thread(
+                                target=self.handle_client,
+                                args=(client_sock,),
+                                daemon=True,
+                            ).start()
+                        else:
+                            client_sock.close()
+                    except Exception:
+                        client_sock.close()
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+        except Exception as exc:
+            logging.error("Clipboard server error: %s", exc)
+
+    def handle_client(self, client_sock: socket.socket) -> None:
+        try:
+            while self._running.is_set():
+                msg_type, data = self.receive_message(client_sock)
+                if data:
+                    self.process_incoming_data(msg_type, data)
+                    self.broadcast_data(data, msg_type, sender_socket=client_sock)
+                else:
+                    break
+        except Exception:
+            pass
+        finally:
+            with self._clients_lock:
+                if client_sock in self.clients:
+                    self.clients.remove(client_sock)
+            try:
+                client_sock.close()
+            except Exception:
+                pass
+
+    def broadcast_data(self, data_bytes: bytes, msg_type: int, sender_socket: Optional[socket.socket] = None) -> None:
+        dead_clients: list[socket.socket] = []
+        with self._clients_lock:
+            clients = list(self.clients)
+        for client in clients:
+            if client != sender_socket:
+                try:
+                    self.send_message(client, data_bytes, msg_type)
+                except Exception:
+                    dead_clients.append(client)
+        if dead_clients:
+            with self._clients_lock:
+                for dead in dead_clients:
+                    if dead in self.clients:
+                        self.clients.remove(dead)
+
+    def start_client_loop(self) -> None:
         while self._running.is_set():
-            if self._ignore_next_clipboard_change.is_set():
-                self._ignore_next_clipboard_change.clear()
-                self._refresh_clipboard_sequence_marker()
-                time.sleep(0.5)
+            try:
+                server_ip = self._get_server_ip()
+                if not server_ip:
+                    time.sleep(RECONNECT_DELAY)
+                    continue
+                self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client_socket.connect((server_ip, CLIPBOARD_PORT))
+                self.send_message(self.client_socket, CLIPBOARD_PROTOCOL_ID, TYPE_HANDSHAKE)
+                logging.info("Clipboard server connected (%s)", server_ip)
+                while self._running.is_set():
+                    msg_type, data = self.receive_message(self.client_socket)
+                    if data:
+                        self.process_incoming_data(msg_type, data)
+                    else:
+                        break
+            except Exception:
+                pass
+            finally:
+                self._close_client_socket()
+            if self._running.is_set():
+                time.sleep(RECONNECT_DELAY)
+
+    def clipboard_monitor_loop(self) -> None:
+        while self._running.is_set():
+            time.sleep(1.0)
+
+            if self.is_internal_update:
+                self.is_internal_update = False
                 continue
 
-            sequence = get_clipboard_sequence_number()
-            if sequence is not None:
-                if self._last_clipboard_sequence == sequence:
-                    self._check_clipboard_expiration()
-                    time.sleep(0.3)
-                    continue
-                self._last_clipboard_sequence = sequence
-
-            item = read_clipboard_content()
-            if item:
-                now = time.time()
-                item['timestamp'] = now
-                is_duplicate = clipboard_items_equal(item, self.last_clipboard_item)
-                if (
-                    is_duplicate
-                    and sequence is not None
-                    and sequence != self._last_processed_clipboard_sequence
-                ):
-                    is_duplicate = False
-                if not is_duplicate:
-                    stored = self._store_shared_clipboard(item, timestamp=now)
-                    self._remember_last_clipboard(stored)
-                    if sequence is not None:
-                        self._last_processed_clipboard_sequence = sequence
-                    payload = self._build_clipboard_payload(stored)
-                    provider = self._get_input_provider_socket()
-                    exclude: set[Any] = set()
-                    if provider:
-                        if not self._send_to_provider_callback(payload):
-                            logging.warning("Failed to forward clipboard update to input provider.")
-                        exclude.add(provider)
-                    clients = list(self._get_client_sockets())
-                    if clients:
-                        self._broadcast_callback(payload, exclude)
-            self._check_clipboard_expiration()
-            time.sleep(0.3)
-        logging.info("Clipboard server loop stopped.")
-
-    def _clipboard_loop_client(self) -> None:
-        logging.info("Clipboard client loop started.")
-        while self._running.is_set():
-            if self._ignore_next_clipboard_change.is_set():
-                self._ignore_next_clipboard_change.clear()
-                self._refresh_clipboard_sequence_marker()
-                time.sleep(0.5)
+            if self.ignore_next_change:
+                self.ignore_next_change = False
                 continue
 
-            sequence = get_clipboard_sequence_number()
-            if sequence is not None:
-                if self._last_clipboard_sequence == sequence:
-                    time.sleep(0.3)
-                    continue
-                self._last_clipboard_sequence = sequence
+            if not self.clipboard_lock.acquire(blocking=False):
+                continue
 
-            item = read_clipboard_content()
-            if item:
-                now = time.time()
-                item['timestamp'] = now
-                is_duplicate = clipboard_items_equal(item, self.last_clipboard_item)
-                if (
-                    is_duplicate
-                    and sequence is not None
-                    and sequence != self._last_processed_clipboard_sequence
-                ):
-                    is_duplicate = False
-                if not is_duplicate:
-                    self._remember_last_clipboard(item)
-                    if sequence is not None:
-                        self._last_processed_clipboard_sequence = sequence
-                    sock = self._get_server_socket()
-                    if sock:
-                        payload = self._build_clipboard_payload(item)
-                        if not self._send_to_peer_callback(sock, payload):
-                            logging.warning("Failed to send clipboard update to server.")
-            time.sleep(0.3)
-        logging.info("Clipboard client loop stopped.")
+            try:
+                try:
+                    curr_text = pyperclip.paste()
+                    if curr_text and curr_text != self.last_text_content:
+                        if not os.path.exists(curr_text):
+                            self.last_text_content = curr_text
+                            logging.info("Szöveg másolás.")
+                            self.send_data_out(curr_text.encode("utf-8"), TYPE_TEXT)
+                            continue
+                except Exception:
+                    pass
 
-    def _refresh_clipboard_sequence_marker(self) -> None:
-        """Update the cached clipboard sequence number if available."""
+                try:
+                    content = ImageGrab.grabclipboard()
+                    if isinstance(content, list) and len(content) > 0:
+                        hash_str = "".join(content)
+                        if self.last_file_list_hash != hash(hash_str):
+                            self.last_file_list_hash = hash(hash_str)
 
-        sequence = get_clipboard_sequence_number()
-        if sequence is not None:
-            self._last_clipboard_sequence = sequence
+                            total_size = sum(
+                                os.path.getsize(f) for f in content if os.path.exists(f)
+                            )
+                            size_mb = total_size / (1024 * 1024)
+
+                            if total_size > MAX_RAM_ZIP_SIZE:
+                                logging.warning(
+                                    "⚠️ TÚL NAGY FÁJL (%0.1f MB)! A küldés megszakítva.",
+                                    size_mb,
+                                )
+                            else:
+                                logging.info("Fájlok észlelve (%s db).", len(content))
+                                zip_data = self.pack_files_to_zip(content)
+                                if zip_data:
+                                    logging.info(
+                                        "Küldés (%0.1f KB)...", len(zip_data) / 1024
+                                    )
+                                    self.send_data_out(zip_data, TYPE_FILES)
+                                    self.hide_progress()
+
+                    elif isinstance(content, Image.Image):
+                        buf = io.BytesIO()
+                        content.save(buf, format="PNG")
+                        img_bytes = buf.getvalue()
+                        if self.last_image_hash != hash(img_bytes):
+                            self.last_image_hash = hash(img_bytes)
+                            logging.info("Kép másolás.")
+                            self.send_data_out(img_bytes, TYPE_IMAGE)
+                except Exception:
+                    self.hide_progress()
+            finally:
+                if self.clipboard_lock.locked():
+                    self.clipboard_lock.release()
+
+    def send_data_out(self, data_bytes: bytes, msg_type: int) -> None:
+        try:
+            if self.is_server:
+                self.broadcast_data(data_bytes, msg_type)
+            elif self.client_socket:
+                self.send_message(self.client_socket, data_bytes, msg_type)
+        except Exception:
+            pass
+
+    def set_clipboard_files_via_powershell(self, file_paths: list[str]) -> None:
+        with self.clipboard_lock:
+            self.is_internal_update = True
+            try:
+                ps_script = [
+                    "Add-Type -AssemblyName System.Windows.Forms",
+                    "$files = New-Object System.Collections.Specialized.StringCollection",
+                ]
+                for path in file_paths:
+                    clean_path = os.path.abspath(path)
+                    ps_script.append(f'$files.Add("{clean_path}")')
+                ps_script.append("[System.Windows.Forms.Clipboard]::SetFileDropList($files)")
+                full_command = "; ".join(ps_script)
+                subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        full_command,
+                    ],
+                    check=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                logging.info("KÉSZ! (PowerShell, %s fájl)", len(file_paths))
+                self.last_file_list_hash = hash("".join(file_paths))
+
+            except Exception as exc:
+                logging.error("PowerShell hiba: %s", exc)
+                self.is_internal_update = False
+
+    def safe_set_clipboard_image(self, data_bytes: bytes) -> None:
+        with self.clipboard_lock:
+            self.is_internal_update = True
+            try:
+                image = Image.open(io.BytesIO(data_bytes))
+                output = io.BytesIO()
+                image.convert("RGB").save(output, "BMP")
+                data = output.getvalue()[14:]
+                output.close()
+                for _ in range(5):
+                    try:
+                        win32clipboard.OpenClipboard()
+                        win32clipboard.EmptyClipboard()
+                        win32clipboard.SetClipboardData(win32clipboard.CF_DIB, data)
+                        win32clipboard.CloseClipboard()
+                        break
+                    except Exception:
+                        time.sleep(0.1)
+                self.last_image_hash = hash(data_bytes)
+            except Exception:
+                self.is_internal_update = False
+
+    def _close_client_socket(self) -> None:
+        if not self.client_socket:
+            return
+        try:
+            self.client_socket.close()
+        except Exception:
+            pass
+        self.client_socket = None
+
+    def _close_sockets(self) -> None:
+        self._close_client_socket()
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+            self.server_socket = None
+        with self._clients_lock:
+            clients = list(self.clients)
+            self.clients = []
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
