@@ -18,6 +18,9 @@ ALLOWED_SSIDS = [
     "Telekom-bbbe42-2",
 ]
 
+# Közös vágólap szinkron ideiglenes kapcsoló
+ENABLE_SHARED_CLIPBOARD = False
+
 # Gyorsbillentyű virtuális kódjai
 VK_CTRL = 162  # bal Ctrl
 VK_CTRL_R = 163  # jobb Ctrl

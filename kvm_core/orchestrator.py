@@ -40,6 +40,7 @@ from config.constants import (
     SERVICE_NAME_PREFIX,
     APP_NAME,
     ORG_NAME,
+    ENABLE_SHARED_CLIPBOARD,
     ALLOWED_SSIDS,
     VK_CTRL,
     VK_CTRL_R,
@@ -192,15 +193,18 @@ class KVMOrchestrator(QObject):
                 exclude_peer=exclude_set if exclude_set else None,
             )
 
-        self.clipboard_manager = ClipboardManager(
-            self.settings,
-            _broadcast_clipboard,
-            send_to_peer_callback=self.peer_manager.send_to_peer,
-            get_server_socket=lambda: self.server_socket,
-            send_to_provider_callback=self._send_to_provider,
-            get_input_provider_socket=lambda: self.input_provider_socket,
-            get_client_sockets=self.state.get_client_sockets,
-        )
+        if ENABLE_SHARED_CLIPBOARD:
+            self.clipboard_manager = ClipboardManager(
+                self.settings,
+                _broadcast_clipboard,
+                send_to_peer_callback=self.peer_manager.send_to_peer,
+                get_server_socket=lambda: self.server_socket,
+                send_to_provider_callback=self._send_to_provider,
+                get_input_provider_socket=lambda: self.input_provider_socket,
+                get_client_sockets=self.state.get_client_sockets,
+            )
+        else:
+            logging.info("Shared clipboard sync is temporarily disabled.")
 
         self.message_handler = MessageHandler(
             get_role=lambda: self.settings.get('role'),
@@ -1416,4 +1420,3 @@ class KVMOrchestrator(QObject):
     def run_client(self):
         """Deprecated: client logic replaced by peer discovery."""
         pass
-
