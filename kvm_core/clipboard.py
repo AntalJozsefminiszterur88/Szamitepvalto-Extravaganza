@@ -5,6 +5,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -26,11 +27,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config.constants import CLIPBOARD_PORT, CLIPBOARD_PROTOCOL_ID
+from config.constants import BRAND_NAME, CLIPBOARD_PORT, CLIPBOARD_PROTOCOL_ID
 
 CLIPBOARD_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 
-CACHE_DIR = r"C:\Users\Szerver\Documents\UMKGL Solutions\Szamitepvalto-Extravaganza\ClipboardCache"
+def _resolve_cache_dir() -> str:
+    base_dir = (
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or os.path.expanduser("~")
+    )
+    return os.path.join(base_dir, BRAND_NAME, "Szamitepvalto-Extravaganza", "ClipboardCache")
+
+
+DEFAULT_CACHE_DIR = _resolve_cache_dir()
 RECONNECT_DELAY = 3
 
 CONFIRM_FILE_COUNT = 10
@@ -198,7 +208,22 @@ class ClipboardManager:
             self._ui_helper = ClipboardUiHelper()
             self._ui_helper.moveToThread(app_instance.thread())
 
-        os.makedirs(CACHE_DIR, exist_ok=True)
+        self.cache_dir = DEFAULT_CACHE_DIR
+        try:
+            os.makedirs(self.cache_dir, exist_ok=True)
+        except PermissionError:
+            fallback_dir = os.path.join(
+                tempfile.gettempdir(),
+                "Szamitepvalto-Extravaganza",
+                "ClipboardCache",
+            )
+            os.makedirs(fallback_dir, exist_ok=True)
+            logging.warning(
+                "Clipboard cache dir %s is not writable, using %s instead.",
+                self.cache_dir,
+                fallback_dir,
+            )
+            self.cache_dir = fallback_dir
 
     @property
     def thread(self) -> Optional[threading.Thread]:
@@ -206,7 +231,7 @@ class ClipboardManager:
 
     @property
     def storage_dir(self) -> Optional[str]:
-        return CACHE_DIR
+        return self.cache_dir
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -363,8 +388,8 @@ class ClipboardManager:
 
     def clean_cache_directory(self) -> None:
         try:
-            for filename in os.listdir(CACHE_DIR):
-                path = os.path.join(CACHE_DIR, filename)
+            for filename in os.listdir(self.cache_dir):
+                path = os.path.join(self.cache_dir, filename)
                 try:
                     if os.path.isfile(path):
                         os.unlink(path)
@@ -395,9 +420,9 @@ class ClipboardManager:
         try:
             mem_zip = io.BytesIO(zip_bytes)
             with zipfile.ZipFile(mem_zip, "r") as zf:
-                zf.extractall(CACHE_DIR)
+                zf.extractall(self.cache_dir)
                 extracted = [
-                    os.path.abspath(os.path.normpath(os.path.join(CACHE_DIR, name)))
+                    os.path.abspath(os.path.normpath(os.path.join(self.cache_dir, name)))
                     for name in zf.namelist()
                 ]
             return extracted
