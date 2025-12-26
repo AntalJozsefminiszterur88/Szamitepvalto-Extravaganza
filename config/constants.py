@@ -18,6 +18,10 @@ ALLOWED_SSIDS = [
     "Telekom-bbbe42-2",
 ]
 
+# Vágólap szinkronizációs beállítások
+CLIPBOARD_PORT = 54545
+CLIPBOARD_PROTOCOL_ID = b"LAN_CLIPBOARD_SECURE_V4"
+
 # Közös vágólap szinkron ideiglenes kapcsoló
 ENABLE_SHARED_CLIPBOARD = False
 

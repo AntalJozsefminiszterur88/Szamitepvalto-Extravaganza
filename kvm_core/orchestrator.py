@@ -186,22 +186,10 @@ class KVMOrchestrator(QObject):
             message_callback=_peer_message_handler,
         )
 
-        def _broadcast_clipboard(payload: dict, exclude: Optional[Iterable[Any]] = None) -> None:
-            exclude_set = set(exclude or [])
-            self.peer_manager.broadcast(
-                payload,
-                exclude_peer=exclude_set if exclude_set else None,
-            )
-
         if ENABLE_SHARED_CLIPBOARD:
             self.clipboard_manager = ClipboardManager(
-                self.settings,
-                _broadcast_clipboard,
-                send_to_peer_callback=self.peer_manager.send_to_peer,
-                get_server_socket=lambda: self.server_socket,
-                send_to_provider_callback=self._send_to_provider,
-                get_input_provider_socket=lambda: self.input_provider_socket,
-                get_client_sockets=self.state.get_client_sockets,
+                role=role,
+                get_server_ip=lambda: settings_store.value("network/last_server_ip", None),
             )
         else:
             logging.info("Shared clipboard sync is temporarily disabled.")
