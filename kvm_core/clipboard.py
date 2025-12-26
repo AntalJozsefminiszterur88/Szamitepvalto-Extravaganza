@@ -1,4 +1,5 @@
 import io
+import functools
 import logging
 import os
 import shutil
@@ -14,7 +15,7 @@ from typing import Any, Callable, Optional
 import pyperclip
 from PIL import Image, ImageGrab
 import win32clipboard
-from PySide6.QtCore import Q_ARG, QCoreApplication, QMetaObject, QObject, Qt, QThread, Slot
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, QTimer, Slot
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QDialog,
@@ -285,8 +286,11 @@ class ClipboardManager:
         if QThread.currentThread() == helper.thread():
             getattr(helper, method)(*args)
             return
-        qargs = [Q_ARG(object, arg) for arg in args]
-        QMetaObject.invokeMethod(helper, method, Qt.QueuedConnection, *qargs)
+        QTimer.singleShot(
+            0,
+            helper,
+            functools.partial(getattr(helper, method), *args),
+        )
 
     def show_progress(self, text: str) -> None:
         self._invoke_ui("show_progress", text)
