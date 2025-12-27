@@ -142,10 +142,18 @@ class MessageHandler:
                 input_provider_socket = self._get_input_provider_socket()
                 if (
                     msg_type in {'move_relative', 'click', 'scroll', 'key'}
-                    and peer_socket == input_provider_socket
                 ):
-                    self._handle_provider_event(data)
-                    return
+                    if peer_socket == input_provider_socket:
+                        self._handle_provider_event(data)
+                        return
+                    client_roles = self._state.get_client_roles()
+                    if client_roles.get(peer_socket) == 'input_provider':
+                        logging.warning(
+                            "Input provider socket mismatch; routing event from %s",
+                            self._state.get_client_name(peer_socket, peer_socket),
+                        )
+                        self._handle_provider_event(data)
+                        return
                 logging.debug(
                     "Unhandled message type '%s' in controller context from %s",
                     data.get('type') or data.get('command'),
@@ -196,4 +204,3 @@ class MessageHandler:
                 )
         except Exception as exc:
             logging.error("Failed to process message: %s", exc, exc_info=True)
-
