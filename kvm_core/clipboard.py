@@ -326,25 +326,36 @@ class ClipboardManager:
 
     def receive_message(self, sock: socket.socket) -> tuple[Optional[int], Optional[bytes]]:
         try:
-            type_data = sock.recv(1)
-            if not type_data:
+            try:
+                type_data = sock.recv(1)
+            except socket.timeout:
                 return None, None
+            if not type_data:
+                return None, b""
             msg_type = struct.unpack("B", type_data)[0]
 
-            len_data = sock.recv(4)
-            if not len_data:
+            try:
+                len_data = sock.recv(4)
+            except socket.timeout:
                 return None, None
+            if not len_data:
+                return None, b""
             msg_len = struct.unpack(">I", len_data)[0]
 
             data = b""
             while len(data) < msg_len:
-                chunk = sock.recv(min(1024 * 1024, msg_len - len(data)))
-                if not chunk:
+                try:
+                    chunk = sock.recv(min(1024 * 1024, msg_len - len(data)))
+                except socket.timeout:
                     return None, None
+                if not chunk:
+                    return None, b""
                 data += chunk
             return msg_type, data
+        except (ConnectionResetError, BrokenPipeError):
+            return None, b""
         except Exception:
-            return None, None
+            return None, b""
 
     def process_incoming_data(self, msg_type: int, data: bytes) -> None:
         try:
@@ -430,6 +441,7 @@ class ClipboardManager:
     def start_server(self) -> None:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.settimeout(1.0)
         try:
             self.server_socket.bind(("0.0.0.0", CLIPBOARD_PORT))
             self.server_socket.listen(5)
@@ -437,12 +449,10 @@ class ClipboardManager:
 
             while self._running.is_set():
                 try:
-                    self.server_socket.settimeout(1.0)
                     client_sock, addr = self.server_socket.accept()
                     try:
-                        client_sock.settimeout(2.0)
+                        client_sock.settimeout(1.0)
                         msg_type, data = self.receive_message(client_sock)
-                        client_sock.settimeout(None)
                         if msg_type == TYPE_HANDSHAKE and data == CLIPBOARD_PROTOCOL_ID:
                             logging.info("Clipboard client connected: %s", addr)
                             with self._clients_lock:
@@ -467,7 +477,11 @@ class ClipboardManager:
         try:
             while self._running.is_set():
                 msg_type, data = self.receive_message(client_sock)
-                if data:
+                if msg_type is None and data is None:
+                    continue
+                if msg_type is None and data == b"":
+                    break
+                if data is not None and msg_type is not None:
                     self.process_incoming_data(msg_type, data)
                     self.broadcast_data(data, msg_type, sender_socket=client_sock)
                 else:
@@ -507,12 +521,17 @@ class ClipboardManager:
                     time.sleep(RECONNECT_DELAY)
                     continue
                 self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client_socket.settimeout(1.0)
                 self.client_socket.connect((server_ip, CLIPBOARD_PORT))
                 self.send_message(self.client_socket, CLIPBOARD_PROTOCOL_ID, TYPE_HANDSHAKE)
                 logging.info("Clipboard server connected (%s)", server_ip)
                 while self._running.is_set():
                     msg_type, data = self.receive_message(self.client_socket)
-                    if data:
+                    if msg_type is None and data is None:
+                        continue
+                    if msg_type is None and data == b"":
+                        break
+                    if data is not None and msg_type is not None:
                         self.process_incoming_data(msg_type, data)
                     else:
                         break
@@ -657,6 +676,10 @@ class ClipboardManager:
         if not self.client_socket:
             return
         try:
+            self.client_socket.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
             self.client_socket.close()
         except Exception:
             pass
@@ -666,6 +689,10 @@ class ClipboardManager:
         self._close_client_socket()
         if self.server_socket:
             try:
+                self.server_socket.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
                 self.server_socket.close()
             except Exception:
                 pass
@@ -674,6 +701,10 @@ class ClipboardManager:
             clients = list(self.clients)
             self.clients = []
         for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
             try:
                 client.close()
             except Exception:
