@@ -44,8 +44,6 @@ def _resolve_cache_dir() -> str:
 DEFAULT_CACHE_DIR = _resolve_cache_dir()
 RECONNECT_DELAY = 3
 
-CONFIRM_FILE_COUNT = 10
-CONFIRM_SIZE_MB = 50
 MAX_RAM_ZIP_SIZE = 500 * 1024 * 1024
 
 TYPE_HANDSHAKE = 0
@@ -374,17 +372,12 @@ class ClipboardManager:
                     count = len(file_paths)
 
                     self.hide_progress()
-
-                    should_paste = True
-                    if count >= CONFIRM_FILE_COUNT or size_mb > CONFIRM_SIZE_MB:
-                        should_paste = self.confirm_files(file_paths, size_mb)
-
-                    if should_paste:
-                        logging.info("Beillesztés folyamatban...")
-                        self.set_clipboard_files_via_powershell(file_paths)
-                    else:
-                        logging.info("Elutasítva.")
-                        self.is_internal_update = False
+                    logging.info(
+                        "Beillesztés folyamatban (%s fájl, %0.1f MB)...",
+                        count,
+                        size_mb,
+                    )
+                    self.set_clipboard_files_via_powershell(file_paths)
         except Exception as exc:
             logging.exception("Clipboard processing error: %s", exc)
             self.hide_progress()
