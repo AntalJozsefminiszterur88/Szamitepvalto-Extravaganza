@@ -52,6 +52,33 @@ TYPE_IMAGE = 2
 TYPE_FILES = 3
 
 
+def _enable_keepalive(sock: socket.socket) -> None:
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+
+    if hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        try:
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 10_000, 3_000))
+        except OSError:
+            pass
+
+    for option_name, value in (
+        ("TCP_KEEPIDLE", 10),
+        ("TCP_KEEPINTVL", 3),
+        ("TCP_KEEPCNT", 3),
+        ("TCP_KEEPALIVE", 10),
+    ):
+        option = getattr(socket, option_name, None)
+        if option is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError:
+            pass
+
+
 class FloatingProgress(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -441,6 +468,7 @@ class ClipboardManager:
     def start_server(self) -> None:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _enable_keepalive(self.server_socket)
         self.server_socket.settimeout(1.0)
         try:
             self.server_socket.bind(("0.0.0.0", CLIPBOARD_PORT))
@@ -451,6 +479,7 @@ class ClipboardManager:
                 try:
                     client_sock, addr = self.server_socket.accept()
                     try:
+                        _enable_keepalive(client_sock)
                         client_sock.settimeout(1.0)
                         msg_type, data = self.receive_message(client_sock)
                         if msg_type == TYPE_HANDSHAKE and data == CLIPBOARD_PROTOCOL_ID:
@@ -521,6 +550,7 @@ class ClipboardManager:
                     time.sleep(RECONNECT_DELAY)
                     continue
                 self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                _enable_keepalive(self.client_socket)
                 self.client_socket.settimeout(1.0)
                 self.client_socket.connect((server_ip, CLIPBOARD_PORT))
                 self.send_message(self.client_socket, CLIPBOARD_PROTOCOL_ID, TYPE_HANDSHAKE)
