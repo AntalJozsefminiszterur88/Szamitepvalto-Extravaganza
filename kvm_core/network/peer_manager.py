@@ -377,17 +377,18 @@ class PeerManager:
             worker = self._worker
             role = worker.settings.get("role")
 
-            if role == "vevo":
-                sleep_time = 5
-                if worker.server_socket is None and worker.last_server_ip:
-                    logging.debug(
-                        "Auto-reconnecting to last server: %s", worker.last_server_ip
-                    )
-                    self.connect_to_peer(worker.last_server_ip, self._port)
-                time.sleep(sleep_time)
-                continue
-
             peers = list(self._discovery.peers)
+            targets = {(peer["ip"], peer["port"]) for peer in peers}
+
+            if (
+                role == "vevo"
+                and worker.server_socket is None
+                and worker.last_server_ip
+            ):
+                logging.debug(
+                    "Auto-reconnecting to last server: %s", worker.last_server_ip
+                )
+                targets.add((worker.last_server_ip, self._port))
 
             sockets = self._state.get_client_sockets()
             connected_ips = {
@@ -398,10 +399,7 @@ class PeerManager:
                 if peer_ip is not None
             }
 
-            for peer in peers:
-                ip = peer["ip"]
-                port = peer["port"]
-
+            for ip, port in targets:
                 if ip == self._worker.local_ip and port == self._port:
                     continue
 
@@ -422,7 +420,7 @@ class PeerManager:
 
                 self.connect_to_peer(ip, port)
 
-            time.sleep(2)
+            time.sleep(2.5)
 
     def connect_to_peer(self, ip: str, port: int) -> None:
         secure_sock: Optional[socket.socket] = None
@@ -500,4 +498,3 @@ class PeerManager:
             return sock.getpeername()[0]
         except Exception:
             return None
-
