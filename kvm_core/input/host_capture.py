@@ -38,6 +38,7 @@ class HostInputCapture:
         status_update,
         deactivate_callback: Callable[..., None],
         toggle_client_control: Callable[[str, bool], None],
+        send_provider_function_key: Optional[Callable[[keyboard.Key, str], bool]] = None,
         is_running: Callable[[], bool],
         get_switch_monitor: Callable[[], bool],
         force_numpad_vk: Optional[Iterable[int]] = None,
@@ -48,6 +49,7 @@ class HostInputCapture:
         self._status_update = status_update
         self._deactivate_callback = deactivate_callback
         self._toggle_client_control = toggle_client_control
+        self._send_provider_function_key = send_provider_function_key
         self._is_running = is_running
         self._get_switch_monitor = get_switch_monitor
         self._force_numpad_vk = set(force_numpad_vk or [])
@@ -375,11 +377,28 @@ class HostInputCapture:
                         )
                         self._toggle_client_control('elitedesk', switch_monitor=True)
                         return False
+                    if key == keyboard.Key.f22:
+                        logging.info(
+                            "F22 pressed during streaming; forwarding to desktop input provider.",
+                        )
+                        forwarded = False
+                        if self._send_provider_function_key:
+                            forwarded = self._send_provider_function_key(
+                                keyboard.Key.f22,
+                                "streaming F22",
+                            )
+                        if not forwarded:
+                            logging.warning(
+                                "Failed to forward F22 to desktop input provider during streaming.",
+                            )
+                        return True
                     if key in (keyboard.Key.f18, keyboard.Key.f19, keyboard.Key.f20, keyboard.Key.f22):
                         logging.info(
                             "Audio/mute hotkey %s captured locally during streaming", key,
                         )
                         return False
+                if key == keyboard.Key.f22:
+                    return True
 
                 vk = get_vk(key)
                 if vk is not None:
@@ -514,4 +533,3 @@ class HostInputCapture:
 
             logging.info("Streaming listenerek leálltak.")
             self.restore_mouse_position()
-
