@@ -2,6 +2,7 @@ import logging
 import socket
 import struct
 import threading
+import time
 from typing import Callable, Optional
 
 import msgpack
@@ -9,6 +10,9 @@ import msgpack
 
 class PeerConnection(threading.Thread):
     """Thread handling a single peer connection."""
+
+    HEARTBEAT_INTERVAL = 2.0
+    CONNECTION_TIMEOUT = 6.0
 
     def __init__(
         self,
@@ -24,6 +28,11 @@ class PeerConnection(threading.Thread):
         self._message_callback = message_callback
         self._running = threading.Event()
         self._running.set()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._send_lock = threading.Lock()
+        self._timestamp_lock = threading.Lock()
+        self.last_packet_received_at = time.time()
         self.peer_name: str = str(addr)
         self.peer_role: Optional[str] = None
         self._log = logging.getLogger(__name__)
@@ -34,6 +43,8 @@ class PeerConnection(threading.Thread):
             self.socket.settimeout(30.0)
             if not self._perform_handshake():
                 return
+            self.socket.settimeout(self.HEARTBEAT_INTERVAL)
+            self._start_heartbeat()
             self._receive_loop()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, OSError) as exc:
             is_closed_socket = False
@@ -60,20 +71,25 @@ class PeerConnection(threading.Thread):
                 exc_info=True,
             )
         finally:
+            self._stop_heartbeat()
             if not self._closed:
                 self._manager.unregister_connection(self, "peer_connection_exit")
             self._log.debug("PeerConnection thread exit for %s", self.peer_name)
 
     def stop(self) -> None:
         self._running.clear()
+        self._heartbeat_stop.set()
         try:
-            self.socket.shutdown(socket.SHUT_RDWR)
+            with self._send_lock:
+                self.socket.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
         try:
-            self.socket.close()
+            with self._send_lock:
+                self.socket.close()
         except Exception:
             pass
+        self._stop_heartbeat()
 
     def send(self, data: dict) -> bool:
         try:
@@ -85,7 +101,8 @@ class PeerConnection(threading.Thread):
 
     def send_packed(self, packed: bytes) -> bool:
         try:
-            self.socket.sendall(struct.pack("!I", len(packed)) + packed)
+            with self._send_lock:
+                self.socket.sendall(struct.pack("!I", len(packed)) + packed)
             return True
         except Exception as exc:
             self._log.error("Failed to send message to %s: %s", self.peer_name, exc)
@@ -120,6 +137,7 @@ class PeerConnection(threading.Thread):
             self._log.error("Failed to unpack handshake from %s: %s", self.addr, exc)
             return False
 
+        self._touch_last_packet_received()
         self.peer_name = hello.get("device_name", self.peer_name)
         self.peer_role = hello.get("role")
         self._log.debug(
@@ -133,14 +151,65 @@ class PeerConnection(threading.Thread):
 
         return True
 
+    def _start_heartbeat(self) -> None:
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+            name=f"PeerHeartbeat-{self.addr[0]}:{self.addr[1]}",
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        if (
+            thread
+            and thread.is_alive()
+            and threading.current_thread() is not thread
+        ):
+            thread.join(timeout=self.HEARTBEAT_INTERVAL)
+
+    def _heartbeat_loop(self) -> None:
+        while (
+            self._running.is_set()
+            and self._manager.is_running
+            and not self._heartbeat_stop.is_set()
+        ):
+            if self._heartbeat_stop.wait(self.HEARTBEAT_INTERVAL):
+                break
+            if not self._running.is_set() or not self._manager.is_running:
+                break
+            if not self.send({"type": "ping"}):
+                self._log.warning("Heartbeat send failed for %s", self.peer_name)
+                self.stop()
+                break
+
+    def _touch_last_packet_received(self) -> None:
+        with self._timestamp_lock:
+            self.last_packet_received_at = time.time()
+
+    def _last_packet_age(self) -> float:
+        with self._timestamp_lock:
+            return time.time() - self.last_packet_received_at
+
     def _receive_loop(self) -> None:
         buffer = bytearray()
         while self._running.is_set() and self._manager.is_running:
             try:
                 chunk = self.socket.recv(4096)
             except socket.timeout:
+                if self._last_packet_age() > self.CONNECTION_TIMEOUT:
+                    self._log.warning(
+                        "Connection timed out - no heartbeat from %s", self.peer_name
+                    )
+                    self.stop()
+                    break
                 continue
             if not chunk:
+                self.stop()
                 break
             buffer.extend(chunk)
             while len(buffer) >= 4:
@@ -163,6 +232,13 @@ class PeerConnection(threading.Thread):
                         exc,
                         exc_info=True,
                     )
+                    continue
+                self._touch_last_packet_received()
+                msg_type = data.get("type") if isinstance(data, dict) else None
+                if msg_type == "ping":
+                    self.send({"type": "pong"})
+                    continue
+                if msg_type == "pong":
                     continue
                 self._message_callback(self, data)
 
@@ -188,4 +264,3 @@ class PeerManagerProtocol:
 
     @property
     def is_running(self) -> bool: ...  # noqa: E701
-
