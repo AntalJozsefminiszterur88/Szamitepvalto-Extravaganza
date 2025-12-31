@@ -168,6 +168,10 @@ class KVMOrchestrator(QObject):
             status_update=self.status_update,
             deactivate_callback=self.deactivate_kvm,
             toggle_client_control=self.toggle_client_control,
+            send_provider_function_key=lambda key, source: self.send_provider_function_key(
+                key,
+                source=source,
+            ),
             is_running=lambda: self._running,
             get_switch_monitor=lambda: getattr(self, 'switch_monitor', True),
             force_numpad_vk=FORCE_NUMPAD_VK,
