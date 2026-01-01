@@ -432,6 +432,18 @@ class KVMOrchestrator(QObject):
             return False
         return self.peer_manager.send_to_peer(sock, payload)
 
+    def force_send_f22_to_desktop(self) -> bool:
+        """Send a direct F22 trigger to the input provider, bypassing routing."""
+        sock = self.peer_manager.get_socket_by_role("input_provider")
+        if not sock:
+            logging.warning("Input provider is not connected; cannot force F22 trigger")
+            return False
+        payload = {"command": "force_f22_trigger"}
+        if not self.peer_manager.send_to_peer(sock, payload):
+            logging.warning("Failed to send force F22 trigger to input provider")
+            return False
+        return True
+
     def _send_to_server(self, payload: dict) -> bool:
         if self.settings.get('role') == 'ado':
             return False

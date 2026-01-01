@@ -276,6 +276,13 @@ class PeerManager:
             return False
         return connection.send(message)
 
+    def get_socket_by_role(self, target_role: str) -> Optional[socket.socket]:
+        client_roles = self._state.get_client_roles()
+        for sock, role in client_roles.items():
+            if role == target_role:
+                return sock
+        return None
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
