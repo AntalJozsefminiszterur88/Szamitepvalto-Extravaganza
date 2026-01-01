@@ -10,23 +10,14 @@ ORG_NAME = "MyKVM"
 # Branding
 BRAND_NAME = "UMKGL Solutions"
 
-# Hálózati beállítások
-SERVICE_TYPE = "_kvmswitch._tcp.local."
-SERVICE_NAME_PREFIX = "KVM Switch Adó"
-FIXED_SERVER_IP = "192.168.0.19"
-ALLOWED_SSIDS = [
-    "Telekom-bbbe42",
-    "Telekom-bbbe42-2",
-]
+# Network Topology
+SERVER_IP = "192.168.0.19"
+DEFAULT_PORT = 65432
 
 # Vágólap szinkronizációs beállítások
 CLIPBOARD_PORT = 54545
 CLIPBOARD_PROTOCOL_ID = b"LAN_CLIPBOARD_SECURE_V4"
 
-# UDP beacon settings
-UDP_BEACON_PORT = 54546
-BEACON_INTERVAL = 3.0
-BEACON_MESSAGE = b"KVM_PRESENCE_V1"
 
 # Közös vágólap szinkron ideiglenes kapcsoló
 ENABLE_SHARED_CLIPBOARD = True

@@ -8,9 +8,8 @@ import logging
 from logging.handlers import RotatingFileHandler
 import queue
 import struct
-from typing import Any, Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional
 import msgpack
-import random
 import os      # ÚJ IMPORT
 from pathlib import Path
 
@@ -26,7 +25,6 @@ if os.name == 'nt':
 else:
     _USER32 = None
 from pynput import keyboard
-from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from kvm_core.monitor import MonitorController
 from kvm_core.diagnostics import DiagnosticsManager
 from kvm_core.network.peer_manager import PeerManager
@@ -36,12 +34,9 @@ from kvm_core.input.receiver import InputReceiver
 from kvm_core.state import KVMState
 from PySide6.QtCore import QObject, Signal, QSettings
 from config.constants import (
-    SERVICE_TYPE,
-    SERVICE_NAME_PREFIX,
     APP_NAME,
     ORG_NAME,
     ENABLE_SHARED_CLIPBOARD,
-    ALLOWED_SSIDS,
     VK_CTRL,
     VK_CTRL_R,
     VK_NUMPAD0,
@@ -66,10 +61,6 @@ from config.log_aggregator import LogAggregator
 from utils.logging_setup import create_controller_file_handler, resolve_log_paths
 from utils.path_helpers import resolve_documents_directory
 from utils.remote_logging import RemoteLogHandler, get_remote_log_handler
-from utils.network_utils import get_current_ssid
-
-POLL_INTERVAL_FAST = 5
-POLL_INTERVAL_SLOW = 60
 
 FORCE_NUMPAD_VK = {VK_DIVIDE, VK_SUBTRACT, VK_MULTIPLY, VK_ADD}
 
@@ -91,13 +82,11 @@ class KVMOrchestrator(QObject):
         self._running = True
         self.state = KVMState()
         self.pynput_listeners = []
-        self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
         self.streaming_thread = None
         self.switch_monitor = True
         self.local_ip = self._detect_primary_ipv4()
         self.server_ip = None
         self.connection_thread = None
-        self.service_info = None
         settings_store = QSettings(ORG_NAME, APP_NAME)
         self.last_server_ip = settings_store.value('network/last_server_ip', None)
         self.device_name = settings.get('device_name', socket.gethostname())
@@ -108,9 +97,6 @@ class KVMOrchestrator(QObject):
         self.message_processor_thread = None
         self.pico_thread = None
         self.pico_handler = None
-        # Track ongoing reconnect attempts to avoid duplicates
-        self.reconnect_threads = {}
-        self.reconnect_lock = threading.Lock()
         monitor_codes = self.settings.get('monitor_codes', {}) or {}
         host_code = monitor_codes.get('host')
         client_code = monitor_codes.get('client')
@@ -184,7 +170,6 @@ class KVMOrchestrator(QObject):
         self.peer_manager = PeerManager(
             self,
             self.state,
-            self.zeroconf,
             port=self.settings['port'],
             device_name=self.device_name,
             message_callback=_peer_message_handler,
@@ -218,7 +203,6 @@ class KVMOrchestrator(QObject):
         self.diagnostics_manager = DiagnosticsManager(
             orchestrator=self,
             state=self.state,
-            zeroconf=self.zeroconf,
         )
 
         self._heartbeat_thread: Optional[threading.Thread] = None
@@ -226,9 +210,6 @@ class KVMOrchestrator(QObject):
         self._session_start_time = time.monotonic()
         self._crash_report_uploaded = False
 
-        # Network watchdog / whitelisting
-        self._network_watchdog_thread: Optional[threading.Thread] = None
-        self._network_watchdog_stop = threading.Event()
         self._network_services_active = False
 
         if self.stability_monitor:
@@ -578,113 +559,26 @@ class KVMOrchestrator(QObject):
                 pass
         return ip or "127.0.0.1"
 
-    def _schedule_reconnect(self, ip: str, port: int) -> None:
-        """Spawn a background thread that keeps trying to reconnect."""
-
-        def _attempt():
-            while self._running:
-                sockets = self.state.get_client_sockets()
-                if any(
-                    s.getpeername()[0] == ip
-                    for s in sockets
-                    if s.fileno() != -1
-                ):
-                    break
-                self.peer_manager.connect_to_peer(ip, port)
-                time.sleep(5)
-            with self.reconnect_lock:
-                self.reconnect_threads.pop((ip, port), None)
-
-        with self.reconnect_lock:
-            if (ip, port) in self.reconnect_threads:
-                return
-            t = threading.Thread(target=_attempt, daemon=True, name=f"Reconnect-{ip}")
-            self.reconnect_threads[(ip, port)] = t
-            t.start()
-
-    def _register_service(self) -> bool:
-        try:
-            addr = socket.inet_aton(self.local_ip)
-            self.service_info = ServiceInfo(
-                SERVICE_TYPE,
-                f"{self.device_name}.{SERVICE_TYPE}",
-                addresses=[addr],
-                port=self.settings['port'],
-            )
-            self.zeroconf.register_service(self.service_info)
-            self.diagnostics_manager.set_ip_watchdog_enabled(True)
-            return True
-        except Exception as exc:
-            logging.error("Failed to register Zeroconf service: %s", exc)
-            self.service_info = None
-            self.diagnostics_manager.set_ip_watchdog_enabled(False)
-            return False
-
-    def _unregister_service(self) -> None:
-        service_info = self.service_info
-        if not service_info:
-            return
-        try:
-            self.zeroconf.unregister_service(service_info)
-        except Exception as exc:  # pragma: no cover - logging only
-            logging.debug("Failed to unregister Zeroconf service: %s", exc)
-        finally:
-            self.service_info = None
-            self.diagnostics_manager.set_ip_watchdog_enabled(False)
-
     def _resume_network_services(self) -> None:
         if self._network_services_active:
             return
-        register_ok = self._register_service()
         self.peer_manager.start()
         if self.clipboard_manager:
             self.clipboard_manager.start()
             if self.settings.get('role') == 'ado':
                 self.start_main_hotkey_listener()
         self._network_services_active = True
-        if not register_ok:
-            logging.warning("Zeroconf registration failed; running without service advertisement")
 
     def _pause_network_services(self) -> None:
         if not self._network_services_active and not self.peer_manager.is_running:
-            self._unregister_service()
             self._network_services_active = False
             self.state.set_active(False)
             return
         self.peer_manager.stop()
         if self.clipboard_manager:
             self.clipboard_manager.stop()
-        self._unregister_service()
         self._network_services_active = False
         self.state.set_active(False)
-
-    def _network_watchdog_loop(self) -> None:
-        logging.info("Network watchdog thread started.")
-        sleep_time = POLL_INTERVAL_FAST
-        while self._running and not self._network_watchdog_stop.is_set():
-            ssid = get_current_ssid()
-            allowed = bool(ssid) and any(
-                ssid.startswith(prefix) for prefix in ALLOWED_SSIDS
-            )
-
-            if allowed:
-                if not self._network_services_active:
-                    logging.info("Allowed network detected (%s), resuming KVM services.", ssid)
-                    self._resume_network_services()
-                sleep_time = POLL_INTERVAL_SLOW
-            else:
-                if self._network_services_active:
-                    logging.info(
-                        "Unknown network [%s], pausing KVM services.",
-                        ssid or "<offline>",
-                    )
-                    self._pause_network_services()
-                sleep_time = POLL_INTERVAL_FAST
-
-            if self._network_watchdog_stop.wait(sleep_time):
-                break
-
-        logging.info("Network watchdog thread stopped.")
 
     def _process_messages(self):
         """Unified message handler for all peers."""
@@ -875,10 +769,6 @@ class KVMOrchestrator(QObject):
         logging.info("Orchestrator shutdown initiated.")
         self._running = False
 
-        self._network_watchdog_stop.set()
-        if self._network_watchdog_thread and self._network_watchdog_thread.is_alive():
-            self._network_watchdog_thread.join(timeout=1.0)
-
         self._heartbeat_stop.set()
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             self._heartbeat_thread.join(timeout=1.0)
@@ -911,13 +801,6 @@ class KVMOrchestrator(QObject):
         logging.info("Stopping DiagnosticsManager...")
         self.diagnostics_manager.stop()
         logging.info("DiagnosticsManager stopped.")
-
-        logging.info("Closing Zeroconf instance...")
-        try:
-            self.zeroconf.close()
-            logging.info("Zeroconf instance closed.")
-        except Exception:
-            logging.exception("Failed to close Zeroconf instance cleanly")
 
         logging.info("Stopping pynput listeners...")
         for listener in self.pynput_listeners:
@@ -1012,10 +895,8 @@ class KVMOrchestrator(QObject):
             self.start_main_hotkey_listener()
 
         self.start()
-        logging.info("Worker starting in peer-to-peer mode")
+        logging.info("Worker starting in hub-and-spoke mode")
         try:
-            self.diagnostics_manager.set_ip_watchdog_enabled(False)
-
             self.message_processor_thread = threading.Thread(
                 target=self._process_messages,
                 daemon=True,
@@ -1033,25 +914,7 @@ class KVMOrchestrator(QObject):
                 )
                 self._heartbeat_thread.start()
 
-            role = self.settings.get('role')
-            self._network_watchdog_stop.clear()
-            if role == 'vevo':
-                self._network_watchdog_thread = threading.Thread(
-                    target=self._network_watchdog_loop,
-                    daemon=True,
-                    name="NetworkWatchdog",
-                )
-                self._network_watchdog_thread.start()
-            else:
-                register_ok = self._register_service()
-                self.peer_manager.start()
-                if self.clipboard_manager:
-                    self.clipboard_manager.start()
-                self._network_services_active = True
-                if not register_ok:
-                    logging.warning(
-                        "Zeroconf registration failed; running without service advertisement"
-                    )
+            self._resume_network_services()
 
             while self._running:
                 time.sleep(0.5)
@@ -1061,9 +924,6 @@ class KVMOrchestrator(QObject):
                 "Állapot: Hiba - a KVM szolgáltatás leállt"
             )
         finally:
-            self._network_watchdog_stop.set()
-            if self._network_watchdog_thread and self._network_watchdog_thread.is_alive():
-                self._network_watchdog_thread.join(timeout=1)
             self._pause_network_services()
             self._unregister_monitoring()
             self.finished.emit()

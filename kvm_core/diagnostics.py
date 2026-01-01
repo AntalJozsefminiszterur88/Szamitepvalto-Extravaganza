@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import logging
-import socket
 import threading
 import time
 from typing import Optional, TYPE_CHECKING
 
 import psutil
-from zeroconf import ServiceInfo, Zeroconf
-
-from config.constants import SERVICE_TYPE
 
 if TYPE_CHECKING:  # pragma: no cover
     from .orchestrator import KVMOrchestrator
@@ -25,26 +21,15 @@ class DiagnosticsManager:
         self,
         orchestrator: "KVMOrchestrator",
         state: "KVMState",
-        zeroconf: Zeroconf,
     ) -> None:
         self._orchestrator = orchestrator
         self._state = state
-        self._zeroconf = zeroconf
         self._heartbeat_thread: Optional[threading.Thread] = None
-        self._ip_watchdog_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
-        self._ip_watchdog_enabled = False
 
     @property
     def heartbeat_thread(self) -> Optional[threading.Thread]:
         return self._heartbeat_thread
-
-    @property
-    def ip_watchdog_thread(self) -> Optional[threading.Thread]:
-        return self._ip_watchdog_thread
-
-    def set_ip_watchdog_enabled(self, enabled: bool) -> None:
-        self._ip_watchdog_enabled = enabled
 
     def start(self) -> None:
         """Start background diagnostic threads."""
@@ -58,24 +43,13 @@ class DiagnosticsManager:
             )
             self._heartbeat_thread.start()
 
-        if self._ip_watchdog_thread is None or not self._ip_watchdog_thread.is_alive():
-            self._ip_watchdog_thread = threading.Thread(
-                target=self._ip_watchdog_loop,
-                daemon=True,
-                name="IPWatchdog",
-            )
-            self._ip_watchdog_thread.start()
-
     def stop(self) -> None:
         """Stop diagnostic threads and wait for them to finish."""
         logging.info(f"Stopping {self.__class__.__name__}...")
         self._stop_event.set()
-        threads = [self._heartbeat_thread, self._ip_watchdog_thread]
-        for thread in threads:
-            if thread and thread.is_alive():
-                thread.join(timeout=1)
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=1)
         self._heartbeat_thread = None
-        self._ip_watchdog_thread = None
         logging.info(f"{self.__class__.__name__} stopped.")
 
     # ------------------------------------------------------------------
@@ -119,46 +93,3 @@ class DiagnosticsManager:
                 if self._stop_event.wait(30):
                     break
         logging.info("Heartbeat monitor thread stopped.")
-
-    def _ip_watchdog_loop(self) -> None:
-        """Periodically check for IP changes and re-register Zeroconf service."""
-        while self._orchestrator._running and not self._stop_event.is_set():
-            if not self._ip_watchdog_enabled:
-                if self._stop_event.wait(5):
-                    break
-                continue
-            if self._stop_event.wait(5):
-                break
-            try:
-                new_ip = self._orchestrator._detect_primary_ipv4()
-                if not new_ip or new_ip == self._orchestrator.local_ip:
-                    continue
-                logging.info(
-                    "Local IP changed from %s to %s",
-                    self._orchestrator.local_ip,
-                    new_ip,
-                )
-                service_info = self._orchestrator.service_info
-                if service_info:
-                    try:
-                        self._zeroconf.unregister_service(service_info)
-                    except Exception as exc:  # pragma: no cover - logging only
-                        logging.debug(
-                            "Failed to unregister Zeroconf service: %s",
-                            exc,
-                        )
-                self._orchestrator.local_ip = new_ip
-                try:
-                    addr = socket.inet_aton(self._orchestrator.local_ip)
-                    self._orchestrator.service_info = ServiceInfo(
-                        SERVICE_TYPE,
-                        f"{self._orchestrator.device_name}.{SERVICE_TYPE}",
-                        addresses=[addr],
-                        port=self._orchestrator.settings['port'],
-                    )
-                    self._zeroconf.register_service(self._orchestrator.service_info)
-                except Exception as exc:  # pragma: no cover - logging only
-                    logging.error("Failed to register Zeroconf service: %s", exc)
-            except Exception as exc:  # pragma: no cover - logging only
-                logging.debug("IP watchdog error: %s", exc)
-

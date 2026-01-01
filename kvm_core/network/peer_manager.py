@@ -9,30 +9,31 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 import msgpack
 from PySide6.QtCore import QSettings
 
-from config.constants import APP_NAME, FIXED_SERVER_IP, ORG_NAME, SERVICE_TYPE
-from kvm_core.network.discovery import ServiceDiscovery
+from config.constants import APP_NAME, DEFAULT_PORT, ORG_NAME, SERVER_IP
 from kvm_core.network.peer_connection import PeerConnection
-from .secure_socket import *
-
-
+from kvm_core.network.secure_socket import (
+    create_client_context,
+    create_server_context,
+    wrap_socket_client_side,
+    wrap_socket_server_side,
+)
 from kvm_core.state import KVMState
 
+
 class PeerManager:
-    """Central controller coordinating peer discovery and connections."""
+    """Central controller coordinating peer connections in a hub-and-spoke topology."""
 
     def __init__(
         self,
         worker,
         state: KVMState,
-        zeroconf,
         *,
-        port: int,
+        port: int = DEFAULT_PORT,
         device_name: str,
         message_callback: Callable[[PeerConnection, dict], None],
     ) -> None:
         self._worker = worker
         self._state = state
-        self._zeroconf = zeroconf
         self._port = port
         self._device_name = device_name
         self._message_callback = message_callback
@@ -42,11 +43,11 @@ class PeerManager:
         self.connection_manager_thread: Optional[threading.Thread] = None
         self._connections: Dict[socket.socket, PeerConnection] = {}
         self._connections_lock = threading.Lock()
-        self._beacon_lock = threading.Lock()
 
-        role = worker.settings.get("role")
+        self.is_server = worker.settings.get("role") == "ado"
+
         self._server_context = None
-        if role == "ado":
+        if self.is_server:
             try:
                 self._server_context = create_server_context()
             except FileNotFoundError:
@@ -55,12 +56,6 @@ class PeerManager:
 
         self._client_context = create_client_context()
         self._client_context_no_hostname = create_client_context(enforce_hostname=False)
-        self._discovery = ServiceDiscovery(
-            zeroconf,
-            SERVICE_TYPE,
-            lambda: self._worker.local_ip,
-            port,
-        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,29 +64,28 @@ class PeerManager:
         if self._running.is_set():
             return
         self._running.set()
-        self._discovery.start()
 
-        self.accept_thread = threading.Thread(
-            target=self._accept_loop,
-            daemon=True,
-            name="AcceptThread",
-        )
-        self.accept_thread.start()
-
-        self.connection_manager_thread = threading.Thread(
-            target=self._connection_manager_loop,
-            daemon=True,
-            name="ConnMgr",
-        )
-        self.connection_manager_thread.start()
+        if self.is_server:
+            self.accept_thread = threading.Thread(
+                target=self._server_accept_loop,
+                daemon=True,
+                name="AcceptThread",
+            )
+            self.accept_thread.start()
+        else:
+            self.connection_manager_thread = threading.Thread(
+                target=self._client_connector_loop,
+                daemon=True,
+                name="ClientConnector",
+            )
+            self.connection_manager_thread.start()
 
     def stop(self) -> None:
-        logging.info(f"Stopping {self.__class__.__name__}...")
+        logging.info("Stopping %s...", self.__class__.__name__)
         if not self._running.is_set():
-            logging.info(f"{self.__class__.__name__} stopped.")
+            logging.info("%s stopped.", self.__class__.__name__)
             return
         self._running.clear()
-        self._discovery.stop()
 
         if self._listening_socket:
             try:
@@ -112,7 +106,7 @@ class PeerManager:
         if self.connection_manager_thread and self.connection_manager_thread.is_alive():
             self.connection_manager_thread.join(timeout=1.0)
 
-        logging.info(f"{self.__class__.__name__} stopped.")
+        logging.info("%s stopped.", self.__class__.__name__)
 
     # ------------------------------------------------------------------
     # Properties used by other components
@@ -131,11 +125,11 @@ class PeerManager:
 
     @property
     def resolver_thread(self) -> Optional[threading.Thread]:
-        return self._discovery.resolver_thread
+        return None
 
     @property
     def discovered_peers(self) -> Sequence[Dict[str, object]]:
-        return self._discovery.peers
+        return []
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -178,16 +172,11 @@ class PeerManager:
                 logging.info("Laptop client stored last server IP: %s", peer_ip)
 
         pending_target = state.get_pending_activation_target()
-        if (
-            pending_target
-            and pending_target == peer_name
-            and not state.is_active()
-        ):
+        if pending_target and pending_target == peer_name and not state.is_active():
             logging.info("Reconnected to %s, resuming KVM", peer_name)
             state.set_active_client(sock)
             state.set_pending_activation_target(None)
             worker.activate_kvm(switch_monitor=worker.switch_monitor)
-
 
         logging.info("Client connected: %s (%s)", peer_name, connection.addr)
         return True
@@ -211,7 +200,12 @@ class PeerManager:
             logging.debug("Closed redundant connection to %s (%s)", peer_name, reason)
             return
 
-        suppress_switch_reasons = {"peer_connection_exit", "manager stop", "manual", "sender error"}
+        suppress_switch_reasons = {
+            "peer_connection_exit",
+            "manager stop",
+            "manual",
+            "sender error",
+        }
 
         if worker.settings.get("role") == "ado" and sock == worker.input_provider_socket:
             if state.is_active():
@@ -246,7 +240,7 @@ class PeerManager:
             state.set_pending_activation_target(None)
 
         if addr and worker._running:
-            worker._schedule_reconnect(addr[0], self._port)
+            logging.debug("Disconnected from %s (%s)", peer_name, reason)
 
     # ------------------------------------------------------------------
     # Messaging utilities
@@ -282,36 +276,21 @@ class PeerManager:
             return False
         return connection.send(message)
 
-    def handle_beacon_ip(self, ip_address: str) -> None:
-        """Handle a UDP beacon sender IP and trigger a connection if needed."""
-        if not ip_address or not self.is_running:
-            return
-        if ip_address == self._worker.local_ip:
-            return
-        with self._beacon_lock:
-            sockets = self._state.get_client_sockets()
-            for sock in sockets:
-                if sock.fileno() == -1:
-                    continue
-                if self._safe_peername(sock) == ip_address:
-                    return
-            self.connect_to_peer(ip_address, self._port)
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _accept_loop(self) -> None:
+    def _server_accept_loop(self) -> None:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         while self._running.is_set():
             try:
-                server_socket.bind(("", self._port))
+                server_socket.bind(("0.0.0.0", self._port))
                 break
             except OSError as exc:
                 logging.error("Port bind failed: %s. Retrying...", exc)
-                time.sleep(5)
+                time.sleep(5.0)
 
         server_socket.listen(5)
         server_socket.settimeout(1.0)
@@ -321,49 +300,33 @@ class PeerManager:
         while self._running.is_set():
             try:
                 client_sock, addr = server_socket.accept()
-                logging.debug(f"[Szerver] Bejövő kapcsolati kísérlet innen: {addr}")
+                logging.debug("[Server] Incoming connection from: %s", addr)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as exc:
+                if self._is_closed_socket_error(exc):
+                    break
+                logging.debug("Server accept loop error: %s", exc)
                 break
 
-            peer_ip = addr[0]
             secure_sock: Optional[socket.socket] = None
             try:
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 try:
-                    local_addr = ipaddress.ip_address(self._worker.local_ip)
-                    remote_addr = ipaddress.ip_address(peer_ip)
-                except ValueError:
-                    logging.warning(
-                        f"Érvénytelen IP-cím a bejövő kapcsolatnál: {peer_ip}"
+                    secure_sock = wrap_socket_server_side(
+                        client_sock, self._server_context
+                    )
+                except ssl.SSLError as exc:
+                    logging.error(
+                        "[Server] SSL error from %s: %s",
+                        addr,
+                        exc,
                     )
                     client_sock.close()
                     continue
 
-                if local_addr > remote_addr:
-                    logging.debug(
-                        f"[Szerver] Kapcsolat elfogadva {addr} felől, SSL kézfogás indítása..."
-                    )
-                    try:
-                        secure_sock = wrap_socket_server_side(
-                            client_sock, self._server_context
-                        )
-                    except ssl.SSLError as e:
-                        logging.error(
-                            f"[Szerver] SSL hiba a bejövő kapcsolatnál {addr} felől: {e}"
-                        )
-                        client_sock.close()
-                        continue
-
-                    secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    self._spawn_connection(secure_sock, addr)
-                else:
-                    logging.debug(
-                        f"[Szerver] Kapcsolat elutasítva {addr} felé (IP-cím szabály)."
-                    )
-                    client_sock.close()
-                    continue
+                secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._spawn_connection(secure_sock, addr)
             except Exception:
                 try:
                     if secure_sock is not None:
@@ -379,6 +342,54 @@ class PeerManager:
             pass
         self._listening_socket = None
 
+    def _client_connector_loop(self) -> None:
+        while self._running.is_set():
+            if self._has_server_connection():
+                time.sleep(2.0)
+                continue
+            secure_sock: Optional[socket.socket] = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                context = self._client_context
+                server_hostname = SERVER_IP
+                if self._is_literal_ip(SERVER_IP):
+                    context = self._client_context_no_hostname
+                    server_hostname = None
+                secure_sock = wrap_socket_client_side(
+                    sock,
+                    context,
+                    server_hostname=server_hostname,
+                )
+                secure_sock.connect((SERVER_IP, self._port))
+            except ssl.SSLError as exc:
+                logging.error("[Client] SSL error connecting to server: %s", exc)
+                try:
+                    if secure_sock is not None:
+                        secure_sock.close()
+                    else:
+                        sock.close()
+                except Exception:
+                    pass
+                time.sleep(2.0)
+                continue
+            except OSError as exc:
+                if self._should_wait_for_server(exc):
+                    logging.debug("Waiting for server...")
+                else:
+                    logging.error("[Client] Connection error: %s", exc)
+                try:
+                    if secure_sock is not None:
+                        secure_sock.close()
+                    else:
+                        sock.close()
+                except Exception:
+                    pass
+                time.sleep(2.0)
+                continue
+
+            self._spawn_connection(secure_sock, (SERVER_IP, self._port))
+
     def _spawn_connection(self, sock: socket.socket, addr) -> None:
         connection = PeerConnection(sock, addr, self, self._handle_incoming)
         connection.start()
@@ -388,107 +399,19 @@ class PeerManager:
             return
         self._message_callback(connection, data)
 
-    def _connection_manager_loop(self) -> None:
-        while self._running.is_set():
-            worker = self._worker
-            role = worker.settings.get("role")
-
-            peers = list(self._discovery.peers)
-            targets = {(peer["ip"], peer["port"]) for peer in peers}
-            if role in ("vevo", "input_provider"):
-                targets.add((FIXED_SERVER_IP, self._port))
-
-            if (
-                role == "vevo"
-                and worker.server_socket is None
-                and worker.last_server_ip
-            ):
-                logging.debug(
-                    "Auto-reconnecting to last server: %s", worker.last_server_ip
-                )
-                targets.add((worker.last_server_ip, self._port))
-
-            sockets = self._state.get_client_sockets()
-            connected_ips = {
-                peer_ip
-                for peer_ip in (
-                    self._safe_peername(s) for s in sockets if s.fileno() != -1
-                )
-                if peer_ip is not None
-            }
-
-            for ip, port in targets:
-                if ip == self._worker.local_ip and port == self._port:
-                    continue
-
-                already = ip in connected_ips
-                if already:
-                    continue
-
-                try:
-                    if ip != FIXED_SERVER_IP:
-                        local_addr = ipaddress.ip_address(self._worker.local_ip)
-                        remote_addr = ipaddress.ip_address(ip)
-                        if local_addr > remote_addr:
-                            continue
-                except ValueError:
-                    logging.warning(
-                        f"Érvénytelen IP-cím a kapcsolatkezelőben: {ip}"
-                    )
-                    continue
-
-                self.connect_to_peer(ip, port)
-
-            time.sleep(2.5)
-
-    def connect_to_peer(self, ip: str, port: int) -> None:
-        secure_sock: Optional[socket.socket] = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            try:
-                logging.debug(
-                    f"[Kliens] Kimenő kapcsolat indítása ide: {ip}:{port}"
-                )
-                context = self._client_context
-                server_hostname = ip
-                if self._is_literal_ip(ip):
-                    context = self._client_context_no_hostname
-                    server_hostname = None
-                    logging.debug(
-                        "[Kliens] TLS hosztnév-ellenőrzés kikapcsolva a %s címen",
-                        ip,
-                    )
-                secure_sock = wrap_socket_client_side(
-                    sock,
-                    context,
-                    server_hostname=server_hostname,
-                )
-            except ssl.SSLError as e:
-                logging.error(
-                    f"[Kliens] SSL hiba a kimenő kapcsolatnál {ip}:{port} felé: {e}"
-                )
-                sock.close()
-                return
-            secure_sock.connect((ip, port))
-            logging.debug(
-                f"[Kliens] Sikeres TCP & SSL kapcsolat felépítve ide: {ip}:{port}"
-            )
-        except Exception as exc:
-            logging.error(
-                f"[Kliens] Nem sikerült csatlakozni ide: {ip}:{port}. Hiba: {exc}"
-            )
-            try:
-                if secure_sock is not None:
-                    secure_sock.close()
-                else:
-                    sock.close()
-            except Exception:
-                pass
-            return
-
-        assert secure_sock is not None
-        self._spawn_connection(secure_sock, (ip, port))
+    def _has_server_connection(self) -> bool:
+        worker = self._worker
+        if worker.settings.get("role") == "ado":
+            return False
+        sock = getattr(worker, "server_socket", None)
+        if sock and sock.fileno() != -1:
+            return True
+        with self._connections_lock:
+            for conn in self._connections.values():
+                peer_ip = self._safe_peername(conn.socket)
+                if peer_ip == SERVER_IP:
+                    return True
+        return False
 
     @staticmethod
     def _is_literal_ip(value: str) -> bool:
@@ -501,7 +424,9 @@ class PeerManager:
     def _normalize_exclude(self, exclude_peer: Optional[Iterable]) -> set:
         if exclude_peer is None:
             return set()
-        if isinstance(exclude_peer, Iterable) and not isinstance(exclude_peer, (bytes, str)):
+        if isinstance(exclude_peer, Iterable) and not isinstance(
+            exclude_peer, (bytes, str)
+        ):
             return set(exclude_peer)
         return {exclude_peer}
 
@@ -517,3 +442,22 @@ class PeerManager:
             return sock.getpeername()[0]
         except Exception:
             return None
+
+    @staticmethod
+    def _is_closed_socket_error(exc: OSError) -> bool:
+        try:
+            if exc.errno == 10038:
+                return True
+        except AttributeError:
+            pass
+        return "10038" in str(exc)
+
+    @staticmethod
+    def _should_wait_for_server(exc: OSError) -> bool:
+        try:
+            if exc.errno in {10060, 10061}:
+                return True
+        except AttributeError:
+            pass
+        message = str(exc)
+        return "10060" in message or "10061" in message
