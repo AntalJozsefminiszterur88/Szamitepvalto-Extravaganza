@@ -13,6 +13,7 @@ BRAND_NAME = "UMKGL Solutions"
 # Hálózati beállítások
 SERVICE_TYPE = "_kvmswitch._tcp.local."
 SERVICE_NAME_PREFIX = "KVM Switch Adó"
+FIXED_SERVER_IP = "192.168.0.19"
 ALLOWED_SSIDS = [
     "Telekom-bbbe42",
     "Telekom-bbbe42-2",
