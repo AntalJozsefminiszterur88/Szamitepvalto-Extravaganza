@@ -30,7 +30,6 @@ from zeroconf import ServiceInfo, Zeroconf, IPVersion
 from kvm_core.monitor import MonitorController
 from kvm_core.diagnostics import DiagnosticsManager
 from kvm_core.network.peer_manager import PeerManager
-from kvm_core.network.udp_beacon import UDPBeaconBroadcaster, UDPBeaconListener
 from kvm_core.input.host_capture import HostInputCapture
 from kvm_core.input.provider import InputProvider
 from kvm_core.input.receiver import InputReceiver
@@ -231,8 +230,6 @@ class KVMOrchestrator(QObject):
         self._network_watchdog_thread: Optional[threading.Thread] = None
         self._network_watchdog_stop = threading.Event()
         self._network_services_active = False
-        self._udp_beacon_broadcaster: Optional[UDPBeaconBroadcaster] = None
-        self._udp_beacon_listener: Optional[UDPBeaconListener] = None
 
         if self.stability_monitor:
             self._register_core_monitoring()
@@ -1037,17 +1034,6 @@ class KVMOrchestrator(QObject):
                 self._heartbeat_thread.start()
 
             role = self.settings.get('role')
-            if role == 'ado' and self._udp_beacon_broadcaster is None:
-                self._udp_beacon_broadcaster = UDPBeaconBroadcaster(
-                    is_running=lambda: self._running,
-                )
-                self._udp_beacon_broadcaster.start()
-            if role == 'vevo' and self._udp_beacon_listener is None:
-                self._udp_beacon_listener = UDPBeaconListener(
-                    is_running=lambda: self._running,
-                    on_beacon=self.peer_manager.handle_beacon_ip,
-                )
-                self._udp_beacon_listener.start()
             self._network_watchdog_stop.clear()
             if role == 'vevo':
                 self._network_watchdog_thread = threading.Thread(

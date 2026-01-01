@@ -9,7 +9,7 @@ from typing import Callable, Dict, Iterable, Optional, Sequence
 import msgpack
 from PySide6.QtCore import QSettings
 
-from config.constants import APP_NAME, ORG_NAME, SERVICE_TYPE
+from config.constants import APP_NAME, FIXED_SERVER_IP, ORG_NAME, SERVICE_TYPE
 from kvm_core.network.discovery import ServiceDiscovery
 from kvm_core.network.peer_connection import PeerConnection
 from .secure_socket import *
@@ -395,6 +395,8 @@ class PeerManager:
 
             peers = list(self._discovery.peers)
             targets = {(peer["ip"], peer["port"]) for peer in peers}
+            if role in ("vevo", "input_provider"):
+                targets.add((FIXED_SERVER_IP, self._port))
 
             if (
                 role == "vevo"
