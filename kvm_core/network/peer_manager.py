@@ -426,10 +426,11 @@ class PeerManager:
                     continue
 
                 try:
-                    local_addr = ipaddress.ip_address(self._worker.local_ip)
-                    remote_addr = ipaddress.ip_address(ip)
-                    if local_addr > remote_addr:
-                        continue
+                    if ip != FIXED_SERVER_IP:
+                        local_addr = ipaddress.ip_address(self._worker.local_ip)
+                        remote_addr = ipaddress.ip_address(ip)
+                        if local_addr > remote_addr:
+                            continue
                 except ValueError:
                     logging.warning(
                         f"Érvénytelen IP-cím a kapcsolatkezelőben: {ip}"
