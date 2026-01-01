@@ -35,6 +35,7 @@ class MessageHandler:
         stop_input_provider_stream: Callable[[], None],
         simulate_provider_key_tap: Callable[..., None],
         get_input_provider_socket: Callable[[], Any],
+        set_input_provider_socket: Callable[[Any], None],
         state: KVMState,
         send_to_server: Callable[[dict], bool],
         get_device_name: Callable[[], str],
@@ -50,6 +51,7 @@ class MessageHandler:
         self._stop_input_provider_stream = stop_input_provider_stream
         self._simulate_provider_key_tap = simulate_provider_key_tap
         self._get_input_provider_socket = get_input_provider_socket
+        self._set_input_provider_socket = set_input_provider_socket
         self._state = state
         self._send_to_server = send_to_server
         self._get_device_name = get_device_name
@@ -151,8 +153,9 @@ class MessageHandler:
                         return
                     client_roles = self._state.get_client_roles()
                     if client_roles.get(peer_socket) == 'input_provider':
-                        logging.warning(
-                            "Input provider socket mismatch; routing event from %s",
+                        self._set_input_provider_socket(peer_socket)
+                        logging.info(
+                            "Auto-healed input provider socket for %s",
                             self._state.get_client_name(peer_socket, peer_socket),
                         )
                         self._handle_provider_event(data)

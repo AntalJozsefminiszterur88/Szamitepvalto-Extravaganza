@@ -279,7 +279,7 @@ class PeerManager:
     def get_socket_by_role(self, target_role: str) -> Optional[socket.socket]:
         client_roles = self._state.get_client_roles()
         for sock, role in client_roles.items():
-            if role == target_role:
+            if role == target_role and sock.fileno() != -1:
                 return sock
         return None
 
