@@ -384,6 +384,7 @@ class PeerManager:
                 role == "vevo"
                 and worker.server_socket is None
                 and worker.last_server_ip
+                and not targets
             ):
                 logging.debug(
                     "Auto-reconnecting to last server: %s", worker.last_server_ip
@@ -418,7 +419,22 @@ class PeerManager:
                     )
                     continue
 
-                self.connect_to_peer(ip, port)
+                try:
+                    self.connect_to_peer(ip, port)
+                except ConnectionRefusedError as exc:
+                    logging.info(
+                        "[Kliens] Kapcsolat elutasítva ide: %s:%s (%s)",
+                        ip,
+                        port,
+                        exc,
+                    )
+                except Exception as exc:
+                    logging.debug(
+                        "[Kliens] Kapcsolatkezelő hiba %s:%s (%s)",
+                        ip,
+                        port,
+                        exc,
+                    )
 
             time.sleep(2.5)
 
@@ -455,6 +471,18 @@ class PeerManager:
             logging.debug(
                 f"[Kliens] Sikeres TCP & SSL kapcsolat felépítve ide: {ip}:{port}"
             )
+        except ConnectionRefusedError as exc:
+            logging.info(
+                f"[Kliens] Kapcsolat elutasítva ide: {ip}:{port}. Hiba: {exc}"
+            )
+            try:
+                if secure_sock is not None:
+                    secure_sock.close()
+                else:
+                    sock.close()
+            except Exception:
+                pass
+            return
         except Exception as exc:
             logging.error(
                 f"[Kliens] Nem sikerült csatlakozni ide: {ip}:{port}. Hiba: {exc}"

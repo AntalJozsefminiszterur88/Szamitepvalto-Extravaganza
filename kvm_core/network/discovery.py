@@ -2,6 +2,7 @@ import logging
 import queue
 import socket
 import threading
+import time
 from typing import Callable, Dict, Iterable, List, Optional
 
 from zeroconf import ServiceBrowser
@@ -9,6 +10,8 @@ from zeroconf import ServiceBrowser
 
 class ServiceDiscovery:
     """Wrapper around Zeroconf service discovery for peer detection."""
+
+    _RETRY_INTERVAL = 2.5
 
     def __init__(
         self,
@@ -23,6 +26,7 @@ class ServiceDiscovery:
         self._local_port = local_port
         self._peers: Dict[str, Dict[str, object]] = {}
         self._queue: "queue.Queue[str]" = queue.Queue()
+        self._pending: Dict[str, Dict[str, float]] = {}
         self._lock = threading.Lock()
         self._browser: Optional[ServiceBrowser] = None
         self._resolver_thread: Optional[threading.Thread] = None
@@ -65,6 +69,7 @@ class ServiceDiscovery:
 
         with self._lock:
             self._peers.clear()
+            self._pending.clear()
 
         while True:
             try:
@@ -84,37 +89,73 @@ class ServiceDiscovery:
 
     def _resolver_loop(self) -> None:
         while self._running.is_set():
+            name = None
             try:
                 name = self._queue.get(timeout=0.5)
             except queue.Empty:
+                pass
+
+            if name:
+                with self._lock:
+                    pending = self._pending.setdefault(
+                        name, {"next_attempt": 0.0, "attempts": 0}
+                    )
+                    pending["next_attempt"] = 0.0
+
+            now = time.monotonic()
+            with self._lock:
+                due_names = [
+                    pending_name
+                    for pending_name, meta in self._pending.items()
+                    if meta["next_attempt"] <= now
+                ]
+
+            if not due_names:
                 continue
 
-            try:
-                info = self._zeroconf.get_service_info(
-                    self._service_type,
-                    name,
-                    3000,
-                )
-                if not info:
-                    continue
-
-                ip_address = self._extract_ipv4(info.addresses)
-                if not ip_address:
-                    continue
-
-                local_ip = self._local_ip_getter()
-                if ip_address == local_ip and info.port == self._local_port:
-                    with self._lock:
-                        self._peers.pop(name, None)
-                    continue
-
+            for pending_name in due_names:
+                if not self._running.is_set():
+                    break
+                success = self._attempt_resolve(pending_name)
                 with self._lock:
-                    self._peers[name] = {
-                        "ip": ip_address,
-                        "port": info.port,
-                    }
-            except Exception as exc:
-                logging.debug("Resolver failed for %s: %s", name, exc)
+                    meta = self._pending.get(pending_name)
+                    if meta is None:
+                        continue
+                    if success:
+                        self._pending.pop(pending_name, None)
+                    else:
+                        meta["attempts"] += 1
+                        meta["next_attempt"] = time.monotonic() + self._RETRY_INTERVAL
+
+    def _attempt_resolve(self, name: str) -> bool:
+        try:
+            info = self._zeroconf.get_service_info(
+                self._service_type,
+                name,
+                3000,
+            )
+            if not info:
+                return False
+
+            ip_address = self._extract_ipv4(info.addresses)
+            if not ip_address:
+                return False
+
+            local_ip = self._local_ip_getter()
+            if ip_address == local_ip and info.port == self._local_port:
+                with self._lock:
+                    self._peers.pop(name, None)
+                return True
+
+            with self._lock:
+                self._peers[name] = {
+                    "ip": ip_address,
+                    "port": info.port,
+                }
+            return True
+        except Exception as exc:
+            logging.debug("Resolver failed for %s: %s", name, exc)
+            return False
 
     @staticmethod
     def _extract_ipv4(addresses: Iterable[bytes]) -> Optional[str]:
@@ -139,4 +180,4 @@ class ServiceDiscovery:
         def remove_service(self, zeroconf, type_, name):
             with self._discovery._lock:
                 self._discovery._peers.pop(name, None)
-
+                self._discovery._pending.pop(name, None)
