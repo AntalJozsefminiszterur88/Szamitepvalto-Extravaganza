@@ -1036,6 +1036,15 @@ class KVMOrchestrator(QObject):
             role = self.settings.get('role')
             self._network_watchdog_stop.clear()
             if role == 'vevo':
+                register_ok = self._register_service()
+                self.peer_manager.start()
+                if self.clipboard_manager:
+                    self.clipboard_manager.start()
+                self._network_services_active = True
+                if not register_ok:
+                    logging.warning(
+                        "Zeroconf registration failed; running without service advertisement"
+                    )
                 self._network_watchdog_thread = threading.Thread(
                     target=self._network_watchdog_loop,
                     daemon=True,
