@@ -90,7 +90,7 @@ class ButtonInputManager:
             Key.f16: lambda: self._handle_hdmi1("keyboard F16"),
             Key.f17: lambda: self._handle_hdmi2("keyboard F17"),
             Key.f21: lambda: self._handle_monitor_toggle("keyboard F21"),
-            Key.f22: lambda: self._forward_or_emit_host_key(Key.f22, "keyboard F22"),
+            Key.f22: lambda: self._force_send_f22("keyboard F22"),
         }
         self._serial_action_map = {
             "KEY_Asztal": lambda: self._handle_asztal("pico KEY_Asztal"),
@@ -102,7 +102,7 @@ class ButtonInputManager:
             "KEY_Hang_1": lambda: self._forward_or_emit_host_key(Key.f18, "pico KEY_Hang_1"),
             "KEY_Hang_2": lambda: self._forward_or_emit_host_key(Key.f19, "pico KEY_Hang_2"),
             "KEY_Hang_3": lambda: self._forward_or_emit_host_key(Key.f20, "pico KEY_Hang_3"),
-            "KEY_Nemitas": lambda: self._forward_or_emit_host_key(Key.f22, "pico KEY_Nemitas"),
+            "KEY_Nemitas": lambda: self._force_send_f22("pico KEY_Nemitas"),
             # Legacy numeric protocol compatibility
             "1": lambda: self._handle_asztal("pico legacy 1"),
             "2": lambda: self._handle_laptop("pico legacy 2"),
@@ -169,6 +169,14 @@ class ButtonInputManager:
     def _handle_monitor_toggle(self, source: str) -> None:
         logging.info("Monitor power toggle requested by %s", source)
         self.worker.toggle_monitor_power()
+
+    def _force_send_f22(self, source: str) -> None:
+        logging.info("Direct F22 trigger requested by %s", source)
+        try:
+            if self.worker.force_send_f22_to_desktop():
+                return
+        except AttributeError:
+            logging.warning("Worker does not support direct F22 trigger")
 
     def _forward_or_emit_host_key(self, key: Key, source: str) -> None:
         """Try forwarding the key press to the desktop provider, fall back locally."""

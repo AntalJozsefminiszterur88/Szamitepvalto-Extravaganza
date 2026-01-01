@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import date
 from typing import Any, Callable, Dict, Optional
+
+from pynput import keyboard
 
 from kvm_core.clipboard import ClipboardManager
 from kvm_core.input.receiver import InputReceiver
@@ -168,6 +171,11 @@ class MessageHandler:
                     return
                 if cmd == 'stop_stream':
                     self._stop_input_provider_stream()
+                    return
+                if cmd == 'force_f22_trigger':
+                    self._input_receiver.keyboard_controller.press(keyboard.Key.f22)
+                    time.sleep(0.05)
+                    self._input_receiver.keyboard_controller.release(keyboard.Key.f22)
                     return
                 if cmd == 'host_key_tap':
                     key_type = data.get('key_type', 'vk')
