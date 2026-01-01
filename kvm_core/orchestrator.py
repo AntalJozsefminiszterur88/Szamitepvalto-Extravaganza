@@ -26,7 +26,6 @@ else:
     _USER32 = None
 from pynput import keyboard
 from kvm_core.monitor import MonitorController
-from kvm_core.diagnostics import DiagnosticsManager
 from kvm_core.network.peer_manager import PeerManager
 from kvm_core.input.host_capture import HostInputCapture
 from kvm_core.input.provider import InputProvider
@@ -204,11 +203,6 @@ class KVMOrchestrator(QObject):
             stability_monitor=self.stability_monitor,
         )
 
-        self.diagnostics_manager = DiagnosticsManager(
-            orchestrator=self,
-            state=self.state,
-        )
-
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_stop = threading.Event()
         self._session_start_time = time.monotonic()
@@ -334,7 +328,6 @@ class KVMOrchestrator(QObject):
         register('connection_manager', lambda: self.peer_manager.connection_manager_thread)
         register('resolver', lambda: self.peer_manager.resolver_thread)
         register('connection', lambda: self.connection_thread)
-        register('heartbeat', lambda: self.diagnostics_manager.heartbeat_thread)
         register('pico', lambda: self.pico_thread)
 
     def _register_clipboard_monitoring(self) -> None:
@@ -580,10 +573,6 @@ class KVMOrchestrator(QObject):
         if self._network_services_active:
             return
         self.peer_manager.start()
-        if self.clipboard_manager:
-            self.clipboard_manager.start()
-            if self.settings.get('role') == 'ado':
-                self.start_main_hotkey_listener()
         self._network_services_active = True
 
     def _pause_network_services(self) -> None:
@@ -815,10 +804,6 @@ class KVMOrchestrator(QObject):
             self.deactivate_kvm(switch_monitor=False, reason="stop() called")  # Leállításkor ne váltson monitort
             logging.info("KVM session deactivated.")
 
-        logging.info("Stopping DiagnosticsManager...")
-        self.diagnostics_manager.stop()
-        logging.info("DiagnosticsManager stopped.")
-
         logging.info("Stopping pynput listeners...")
         for listener in self.pynput_listeners:
             try:
@@ -920,8 +905,6 @@ class KVMOrchestrator(QObject):
                 name="MsgProcessor",
             )
             self.message_processor_thread.start()
-
-            self.diagnostics_manager.start()
 
             if self._heartbeat_thread is None or not self._heartbeat_thread.is_alive():
                 self._heartbeat_thread = threading.Thread(

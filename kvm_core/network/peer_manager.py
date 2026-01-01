@@ -1,4 +1,3 @@
-import ipaddress
 import logging
 import socket
 import ssl
@@ -7,9 +6,8 @@ import time
 from typing import Callable, Dict, Iterable, Optional, Sequence
 
 import msgpack
-from PySide6.QtCore import QSettings
 
-from config.constants import APP_NAME, DEFAULT_PORT, ORG_NAME, SERVER_IP
+from config.constants import DEFAULT_PORT, SERVER_IP
 from kvm_core.network.peer_connection import PeerConnection
 from kvm_core.network.secure_socket import (
     create_client_context,
@@ -37,10 +35,12 @@ class PeerManager:
         self._port = port
         self._device_name = device_name
         self._message_callback = message_callback
+
         self._running = threading.Event()
         self._listening_socket: Optional[socket.socket] = None
         self.accept_thread: Optional[threading.Thread] = None
         self.connection_manager_thread: Optional[threading.Thread] = None
+
         self._connections: Dict[socket.socket, PeerConnection] = {}
         self._connections_lock = threading.Lock()
 
@@ -67,14 +67,14 @@ class PeerManager:
 
         if self.is_server:
             self.accept_thread = threading.Thread(
-                target=self._server_accept_loop,
+                target=self._server_loop,
                 daemon=True,
                 name="AcceptThread",
             )
             self.accept_thread.start()
         else:
             self.connection_manager_thread = threading.Thread(
-                target=self._client_connector_loop,
+                target=self._client_loop,
                 daemon=True,
                 name="ClientConnector",
             )
@@ -85,17 +85,11 @@ class PeerManager:
         if not self._running.is_set():
             logging.info("%s stopped.", self.__class__.__name__)
             return
+
         self._running.clear()
 
         if self._listening_socket:
-            try:
-                self._listening_socket.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
-            try:
-                self._listening_socket.close()
-            except Exception:
-                pass
+            self._safe_close(self._listening_socket)
             self._listening_socket = None
 
         for conn in list(self._connections.values()):
@@ -158,18 +152,6 @@ class PeerManager:
             logging.info("Laptop connected to controller: %s", peer_name)
             if hasattr(worker, "_on_server_connected"):
                 worker._on_server_connected()
-            peer_ip = self._safe_peername(sock) or (
-                connection.addr[0] if isinstance(connection.addr, tuple) else None
-            )
-            if (
-                peer_ip
-                and peer_ip != worker.last_server_ip
-                and peer_ip != worker.local_ip
-            ):
-                worker.last_server_ip = peer_ip
-                settings_store = QSettings(ORG_NAME, APP_NAME)
-                settings_store.setValue("network/last_server_ip", peer_ip)
-                logging.info("Laptop client stored last server IP: %s", peer_ip)
 
         pending_target = state.get_pending_activation_target()
         if pending_target and pending_target == peer_name and not state.is_active():
@@ -249,10 +231,7 @@ class PeerManager:
         connection = self._resolve_connection(peer)
         if not connection:
             if isinstance(peer, socket.socket):
-                try:
-                    peer.close()
-                except Exception:
-                    pass
+                self._safe_close(peer)
             return
         try:
             connection.stop()
@@ -284,21 +263,13 @@ class PeerManager:
         return None
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal loops
     # ------------------------------------------------------------------
-    def _server_accept_loop(self) -> None:
+    def _server_loop(self) -> None:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-        while self._running.is_set():
-            try:
-                server_socket.bind(("0.0.0.0", self._port))
-                break
-            except OSError as exc:
-                logging.error("Port bind failed: %s. Retrying...", exc)
-                time.sleep(5.0)
-
+        server_socket.bind(("0.0.0.0", self._port))
         server_socket.listen(5)
         server_socket.settimeout(1.0)
         self._listening_socket = server_socket
@@ -319,45 +290,40 @@ class PeerManager:
             secure_sock: Optional[socket.socket] = None
             try:
                 client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                try:
-                    secure_sock = wrap_socket_server_side(
-                        client_sock, self._server_context
-                    )
-                except ssl.SSLError as exc:
-                    logging.error(
-                        "[Server] SSL error from %s: %s",
-                        addr,
-                        exc,
-                    )
-                    client_sock.close()
-                    continue
-
+                secure_sock = wrap_socket_server_side(client_sock, self._server_context)
                 secure_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 self._spawn_connection(secure_sock, addr)
+            except ssl.SSLError as exc:
+                logging.error("[Server] SSL error from %s: %s", addr, exc)
+                self._safe_close(client_sock)
             except Exception:
-                try:
-                    if secure_sock is not None:
-                        secure_sock.close()
-                    else:
-                        client_sock.close()
-                except Exception:
-                    pass
+                self._safe_close(secure_sock or client_sock)
 
-        try:
-            server_socket.close()
-        except Exception:
-            pass
+        self._safe_close(server_socket)
         self._listening_socket = None
 
-    def _client_connector_loop(self) -> None:
+    def _client_loop(self) -> None:
         while self._running.is_set():
-            if self._has_server_connection():
+            if self._has_connection_to_server():
                 time.sleep(2.0)
                 continue
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            try:
+                sock.connect((SERVER_IP, self._port))
+            except OSError as exc:
+                if self._should_wait_for_server(exc):
+                    logging.debug("Waiting for server...")
+                else:
+                    logging.error("[Client] Connection error: %s", exc)
+                self._safe_close(sock)
+                time.sleep(2.0)
+                continue
+
             secure_sock: Optional[socket.socket] = None
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 context = self._client_context
                 server_hostname = SERVER_IP
                 if self._is_literal_ip(SERVER_IP):
@@ -368,30 +334,9 @@ class PeerManager:
                     context,
                     server_hostname=server_hostname,
                 )
-                secure_sock.connect((SERVER_IP, self._port))
             except ssl.SSLError as exc:
                 logging.error("[Client] SSL error connecting to server: %s", exc)
-                try:
-                    if secure_sock is not None:
-                        secure_sock.close()
-                    else:
-                        sock.close()
-                except Exception:
-                    pass
-                time.sleep(2.0)
-                continue
-            except OSError as exc:
-                if self._should_wait_for_server(exc):
-                    logging.debug("Waiting for server...")
-                else:
-                    logging.error("[Client] Connection error: %s", exc)
-                try:
-                    if secure_sock is not None:
-                        secure_sock.close()
-                    else:
-                        sock.close()
-                except Exception:
-                    pass
+                self._safe_close(sock)
                 time.sleep(2.0)
                 continue
 
@@ -406,7 +351,7 @@ class PeerManager:
             return
         self._message_callback(connection, data)
 
-    def _has_server_connection(self) -> bool:
+    def _has_connection_to_server(self) -> bool:
         worker = self._worker
         if worker.settings.get("role") == "ado":
             return False
@@ -415,20 +360,12 @@ class PeerManager:
             return True
         with self._connections_lock:
             for conn in self._connections.values():
-                peer_ip = self._safe_peername(conn.socket)
-                if peer_ip == SERVER_IP:
+                if self._safe_peername(conn.socket) == SERVER_IP:
                     return True
         return False
 
     @staticmethod
-    def _is_literal_ip(value: str) -> bool:
-        try:
-            ipaddress.ip_address(value)
-        except ValueError:
-            return False
-        return True
-
-    def _normalize_exclude(self, exclude_peer: Optional[Iterable]) -> set:
+    def _normalize_exclude(exclude_peer: Optional[Iterable]) -> set:
         if exclude_peer is None:
             return set()
         if isinstance(exclude_peer, Iterable) and not isinstance(
@@ -449,6 +386,39 @@ class PeerManager:
             return sock.getpeername()[0]
         except Exception:
             return None
+
+    @staticmethod
+    def _safe_close(sock: Optional[socket.socket]) -> None:
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError as exc:
+            try:
+                if exc.errno != 10038 and "10038" not in str(exc):
+                    pass
+            except AttributeError:
+                pass
+        except Exception:
+            pass
+        try:
+            sock.close()
+        except OSError as exc:
+            try:
+                if exc.errno != 10038 and "10038" not in str(exc):
+                    pass
+            except AttributeError:
+                pass
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_literal_ip(value: str) -> bool:
+        try:
+            socket.inet_aton(value)
+        except OSError:
+            return False
+        return True
 
     @staticmethod
     def _is_closed_socket_error(exc: OSError) -> bool:
