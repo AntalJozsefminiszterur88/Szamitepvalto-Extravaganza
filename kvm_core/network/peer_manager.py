@@ -42,6 +42,7 @@ class PeerManager:
         self.connection_manager_thread: Optional[threading.Thread] = None
         self._connections: Dict[socket.socket, PeerConnection] = {}
         self._connections_lock = threading.Lock()
+        self._beacon_lock = threading.Lock()
 
         role = worker.settings.get("role")
         self._server_context = None
@@ -280,6 +281,21 @@ class PeerManager:
         if connection is None:
             return False
         return connection.send(message)
+
+    def handle_beacon_ip(self, ip_address: str) -> None:
+        """Handle a UDP beacon sender IP and trigger a connection if needed."""
+        if not ip_address or not self.is_running:
+            return
+        if ip_address == self._worker.local_ip:
+            return
+        with self._beacon_lock:
+            sockets = self._state.get_client_sockets()
+            for sock in sockets:
+                if sock.fileno() == -1:
+                    continue
+                if self._safe_peername(sock) == ip_address:
+                    return
+            self.connect_to_peer(ip_address, self._port)
 
     # ------------------------------------------------------------------
     # Internal helpers
