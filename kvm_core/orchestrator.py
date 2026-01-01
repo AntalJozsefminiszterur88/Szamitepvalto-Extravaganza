@@ -183,6 +183,9 @@ class KVMOrchestrator(QObject):
         else:
             logging.info("Shared clipboard sync is temporarily disabled.")
 
+        def _update_input_provider_socket(sock) -> None:
+            self.input_provider_socket = sock
+
         self.message_handler = MessageHandler(
             get_role=lambda: self.settings.get('role'),
             toggle_client_control=self.toggle_client_control,
@@ -193,6 +196,7 @@ class KVMOrchestrator(QObject):
             stop_input_provider_stream=self._stop_input_provider_stream,
             simulate_provider_key_tap=self._simulate_provider_key_tap,
             get_input_provider_socket=lambda: self.input_provider_socket,
+            set_input_provider_socket=_update_input_provider_socket,
             state=self.state,
             send_to_server=self._send_to_server,
             get_device_name=lambda: self.device_name,
@@ -439,6 +443,7 @@ class KVMOrchestrator(QObject):
             logging.warning("Input provider is not connected; cannot force F22 trigger")
             return False
         payload = {"command": "force_f22_trigger"}
+        logging.info("Sending force F22 trigger to input provider")
         if not self.peer_manager.send_to_peer(sock, payload):
             logging.warning("Failed to send force F22 trigger to input provider")
             return False
